@@ -1,34 +1,41 @@
 """facts/auth/admin.py — an admin grant naming a user. Requires that user's
 membership offer, so a grant can never outrun the membership it elevates, and
-(wave-2) a detached signature over the grant fact itself — the same one-atom
-seam as auth.user, reusing auth.signature with the grant's own id as target.
-grant signs the fact with the local signer secret and admits both."""
-from kernel import Atom, Exact, NEED, OFFER, Out, REQUIRE, SELF, encode, fact, now, ts_atom
+binds authority the same way the rest of the chain does: the grant is valid only
+if the key that SIGNED it (b"pk" context) is the founder root (b"root"). So a
+random key cannot mint an admin any more than it can mint a member.
+
+Simplest honest rule (stated): only the founder grants admin. Delegating to
+existing admins is one more value-compare against gathered admin keys, not new
+machinery — kept out here to stay low-LOC."""
+from kernel import (Atom, Exact, NEED, OFFER, Out, REQUIRE, SELF, by, encode,
+                    fact, now, ts_atom)
 from facts.auth import local_signer_secret, signature
 
 TAG = b"auth.admin"
 
 # SHAPE — the canonical atom set; the only place atoms are chosen.
-def admin(workspace_id, user_id, pk, t):
+def admin(workspace_id, user_id, t):
     return fact(TAG, ts_atom(t, workspace_id),
                 Atom(NEED, b"member", workspace_id, Exact(user_id), effect=REQUIRE),
-                Atom(NEED, b"sig", workspace_id, SELF, effect=REQUIRE),
-                Atom(OFFER, b"admin", workspace_id, Exact(user_id)),
-                Atom(OFFER, b"grantor", workspace_id, SELF, pk))
+                Atom(NEED, b"root", b"auth", Exact(workspace_id), effect=REQUIRE),
+                Atom(NEED, b"pk", workspace_id, SELF, effect=REQUIRE),
+                Atom(OFFER, b"admin", workspace_id, Exact(user_id)))
 
 # EXTRACT — content-pure: (durable, shareable).
 def extract(f): return True, True
 
 # PROJECT — the only place this family's meaning lives.
-def project(f, ctx, sl):
+def project(f, ctx, sl):                 # the granter's signer key must be the founder root
+    blessed = {r[2].value for r in by(ctx, b"root")}
+    if not blessed & {r[2].value for r in by(ctx, b"pk")}: return Out("Invalid")
     return Out(offers=tuple(a for a in f.atoms if a.role == b"admin"))
 
 # COMMANDS — build a fact, admit it, stop.
 def grant(node, workspace_id, user_id, t):
-    key = local_signer_secret.current(node)
-    if not key: raise RuntimeError("no local signer key: run auth.local_signer_secret.keygen first")
-    sk, pk = key
-    aid = node.admit(encode(admin(workspace_id, user_id, pk, t)))
+    local = local_signer_secret.current(node)
+    if not local: raise RuntimeError("no local signer key: run auth.local_signer_secret.keygen first")
+    sk, pk = local
+    aid = node.admit(encode(admin(workspace_id, user_id, t)))
     signature.attest(node, workspace_id, sk, pk, aid, t)
     return aid
 

@@ -7,8 +7,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import ed25519 as e
 from kernel import Node, encode, fact, fact_id, ts_atom
 from facts import ROOT
-from facts.auth import local_signer_secret, signature as sigmod, user as usermod
+from facts.auth import signature as sigmod, user as usermod, workspace as wsmod
 from facts.auth.workspace import workspace
+from facts.auth.founder import founder
 from facts.auth.user import user
 from facts.auth.signature import signature
 
@@ -44,10 +45,14 @@ def test_roundtrip_and_bad_inputs():
 
 WS = workspace(b"acme", 1)
 WID = fact_id(WS)
-SK, PK = e.keygen(bytes.fromhex(VECTORS[0][0]))
+SK, PK = e.keygen(bytes.fromhex(VECTORS[0][0]))      # PK is the founder root of WS in these tests
 
-def _member(name, t):                                # user fact, its id, its signature
-    u = user(WID, name, PK, t); uid = fact_id(u)
+def _founder(t):                                     # the root fact + its self-signature
+    fo = founder(WID, PK, t); fid = fact_id(fo)
+    return fo, signature(WID, PK, fid, e.sign(SK, fid), t)
+
+def _member(name, t):                                # founder-path user, its id, its signature by PK
+    u = user(WID, name, PK, None, t); uid = fact_id(u)
     return u, uid, signature(WID, PK, uid, e.sign(SK, uid), t)
 
 def test_tampered_signature_is_inert_at_gate():
@@ -69,19 +74,23 @@ def test_malformed_signature_never_crashes_the_gate():
 
 def test_user_parks_until_signature_lands_either_order():
     u, uid, s = _member(b"al", 3)
-    n = Node(ROOT); n.admit(encode(WS)); n.run()
+    fo, fs = _founder(2)                               # the root that blesses PK must be present
+    def rooted(node):
+        for b in (encode(WS), encode(fo), encode(fs)): node.admit(b)
+        node.run()
+    n = Node(ROOT); rooted(n)
     n.admit(encode(u)); n.run()
-    assert n.memo[uid] == "Parked"                    # Require b"sig" unmet
+    assert n.memo[uid] == "Parked"                    # Require b"pk" (its signature) unmet
     n.admit(encode(s)); n.run()
-    assert n.memo[uid] == "Valid"                     # signature wakes it
-    m = Node(ROOT); m.admit(encode(WS)); m.run()      # reverse order: signature first
+    assert n.memo[uid] == "Valid"                     # signature wakes it; signer PK == root
+    m = Node(ROOT); rooted(m)                          # reverse order: signature first
     m.admit(encode(s)); m.run(); m.admit(encode(u)); m.run()
     assert m.memo[uid] == "Valid"
 
 def test_replay_never_reverifies():
-    n = Node(ROOT); n.admit(encode(WS)); n.run()
-    local_signer_secret.keygen(n, 2); n.run()
-    uid = usermod.join(n, WID, b"al", 3); n.run()
+    n = Node(ROOT)
+    wid = wsmod.create(n, b"acme", 1); n.run()        # workspace + founder root + its signature
+    uid = usermod.join(n, wid, b"al", 3); n.run()     # founder self-joins with the rooted local key
     assert n.memo[uid] == "Valid"
     calls, orig = [], sigmod.verify
     sigmod.verify = lambda *a: (calls.append(1), orig(*a))[1]

@@ -87,16 +87,57 @@ reconciliation sort key and a retention input, never an authority proof.
 A fact without one promotes rows at `ts = 0`.
 
 Signatures are detached facts (`auth.signature`): an ordinary fact offering
-`b"sig"` at a target fact's id, carrying the signer's public key and a real
-Ed25519 signature. It self-checks at the admission gate over exactly the
+`b"pk"` (the signer's public key) and `b"sig"` at a target fact's id, carrying a
+real Ed25519 signature. It self-checks at the admission gate over exactly the
 32-byte target id — the id IS the whole canonical fact, so signing the id
 covers everything, and wrong math is a falsy check: an inert miss, never a bad
-fact. Membership Requires such an offer (`auth.user`, `auth.admin`), so a fact
-only validates once its signature lands. Verification runs exactly once, at
-first admission; replay loads from the trusted durable file with the check
-skipped — those bytes passed already. Tampering with the local file is a
-local-integrity problem, not a protocol one: bytes from outside enter only
-through the gate.
+fact. A signed fact Requires the `b"pk"` offer at its own id, so it only
+validates once its signature lands — and the signer key is now in the
+projector's context. The gate proves only that SOME key signed; binding that
+key to workspace authority is a value-compare in the target's PROJECT (see
+Authority). Verification runs exactly once, at first admission; replay loads
+from the trusted durable file with the check skipped — those bytes passed
+already. Tampering with the local file is a local-integrity problem, not a
+protocol one: bytes from outside enter only through the gate.
+
+## Authority
+
+A signature proves a key signed a fact; authority proves that key was allowed
+to. The `auth` families make membership a chain that every fact climbs, by
+value-compare, to one root — closing the gap where any key could mint a member.
+
+The root is a key, and the `auth.workspace` id is a pure function of its name so
+it cannot carry one; `auth.founder` is the separate root fact. It declares the
+founder pk (`b"root"`) and Requires its own signature by that same pk — you only
+root a key you hold. `workspace.create` emits it alongside the workspace, so the
+creator founds the space. (Pinning is trust-on-first-use: a keyless workspace id
+can't forbid a rival `founder` fact, but a member validates only against a root
+it sees, and legitimately-invited members chain to the founder whose key signed
+their invite — a rival root roots only its own disjoint tree. This is the one
+deliberate deviation from poc-10, where the workspace id embeds the founder key.)
+
+The chain is one binding, applied per family: **the pk that signed a fact must
+equal a pk the authority chain blessed.** Each fact Requires its own `b"pk"`
+(who signed me) and Requires or Watches the offers that carry the blessed pk;
+PROJECT intersects the two value sets and returns `Out("Invalid")` on no match —
+a real refusal, distinct from parking on a not-yet-arrived signature.
+
+- `auth.user_invite` blesses a fresh invite pk (`b"invite"` at its own id); valid
+  iff signed by the founder root or an existing member key (`b"key"`, the
+  rendezvous where every member offers its own key). The invite secret is the
+  link, carried out-of-band.
+- `auth.user` is membership *and* invite acceptance in one fact: it offers the
+  member's own pk, and is valid iff its signer equals either the founder root
+  (the founder self-joins) or the one invite it names by id (a joiner signs the
+  membership with the invite key; the invite blessed that key). From then on the
+  member signs with their own key, now a blessed `b"key"`.
+- `auth.admin` grants admin to a named member; valid iff signed by the founder
+  root (only the founder grants admin — the simplest honest rule).
+- `auth.device_invite` / `auth.device` are the same two shapes for endpoints: a
+  member blesses a device key; the device joins by signing with it.
+
+Because each fact Requires its blesser, the sync closure ships the whole chain
+with any fact it authorizes, and a peer re-derives every verdict itself.
 
 ## Extraction and Durability
 
