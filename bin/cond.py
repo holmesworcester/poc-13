@@ -12,20 +12,14 @@ bounded per-peer outboxes, select-gated non-blocking writes."""
 import errno, os, select, signal, socket, sys, time
 BIN = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [BIN, os.path.dirname(BIN)]
-from kernel import Node, _rd, frame
+from kernel import Node, Store, _rd, frame
 from facts import ROOT
-from con import load
+from con import flush, load
 
 BOUND = 64                               # admits per peer per turn; engine drain bound
 OUTCAP = 1 << 20                         # per-peer outbox byte cap: overflow stays unsent
 
-def flush(node, db, flushed):            # append newly-durable facts to the db file
-    if len(flushed) == len(node.durable): return
-    with open(db, "ab") as f:
-        for fid, fb in node.durable.items():
-            if fid not in flushed: f.write(frame(fb)); flushed.add(fid)
-
-def serve(node, s, db, flushed):         # one framed verb request per connection
+def serve(node, s, store, flushed):      # one framed verb request per connection
     try:
         s.settimeout(1); b = b""
         while (c := s.recv(65536)): b += c           # client shut down its write side
@@ -33,7 +27,7 @@ def serve(node, s, db, flushed):         # one framed verb request per connectio
         while i < len(b): a, i = _rd(b, i); args.append(a.decode())
         *segs, verb = path.decode().split(".")
         out = getattr(ROOT.resolve([x.encode() for x in segs]), "CLI", {})[verb](node, *args)
-        node.run(); flush(node, db, flushed)         # durable before the reply
+        node.run(); flush(node, store, flushed)      # durable before the reply
         s.sendall(frame(b"+" + (out or "").encode()))
     except Exception as e:
         try: s.sendall(frame(b"-" + f"{type(e).__name__}: {e}".encode()))
@@ -65,7 +59,8 @@ def main(db, *argv):
         if a == "--listen": listen = next(it)
         elif a == "--peer": peers.append(next(it))
         else: sys.exit(f"unknown arg: {a}")
-    node = Node(ROOT); load(node, db); flushed = set(node.durable)
+    store = Store(db)                    # daemon full-loads: residency is its job
+    node = Node(ROOT); load(node, store); flushed = set(node.durable)
     sp = db + ".sock"
     if os.path.exists(sp): os.unlink(sp)
     usock = socket.socket(socket.AF_UNIX); usock.bind(sp); usock.listen(8)
@@ -86,7 +81,7 @@ def main(db, *argv):
             work = False
             # HOST IN — accept + read clients and peer frames; admit bounded.
             for s in r:
-                if s is usock: serve(node, s.accept()[0], db, flushed); work = True
+                if s is usock: serve(node, s.accept()[0], store, flushed); work = True
                 elif s is tsock:
                     try: c = s.accept()[0]; c.setblocking(False); conns[c] = b""
                     except OSError: pass
@@ -102,8 +97,8 @@ def main(db, *argv):
                 conns[s] = b; work |= n > 0
             # ENGINE DRAIN — bounded; leftover frontier is next turn's work.
             node.turn(BOUND); work |= bool(node.frontier)
-            # HOST OUT — flush new durables to the file, pump per-peer outboxes.
-            flush(node, db, flushed)
+            # HOST OUT — flush new durables to the db, pump per-peer outboxes.
+            flush(node, store, flushed)
             for addr, p in P.items(): work |= pump(node, addr, p, w)
     finally:
         usock.close(); os.unlink(sp)

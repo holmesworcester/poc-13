@@ -1,5 +1,6 @@
 """Black-box tests: drive bin/con.py one process per command. Every
-invocation replays the dumb file, so these also exercise the crash story."""
+invocation hydrates from the db on demand, so these also exercise the
+crash-and-demand story."""
 import os, subprocess, sys, tempfile
 
 CON = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin", "con.py")

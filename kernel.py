@@ -19,7 +19,7 @@ Stand-in: BLAKE2b-256 for BLAKE3-256 (stdlib has no BLAKE3).
 from collections import deque
 from dataclasses import dataclass, field, replace
 from itertools import chain
-import hashlib, time
+import hashlib, sqlite3, time
 
 H = lambda b: hashlib.blake2b(b, digest_size=32).digest()
 now = lambda: int(time.time())           # host convenience; never engine input
@@ -149,39 +149,63 @@ def window(lo=0, hi=2**64 - 1, budget=2**32 - 1, order=0):
 _window = lambda v: (int.from_bytes(v[:8], "little"), int.from_bytes(v[8:16], "little"),
                      int.from_bytes(v[16:20], "little"), v[20])
 
+_t8 = lambda t: t.to_bytes(8, "big")     # u64 ts as blob: memcmp order, no i64 overflow
+
 class Store:
-    """The durable index: persisted facts not yet resident (cold), keyed by
-    fid, plus one materialized offer row per atom under its (role, scope) key.
-    Outside the trust boundary — the host feeds it frames, and every pull
-    re-enters through checked admission, so wrong bytes are a miss. Popping a
-    pulled fact from cold is the per-fact dedup: re-scanning a window never
-    delivers the same owner twice."""
+    """The db: `facts(fid, bytes)` — the dumb table, canonical fact bytes and
+    nothing else — is the one durable authority; `atoms` is a derived match
+    index (one materialized offer row per atom, rebuildable from facts); TEMP
+    `hot` is this session's delivered set, the per-fact dedup that makes a
+    window re-scan never deliver the same owner twice. Outside the trust
+    boundary — every pull re-enters through checked admission, so wrong
+    bytes are a miss. The atom coverage relation is the one WHERE clause in
+    pull(); kernel `covers` is its spec (mirror-tested)."""
 
-    def __init__(self):
-        self.ids, self.cold, self.idx = set(), {}, {}   # all fids ; fid -> bytes ; key -> rows
+    def __init__(self, path=":memory:"):
+        self.db = sqlite3.connect(path)
+        self.db.executescript("""
+          CREATE TABLE IF NOT EXISTS facts(fid BLOB PRIMARY KEY, bytes BLOB) WITHOUT ROWID;
+          CREATE TABLE IF NOT EXISTS atoms(fid BLOB, ts BLOB, role BLOB, scope BLOB,
+                                           ex INT, lo BLOB, hi BLOB);
+          CREATE INDEX IF NOT EXISTS match_ix ON atoms(role, scope, lo, ts);
+          CREATE TEMP TABLE hot(fid BLOB PRIMARY KEY);""")
 
-    def add(self, fb):                   # checked load: bad bytes are a miss
+    def add(self, fb, hot=False):        # checked load: bad bytes are a miss
         try: f = decode(fb)
         except Exception: return
         fid = fact_id(f)
-        if fid in self.ids: return
-        self.ids.add(fid); self.cold[fid] = fb
-        for a in f.atoms:
-            if a.kind == OFFER:
-                m = mat(a, fid)
-                self.idx.setdefault((m.role, m.scope), []).append((ts_of(f), fid, m))
+        if not self.db.execute("INSERT OR IGNORE INTO facts VALUES(?,?)", (fid, fb)).rowcount:
+            return                       # already stored: atoms are already indexed
+        if hot: self.db.execute("INSERT OR IGNORE INTO hot VALUES(?)", (fid,))
+        self.db.executemany("INSERT INTO atoms VALUES(?,?,?,?,?,?,?)",
+            [(fid, _t8(ts_of(f)), m.role, m.scope, m.target[0] == EXACT,
+              m.target[1], m.target[-1])
+             for a in f.atoms if a.kind == OFFER for m in (mat(a, fid),)])
 
-    def pull(self, need):                # cold matches, (ts, fid) order, budget = primary hits
-        rows = [r for r in self.idx.get((need.role, need.scope), ())
-                if r[1] in self.cold and covers(r[2].target, need.target)]
-        rows.sort(key=lambda r: (r[0], r[1]))
+    def pull(self, need):                # matches not yet delivered, (ts, fid) order,
+        nlo, nhi = need.target[1], need.target[-1]     # budget counts primary hits
+        q = ("""SELECT DISTINCT ts, fid FROM atoms WHERE role=? AND scope=?
+                AND ((ex AND lo BETWEEN ? AND ?) OR (NOT ex AND ? AND ? BETWEEN lo AND hi))
+                AND fid NOT IN (SELECT fid FROM hot)""",
+             [need.role, need.scope, nlo, nhi, need.target[0] == EXACT, nlo])
         budget = None
         if need.effect == WATCH and need.value and len(need.value) == 21:
             lo, hi, budget, order = _window(need.value)
-            rows = [r for r in rows if lo <= r[0] <= hi]
-            if order: rows.reverse()
-        fids = list(dict.fromkeys(r[1] for r in rows))
-        return [self.cold.pop(x) for x in (fids if budget is None else fids[:budget])]
+            q = (q[0] + " AND ts BETWEEN ? AND ? ORDER BY ts %s, fid %s LIMIT ?"
+                 % (("ASC", "ASC") if not order else ("DESC", "DESC")),
+                 q[1] + [_t8(lo), _t8(hi), budget])
+        else:
+            q = (q[0] + " ORDER BY ts, fid", q[1])
+        out = []
+        for _, fid in self.db.execute(*q).fetchall():
+            self.db.execute("INSERT OR IGNORE INTO hot VALUES(?)", (fid,))
+            out.append(self.db.execute("SELECT bytes FROM facts WHERE fid=?", (fid,)).fetchone()[0])
+        return out
+
+    def all(self):                       # full replay: the degenerate demand
+        return [r[0] for r in self.db.execute("SELECT bytes FROM facts")]
+
+    def commit(self): self.db.commit()   # host calls it: durable before the reply
 
 # --- The engine --------------------------------------------------------------------
 class Node:

@@ -4,7 +4,8 @@ cold boundary; budget is an amortization knob with no semantic residue."""
 import os, random, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from kernel import Node, Store, encode, fact_id, window
+from kernel import (Atom, Exact, NEED, OFFER, Node, RANGE, REQUIRE, Store,
+                    covers, decode, encode, fact, fact_id, ts_atom, window)
 from facts import ROOT
 from facts.auth.admin import admin, admins
 from facts.auth.user import user
@@ -77,9 +78,29 @@ def test_budget_is_amortization_only():
     for fid in n.facts:
         if fid in f.memo: assert n.memo[fid] == f.memo[fid]
 
+def test_sql_clause_mirrors_covers():
+    rnd = random.Random(7)
+    ks = [bytes([b]) for b in range(5)]
+    def tgt():
+        if rnd.random() < .5: return Exact(rnd.choice(ks))
+        lo, hi = sorted((rnd.choice(ks), rnd.choice(ks)))
+        return (RANGE, lo, hi)
+    offers = [(i, tgt()) for i in range(40)]
+    for _ in range(60):                  # pull's WHERE clause == kernel covers, always
+        need = Atom(NEED, b"r", b"s", tgt(), effect=REQUIRE)
+        s = Store()                      # fresh store: hot-set dedup stays out of frame
+        fids = {}
+        for i, ot in offers:
+            f = fact(b"no.such", ts_atom(i), Atom(OFFER, b"r", b"s", ot))
+            s.add(encode(f)); fids[fact_id(f)] = ot
+        got = {fact_id(decode(fb)) for fb in s.pull(need)}
+        want = {fid for fid, ot in fids.items() if covers(ot, need.target)}
+        assert got == want, (need.target, sorted(ot for _, ot in offers))
+
 if __name__ == "__main__":
     for t in (test_demand_agrees_with_full_replay, test_gating_needs_pull_their_closure,
               test_suppression_across_the_cold_boundary, test_watch_pulls_the_performed_unit,
-              test_unrelated_facts_stay_cold, test_budget_is_amortization_only):
+              test_unrelated_facts_stay_cold, test_budget_is_amortization_only,
+              test_sql_clause_mirrors_covers):
         t(); print(f"ok  {t.__name__}")
     print("\nall tests passed")

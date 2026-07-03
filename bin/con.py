@@ -1,31 +1,30 @@
 #!/usr/bin/env python3
 """con — the poc-13 CLI.  Usage: con <db> <scope.fact.verb> [args...]
 
-The db is the dumb file: length-framed canonical fact bytes, append-only,
-nothing else. If a daemon owns the db (<db>.sock connects), the verb is
-proxied to it: one framed request out, one framed +ok/-err reply back.
-Otherwise every invocation is a crash-and-demand — index the file cold, run
-one verb, and let hydration pull only what the verb's facts and queries ask
-about; append whatever new durable facts appeared."""
+The db is sqlite holding one dumb table — facts(fid, bytes), canonical fact
+bytes and nothing else — plus a derived atom index the kernel Store owns. If
+a daemon owns the db (<db>.sock connects), the verb is proxied to it: one
+framed request out, one framed +ok/-err reply back. Otherwise every
+invocation is a crash-and-demand — open the db cold, run one verb, and let
+hydration pull only what the verb's facts and queries ask about; flush
+whatever new durable facts appeared."""
 import os, socket, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from kernel import Node, Store, _rd, frame
 from facts import ROOT
 
-def load(node, path):                    # own file: already passed the gate once
-    if os.path.exists(path):
-        b, i = open(path, "rb").read(), 0
-        while i < len(b):
-            fb, i = _rd(b, i); node.admit(fb, checked=True)
+def load(node, store):                   # full replay: own db passed the gate once
+    for fb in store.all(): node.admit(fb, checked=True)
     node.run()
 
-def index(path):                         # cold index: nothing admitted yet
-    s = Store()
-    if os.path.exists(path):
-        b, i = open(path, "rb").read(), 0
-        while i < len(b):
-            fb, i = _rd(b, i); s.add(fb)
-    return s
+def flush(node, store, flushed=None):    # one transaction per host turn; a
+    if flushed is not None:              # flushed set makes repeat calls cheap
+        if len(flushed) == len(node.durable): return
+        new = [fb for fid, fb in node.durable.items() if fid not in flushed]
+        flushed.update(node.durable)
+    else: new = node.durable.values()
+    for fb in new: store.add(fb, hot=True)
+    store.commit()
 
 def proxy(s, path, args):                # the daemon owns the db; just ask it
     s.sendall(frame(path.encode(), *(a.encode() for a in args)))
@@ -41,7 +40,7 @@ def main(db, path, *args):
     try: s.connect(db + ".sock")
     except OSError: s = None             # no daemon: crash-and-demand below
     if s: return proxy(s, path, args)
-    store = index(db)
+    store = Store(db)
     node = Node(ROOT, store)
     *segs, verb = path.split(".")
     mod = ROOT.resolve([x.encode() for x in segs])
@@ -49,9 +48,7 @@ def main(db, path, *args):
         sys.exit(f"unknown verb: {path}")
     out = mod.CLI[verb](node, *args)
     node.run()
-    with open(db, "ab") as f:
-        for fid, fb in node.durable.items():
-            if fid not in store.ids: f.write(frame(fb))   # hydrated ≠ new
+    flush(node, store)                   # add is idempotent: hydrated ≠ new
     if out: print(out)
 
 if __name__ == "__main__":

@@ -2,7 +2,8 @@
 
 The atom model played for conciseness: a single-file kernel, a `facts/` tree
 where every fact family is one file with one fixed contract, and a CLI whose
-db is a dumb append-only file of canonical fact bytes. The design of record
+db is sqlite holding one dumb table of canonical fact bytes (plus a derived
+match index the kernel's Store owns). The design of record
 is `docs/DESIGN.md`; protocol semantics descend from poc-12, where they were
 proven.
 

@@ -20,7 +20,7 @@ language.
   dirty discovery data; only validated offers justify projection state,
   effects, or another fact's validity.
 - The runtime has one durable authority: the flushed canonical facts (the
-  dumb file). Everything else — validity, the clean twin, slices, the
+  dumb table). Everything else — validity, the clean twin, slices, the
   frontier — is derived and rebuilt by replay.
 - Replay is demand-driven (hydration): a stepped fact's needs pull their
   cold matches resident; needs pull, offers never wake cold facts. Gating
@@ -103,8 +103,12 @@ Durable + LocalOnly + Parked.
 
 ## Runtime State
 
-Durable: the dumb file — length-framed canonical fact bytes, append-only,
-no schema, no versioning. Its content is exactly the durable fact set.
+Durable: the dumb table — sqlite `facts(fid, bytes)`, canonical fact bytes
+and nothing else, no schema beyond id → bytes, no versioning. Its content is
+exactly the durable fact set. Beside it, `atoms` is a derived match index
+(one materialized offer row per atom, rebuildable from `facts`), and a TEMP
+`hot` table is the session's delivered set — sqlite's TEMP scoping is the
+durable/ephemeral boundary stated as schema.
 
 Ephemeral, all rebuilt by replay: resident facts, the asserted match index
 and intake overlay, the validity memo (`Unknown|Parked|Valid|Invalid|
@@ -122,20 +126,19 @@ under their materialized offer keys — replay is demand-driven (see
 Hydration): a session admits nothing at boot and pays only for what its
 facts and queries ask about. Full replay is the degenerate case.
 
-When the dumb file stops being enough, the upgrades are independent and none
-change the kernel or the file's meaning. The first is built: `bin/cond.py`,
-a daemon that amortizes replay. It owns the db exclusively, replays once,
-then runs the three-phase host turn in a single-threaded select loop —
-client verbs over a unix socket at `<db>.sock`, peers over TCP. The wire
-carries one message type only, length-framed canonical fact bytes; what to
-push is a volatile per-peer sent-set until the sync family replaces it.
-Backpressure is the frontier's rule at the socket — overflow parks, never
-drops: bounded admits per turn, a bounded per-peer outbox whose overflow
-stays unsent until a later turn, and select-gated non-blocking writes so a
-slow or absent peer never blocks the loop. Still deferrable: compaction to
-reclaim purged facts (rewrite the file from the surviving durable set) and a
-real durable index (e.g. SQLite as an untrusted cache) when facts outgrow
-RAM.
+When one process at a time stops being enough, `bin/cond.py` is a daemon
+that owns the db exclusively and amortizes replay: it loads once, then runs
+the three-phase host turn in a single-threaded select loop — client verbs
+over a unix socket at `<db>.sock`, peers over TCP. The wire carries one
+message type only, length-framed canonical fact bytes; what to push is a
+volatile per-peer sent-set until the sync family replaces it. Backpressure
+is the frontier's rule at the socket — overflow parks, never drops: bounded
+admits per turn, a bounded per-peer outbox whose overflow stays unsent until
+a later turn, and select-gated non-blocking writes so a slow or absent peer
+never blocks the loop. The daemon full-loads for now — its resident set is
+what it can serve and sync; a demand-driven daemon waits on the sync family
+knowing how to ship from the store rather than from residency. Still
+deferrable: compaction (purge is `DELETE`; `VACUUM` reclaims the bytes).
 
 ## Turn Semantics
 
@@ -226,9 +229,12 @@ need (typically a range target), authored by queries before they read.
 Queries may author volatile demand and drain; they still never author
 durable facts. A durable hydrate fact is a pin (later wave, with standing
 demand). The store itself is outside the trust boundary — an untrusted
-index the host feeds; every pull re-enters through checked admission. When
-it outgrows RAM it becomes SQLite behind the same two methods, with the
-resident rows in TEMP tables and matching as one indexed WHERE clause.
+index; every pull re-enters through checked admission, so a wrong or
+corrupt db row is a miss, never a wrong fact. It is sqlite: the pull is one
+indexed SELECT whose WHERE clause is the atom coverage relation, and a
+property test pins that clause to kernel `covers` (the spec) over random
+target shapes. The remaining unification — the resident match rows
+themselves in TEMP tables, one matcher for hot and cold — is open.
 
 ## Routing: Projectors Are the Routers
 
@@ -272,10 +278,10 @@ and scope `__init__.py` files are router-only tables of contents.
 ## The CLI
 
 `bin/con.py`: `con <db> <scope.fact.verb> [args...]`. Resolve the verb path
-through the root router, index the dumb file cold, run the verb, append new
-durable facts. Every invocation is a crash-and-demand — hydration pulls only
-what the verb's facts and queries ask about — so black-box tests exercise
-the demand-driven replay story constantly and for free.
+through the root router, open the db cold, run the verb, flush new durable
+facts in one transaction. Every invocation is a crash-and-demand — hydration
+pulls only what the verb's facts and queries ask about — so black-box tests
+exercise the demand-driven replay story constantly and for free.
 
 If a daemon owns the db, con proxies instead of replaying: `<db>.sock`
 accepts, the verb path and args go out as one framed request, one framed
@@ -297,8 +303,8 @@ families without kernel changes:
   dep-aware shipping so suppressors travel (no resurrection); sync's own
   facts are LocalOnly and excluded from their own reconciliation set.
 - **Retention and purge** — timestamp order alone never purges: pins,
-  retained closures, and live suppressor targets all hold facts; purge plus
-  dumb-file compaction reclaims space.
+  retained closures, and live suppressor targets all hold facts; purge is
+  `DELETE` over the db, and `VACUUM` reclaims space.
 - **Drivers** — clock, connection, local input as host-authored fact
   families; the event source reading the OS is outside the boundary.
 
@@ -310,6 +316,6 @@ asserts bit-identical derived state; where it says "for all bytes," a test
 feeds mutated frames and asserts misses, never wrong validations. The
 source-contract test keeps every fact file in the six-part shape. Black-box
 tests drive `bin/con.py` end to end, one process per command, hydrating
-from the dumb file every time. Hydration tests assert the demand theorem:
+from the db every time. Hydration tests assert the demand theorem:
 every resident fact's verdict equals full replay's, under shuffled file
 orders, with and without budgets.
