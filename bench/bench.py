@@ -172,8 +172,10 @@ def bench_daemons():
                 if got >= cap: break
                 time.sleep(0.05)
             conv = time.time() - t0
+            mb = os.path.getsize(dbb) / 1048576   # B's db is exactly the fact bytes shipped
             report("author rate (A, via socket)", cap / auth, "fact/s", None)
             report("converged on B (end-to-end)", got / conv, "fact/s", 100, hi_ok=True)  # MEASURED 230-280/s
+            report("converged volume (B's db)", mb / conv, "MB/s", None)
             report("mid-stream query B latency", qlat, "ms", 25)            # MEASURED 2-7ms under load
             assert got == cap, f"B converged only {got}/{cap}"
         finally: stop(pa, pb)
