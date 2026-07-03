@@ -7,21 +7,32 @@ deleted, invite_accepted acceptance gate) — all green IN-PROCESS
 in-process, test_clock, test_hydrate, test_contract).
 
 RED until M7 wires the daemon: the black-box story tests (test_solo, test_pair,
-test_trio, test_sync's daemon leg). They need cond.py rewired to the new model:
-- Dial model: no dial-request family; the pump dials any address with staged
-  `send` offers and no live socket (poc-10 pump). Delete --peer; add a
-  `connection.request.connect wid iid secret endpoint addr` CLI verb (bootstrap).
-- Seams: on inbound request arrival author fact_receipt(REQUEST); on a `respond`
-  offer call connection.respond and ship the connection bytes to the origin; on
-  a `connection` offer bind that socket to the connection id and set its secret.
-- Sealed frames on the wire: established peers (key = connection id) seal
-  outbound `send`/`ship` via frame.seal(secret) and open inbound via
-  frame.open_frame(secret); handshake facts (request/connection) travel bare.
-- Acceptance over the wire: a joiner authors invite_accepted from the link
-  (the connect verb already does via request.bootstrap), so the synced
-  workspace validates on it. Without this the black-box workspace parks on peers.
-- Then: wire-tap test (a known plaintext never appears post-handshake), and the
-  peers() `auth|anon` column via M6 endpoint_shared (membership reconnect).
+test_trio, test_sync's daemon leg). Rewire cond.py to poc-10's ADDRESS-KEYED
+transport — the daemon is a stateless byte queue keyed by destination address;
+NO per-socket session object, NO cid<->socket binding (facts name addresses and
+inbound frames self-describe their connection_id):
+- Transport = an address-keyed outbox (poc-10 network_outgoing(queue_key,
+  target_addr, bytes)): `send`/`ship` offers name a DEST ADDRESS; the pump
+  connects to that address and writes (persistent-pool or connect-per-drain, an
+  efficiency knob — poc-10 chose stateless connect/send/close).
+- Routing is fact-driven both ways: outbound reads the connection fact for
+  (peer_addr, secret) and emits send@peer_addr of sealed bytes; inbound peeks
+  frame_cid(wire) -> conn.secret(node, cid) -> open, regardless of which socket
+  delivered it. `frame.py` already has frame_cid + conn.secret for this.
+- Dial: the pump connects to any dest address with staged send offers. No
+  dial-request family, no --peer; add a `connection.request.connect wid iid
+  secret endpoint addr` CLI verb (bootstrap authors invite_accepted + the
+  sealed request, whose send@addr drives the dial).
+- Seams (host performs at a watched offer, reports via a fact): inbound request
+  arrival -> author fact_receipt(REQUEST, origin=addr); `respond` offer ->
+  connection.respond + send@origin_addr; the connection fact carries the peer
+  address so no binding step is needed.
+- Handshake facts (request/connection) travel bare (own X25519 envelopes);
+  everything after is a sealed frame keyed by connection_id.
+- Acceptance over the wire: the connect verb authors invite_accepted from the
+  link, so the synced workspace validates on the joiner (else it parks).
+- Then: wire-tap test (a known plaintext never appears post-handshake); peers()
+  `auth|anon` via M6 endpoint_shared.
 
 Follow-ups surfaced: admin DELEGATION (root key is dropped after bootstrap, so
 only the founder's bootstrap admin is valid until an existing-admin-grants-admin

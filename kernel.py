@@ -113,6 +113,17 @@ class Out:                               # project() -> verdict + all it may emi
 
 by = lambda ctx, role: [r for n, rs in ctx.items() if n.role == role for r in rs]
 
+# The clock is not a fact family: time is the one input the host reads from the
+# OS and hands to the turn (`turn(now)`), which presents it as a single transient
+# offer at the NOW key. A time-waiting fact carries a Watch need over
+# [deadline, ∞); when now reaches the deadline the offer falls in range and wakes
+# it. No tick facts, so nothing accumulates, and durable derived state never
+# depends on now — replay (any now) rebuilds it identically.
+NOW_ROLE, NOW_SCOPE, _NOW = b"now", b"clock", b"\x00now"   # sentinel owner, not a fid
+now_need = lambda deadline_ms: Atom(NEED, NOW_ROLE, NOW_SCOPE,
+                                    Range(deadline_ms.to_bytes(8, "big"), b"\xff" * 8), effect=WATCH)
+now_of = lambda ctx: next((int.from_bytes(r[2].target[1], "big") for r in by(ctx, NOW_ROLE)), None)
+
 class Router:
     """A projector that dispatches on one type-tag segment and delegates whole.
     Routers narrow inputs and cannot widen a delegate's context; delegation
@@ -261,8 +272,18 @@ class Node:
         return [r for r in self.clean.get((need.role, need.scope), ())
                 if covers(r[2].target, need.target)]
 
+    # Present the host's clock as one transient offer at the NOW key, waking any
+    # time-waiting need whose deadline it now covers. Not a fact: one clean-twin
+    # slot, replaced each turn, so nothing accumulates.
+    def _present_now(self, now):
+        off = Atom(OFFER, NOW_ROLE, NOW_SCOPE, Exact(now.to_bytes(8, "big")))
+        self.clean[(NOW_ROLE, NOW_SCOPE)] = [(_NOW, now, off)]
+        for o, _ in self.needs_for(off):
+            if o not in self.frontier: self.frontier.append(o)
+
     # Engine drain — bounded; overflow parks on the frontier, never drops.
-    def turn(self, bound=64):
+    def turn(self, now=None, bound=64):
+        if now is not None: self._present_now(now)   # the host hands time to the turn
         for _ in range(min(bound, len(self.frontier))):
             self._step(self.frontier.popleft())
         for k, v in self.intake.items(): self.rows.setdefault(k, []).extend(v)
