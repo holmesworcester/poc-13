@@ -1,40 +1,167 @@
-"""facts/connection/connection.py — a live session as a fact, authored by the
-DAEMON (host out) when a peer's hello verifies. Volatile + LocalOnly: sessions
-die with the process and never sync. It records the peer's advertised address and
-the identity public key its hello proved possession of. Whether that key is a
-workspace-authorized member/device key is a query-side value-compare against the
-keys the auth chain blessed (the `auth` column of peers) — never a hard Require,
-so two fresh nodes still talk (trust on first use, matching Authority's stance)."""
-from kernel import Atom, OFFER, Out, SELF, encode, fact, now, ts_atom
+"""facts/connection/connection.py — the sealed handshake result (poc-10 tag 49);
+its fact id is the connection id and its canonical bytes ARE the wire message, so
+the responder authors it and the initiator admits the identical bytes. The sealed
+envelope hides the connection plaintext, which carries both static endpoints, the
+request id, the return addresses, the responder ephemeral, and — the payload of
+the whole exchange — the handshake_hash and the per-session connection_secret.
+
+The projector never trusts the carried secret: it opens the envelope (the
+initiator with its own static endpoint secret, the responder with its ephemeral),
+recomputes the X25519 handshake material from the request transcript it Requires
+as `req_open`, and refuses (Invalid) unless the recomputed handshake_hash and
+connection_secret match the carried ones. On success it publishes the peer
+identity/address as `connection`, the session key as a validated in-memory
+`conn_secret` offer (never synced, rebuilt by replay), and `answered` to retire
+the request's resend loop. respond() is the responder's authoring command: a
+deterministic ephemeral and seal nonce derived from the static secret over the
+request id make re-performance byte-identical, so a replayed or duplicated
+request produces one and the same connection."""
+from kernel import (Atom, Exact, H, NEED, OFFER, Out, Range, REQUIRE, SELF,
+                    SUPPRESS, WATCH, by, encode, fact, frame, ts_of, _rd)
+from crypto import dh, hkdf_sha256, keyed_hash, open_x25519, seal_x25519, x25519_pk
+from facts.auth import endpoint, invite_secret as ish
+from facts.connection import ephemeral_secret as eph
+from facts.connection import request as req
 
 TAG = b"connection.connection"
 SC = b"conn"
+SEAL_VERSION = 1
+CONNECTION_PURPOSE = b"poc13-sealed-connection-v2"
+BOOTSTRAP_PURPOSE = b"poc13-connection-bootstrap-handshake-v2"
+MEMBERSHIP_PURPOSE = b"poc13-connection-membership-handshake-v2"
+SECRET_PURPOSE = b"poc13-connection-secret-v2"
+TRANSCRIPT_LABEL = b"poc13-connection-handshake-transcript-v2"
+RESP_EPH_LABEL = b"poc13:create-connection:responder-ephemeral:v1"
+NONCE_LABEL = b"poc13:create-connection:seal-nonce:v1"
+LOCAL_FULL = Range(b"", b"\xff" * 64)
+CONN_FULL = Range(b"", b"\xff" * 64)
 
-# SHAPE — the canonical atom set; the only place atoms are chosen.
-def connection(peer_pk, addr, t):
-    return fact(TAG, ts_atom(t, SC),
-                Atom(OFFER, b"session", SC, SELF, addr),
-                Atom(OFFER, b"peerkey", SC, SELF, peer_pk))
+# --- connection plaintext codec + handshake math --------------------------------
+_C = ("from_ep", "to_ep", "request_id", "resp_addr", "init_addr", "init_eph_id",
+      "resp_eph_id", "resp_eph_pk", "handshake_hash", "connection_secret")
 
-# EXTRACT — content-pure: volatile + LocalOnly. A session vanishes on restart.
+def _encode_cpt(**k): return frame(*(k[n] for n in _C))
+def _decode_cpt(pt):
+    out, i = {}, 0
+    for n in _C:
+        v, i = _rd(pt, i); out[n] = v
+    return out
+
+_cenv = lambda ct, eph_pk, to, rid, nc: frame(bytes([SEAL_VERSION]), eph_pk, to, rid, nc, ct)
+def _uncenv(env):
+    ver, i = _rd(env, 0); ep, i = _rd(env, i); to, i = _rd(env, i)
+    rid, i = _rd(env, i); nc, i = _rd(env, i); ct, i = _rd(env, i)
+    return ver[0], ep, to, rid, nc, ct
+_cheader = lambda eph_pk, to, rid, nc: frame(bytes([SEAL_VERSION]), eph_pk, to, rid, nc)
+
+def _transcript(req_pt, resp_eph_pk, resp_addr, init_addr):
+    return frame(TRANSCRIPT_LABEL, req_pt, resp_eph_pk, resp_addr, init_addr)
+
+def _material(F, req_pt, secret, ee, es, resp_eph_pk, resp_addr, init_addr):
+    tr = _transcript(req_pt, resp_eph_pk, resp_addr, init_addr)
+    if F["mode"] == req.BOOTSTRAP:
+        ikm, purpose = secret + F["bootstrap_hash"] + ee + es, BOOTSTRAP_PURPOSE
+    else:
+        ikm, purpose = ee + es, MEMBERSHIP_PURPOSE
+    rk = hkdf_sha256(ikm, purpose, tr)
+    hh = H(tr)
+    return hh, hkdf_sha256(rk, SECRET_PURPOSE, hh)
+
+# SHAPE — deterministic given (env, request_id): both sides build identical bytes.
+def connection(env, request_id):
+    return fact(TAG,
+                Atom(OFFER, b"sconn", SC, Exact(request_id), env),
+                Atom(NEED, b"req_open", SC, Exact(request_id), effect=REQUIRE),
+                Atom(NEED, b"esk", b"local", LOCAL_FULL, effect=WATCH),
+                Atom(NEED, b"ephsk", SC, CONN_FULL, effect=WATCH),
+                Atom(NEED, b"invite_secret", b"local", LOCAL_FULL, effect=WATCH),
+                Atom(NEED, b"closed", SC, SELF, effect=SUPPRESS))
+
+# EXTRACT — content-pure: volatile + LocalOnly. A session dies with the process.
 def extract(f): return False, False
 
-# PROJECT — the only place this family's meaning lives.
+# PROJECT — open, recompute, verify, publish. Pure over ctx; rebuilt by replay.
 def project(f, ctx, sl):
-    return Out(offers=tuple(a for a in f.atoms if a.role in (b"session", b"peerkey")))
+    env = next(a.value for a in f.atoms if a.role == b"sconn")
+    ver, resp_eph_pk, to_ep_conn, request_id, nonce, ct = _uncenv(env)
+    hdr = _cheader(resp_eph_pk, to_ep_conn, request_id, nonce)
+    esks = {r[2].target[1]: r[2].value for r in by(ctx, b"esk")}
+    ephs = {r[2].target[1]: r[2].value for r in by(ctx, b"ephsk")}
+    pt = None
+    if to_ep_conn in esks:               # initiator: own static + responder ephemeral
+        pt = open_x25519(esks[to_ep_conn], resp_eph_pk, CONNECTION_PURPOSE, hdr, nonce, ct)
+    if pt is None and resp_eph_pk in ephs:   # responder: own ephemeral + initiator static
+        pt = open_x25519(ephs[resp_eph_pk], to_ep_conn, CONNECTION_PURPOSE, hdr, nonce, ct)
+    if pt is None: return Out("Parked")  # opening key not resident yet
+    C = _decode_cpt(pt)
+    req_pt = next((r[2].value for r in by(ctx, b"req_open")), None)
+    if req_pt is None: return Out("Parked")
+    F = req.decode_pt(req_pt)
+    secret = {ish.bootstrap_hash(r[2].value): r[2].value
+              for r in by(ctx, b"invite_secret")}.get(F["bootstrap_hash"], b"")
+    if F["mode"] == req.BOOTSTRAP and not secret: return Out("Parked")
+    if F["to_ep"] in esks and resp_eph_pk in ephs:        # responder recompute
+        ee, es = dh(ephs[resp_eph_pk], F["init_eph_pk"]), dh(esks[F["to_ep"]], F["init_eph_pk"])
+        peer_ep, peer_addr = F["from_ep"], C["init_addr"]
+    elif F["init_eph_pk"] in ephs:                        # initiator recompute
+        ee, es = dh(ephs[F["init_eph_pk"]], resp_eph_pk), dh(ephs[F["init_eph_pk"]], F["to_ep"])
+        peer_ep, peer_addr = F["to_ep"], C["resp_addr"]
+    else: return Out("Parked")
+    if ee is None or es is None: return Out("Invalid")
+    hh, cs = _material(F, req_pt, secret, ee, es, resp_eph_pk, C["resp_addr"], C["init_addr"])
+    if hh != C["handshake_hash"] or cs != C["connection_secret"]: return Out("Invalid")
+    return Out(offers=(Atom(OFFER, b"connection", SC, SELF, frame(peer_ep, peer_addr)),
+                       Atom(OFFER, b"conn_secret", SC, SELF, cs),
+                       Atom(OFFER, b"answered", SC, Exact(request_id))))
 
-# COMMANDS — the daemon records one per verified hello. Build a fact, admit, stop.
-def observe(node, peer_pk, addr, t):
-    return node.admit(encode(connection(peer_pk, addr, t)))
+# COMMANDS — the responder authors the connection (poc-10 create_connection).
+def respond(node, request_id, origin, t):
+    ro = next((r[2].value for r in _valid(node, b"req_open", Exact(request_id))), None)
+    if ro is None: return None
+    if _valid(node, b"answered", Exact(request_id)): return _for_request(node, request_id)
+    F = req.decode_pt(ro)
+    esk, epk = endpoint.current(node)
+    if epk != F["to_ep"]: return None    # not addressed to this endpoint
+    resp_eph_sk = keyed_hash(esk, RESP_EPH_LABEL, request_id)   # deterministic: replay-identical
+    resp_eph_pk = x25519_pk(resp_eph_sk)
+    reid = eph.mint(node, resp_eph_sk, resp_eph_pk, ts_of(node.facts[request_id])); node.run()
+    secret = _invite_secret(node, F["bootstrap_hash"]) if F["mode"] == req.BOOTSTRAP else b""
+    if F["mode"] == req.BOOTSTRAP and not secret: return None
+    ee, es = dh(resp_eph_sk, F["init_eph_pk"]), dh(esk, F["init_eph_pk"])
+    resp_addr, init_addr = F["dialed_addr"], (F["init_addr"] or origin)
+    hh, cs = _material(F, ro, secret, ee, es, resp_eph_pk, resp_addr, init_addr)
+    cpt = _encode_cpt(from_ep=F["to_ep"], to_ep=F["from_ep"], request_id=request_id,
+                      resp_addr=resp_addr, init_addr=init_addr, init_eph_id=F["init_eph_id"],
+                      resp_eph_id=reid, resp_eph_pk=resp_eph_pk, handshake_hash=hh,
+                      connection_secret=cs)
+    nonce = keyed_hash(esk, NONCE_LABEL, request_id + H(cpt))[:24]
+    hdr = _cheader(resp_eph_pk, F["from_ep"], request_id, nonce)
+    ct = seal_x25519(resp_eph_sk, F["from_ep"], CONNECTION_PURPOSE, hdr, nonce, cpt)
+    return node.admit(encode(connection(_cenv(ct, resp_eph_pk, F["from_ep"], request_id, nonce),
+                                        request_id)))
 
 # QUERIES — observations over validated state only.
-def peers(node):                         # (addr, peer key, authorized?) per live session
-    addr = {o: a.value for o, t, a in node.watched(b"session", SC)}
-    key = {o: a.value for o, t, a in node.watched(b"peerkey", SC)}
-    blessed = {r[2].value for (role, sc), rows in node.clean.items()   # member keys, any workspace
-               if role == b"key" for r in rows}
-    return sorted((addr[o], key[o], key[o] in blessed) for o in addr if o in key)
+def secret(node, cid):                   # the session key for an established connection
+    return next((r[2].value for r in _valid(node, b"conn_secret", Exact(cid))), None)
 
-# CLI — string boundary over COMMANDS/QUERIES.
-CLI = {"peers": lambda n: "\n".join(f"{a.decode()} {k.hex()} {'auth' if ok else 'anon'}"
-                                    for a, k, ok in peers(n))}
+def _for_request(node, request_id):
+    return next((o for o, _, a in node.watched(b"answered", SC)
+                 if a.target[1] == request_id), None)
+
+def peers(node):                         # (peer endpoint, addr, connection id) per live session
+    out = []
+    for o, _, a in node.watched(b"connection", SC):
+        ep, addr = req._split2(a.value)
+        out.append((ep, addr, o))
+    return sorted(out)
+
+def _valid(node, role, target):          # clean rows matching an exact/target need
+    return [r for r in node.clean.get((role, SC), ()) if r[2].target == target]
+
+def _invite_secret(node, bh):
+    return next((a.value for _, _, a in node.watched(b"invite_secret", b"local")
+                 if ish.bootstrap_hash(a.value) == bh), b"")
+
+# CLI — string boundary over QUERIES.
+CLI = {"peers": lambda n: "\n".join("%s %s %s" % (a.decode(), ep.hex(), c.hex())
+                                    for ep, a, c in peers(n))}

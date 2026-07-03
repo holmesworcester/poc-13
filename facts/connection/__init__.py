@@ -1,10 +1,12 @@
-"""Connection scope: peer sessions as facts. A durable, LocalOnly `request`
-names an address to dial (and `close` retires it by suppression); a volatile
-`hello` binds a session to an identity key at the gate; a volatile `connection`
-records the live peer; and a `frame` bundle packs many facts into one wire frame.
-Only request/close persist — the rest are ephemeral transport, never synced."""
+"""Connection scope: the transport is a fact family. A sealed `request` is
+first contact and the key-agreement opener; a `connection` is the sealed
+handshake result carrying the per-session secret; `ephemeral_secret` holds the
+handshake's X25519 keypair; `close` retires a session by suppression; and a
+`frame` bundle packs many facts into one wire frame. Only request/ephemeral
+persist locally — the rest are ephemeral transport, never synced."""
 from kernel import Router
-from . import close, connection, frame, hello, request
+from . import close, connection, ephemeral_secret, fact_receipt, frame, request
 
 SCOPE = Router({b"request": request, b"close": close, b"connection": connection,
-                b"hello": hello, b"frame": frame}, depth=1)
+                b"ephemeral_secret": ephemeral_secret, b"fact_receipt": fact_receipt,
+                b"frame": frame}, depth=1)
