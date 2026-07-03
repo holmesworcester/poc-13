@@ -4,39 +4,43 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from kernel import Node, decode, encode, fact, fact_id, ts_atom, Atom, Exact, OFFER
 from facts import ROOT
-from facts.chat.note import note
-from facts.chat.tombstone import tombstone
+from facts.auth.workspace import workspace
+from facts.content.message import message
+from facts.content.message_deletion import deletion
 from facts.outbox.intent import intent
 from facts.outbox.performed import performed
 
-CH = b"general"
+WS = workspace(b"acme", 1)
+WID, CH = fact_id(WS), b"general"
 
 def test_identity_and_admission():
-    a1 = Atom(OFFER, b"msg", CH, Exact(b"feed"), b"hi")
-    a2 = ts_atom(1, CH)
+    a1 = Atom(OFFER, b"msg", WID, Exact(CH), b"hi")
+    a2 = ts_atom(1, WID)
     # Canonical form is a function of the atom multiset: order- and dup-free.
-    assert fact_id(fact(b"chat.note", a1, a2)) == fact_id(fact(b"chat.note", a2, a1, a2))
-    n, b = Node(ROOT), encode(note(CH, b"hi", 1))
+    assert fact_id(fact(b"content.message", a1, a2)) == fact_id(fact(b"content.message", a2, a1, a2))
+    n, b = Node(ROOT), encode(message(WID, CH, b"al", b"hi", 1))
     fid = n.admit(b)
-    assert fid and decode(b) == note(CH, b"hi", 1)
+    assert fid and decode(b) == message(WID, CH, b"al", b"hi", 1)
     assert n.admit(b) == fid and len(n.facts) == 1            # idempotent admission
     assert n.admit(b[:-1]) is None and n.admit(b + b"\x00") is None   # strict decode
-    assert n.admit(encode(note(CH, b"other", 1)), expect=fid) is None # checked load: miss
+    assert n.admit(encode(message(WID, CH, b"al", b"other", 1)), expect=fid) is None  # checked load: miss
     n.run()
     assert n.admit(encode(fact(b"no.such", ts_atom(1)))) is not None
     n.run()
     assert n.memo[fact_id(fact(b"no.such", ts_atom(1)))] == "Parked"  # unknown tag parks
 
-def test_suppression_and_wakes():
+def test_requires_suppression_and_wakes():
     n = Node(ROOT)
-    n1, n2 = note(CH, b"keep", 1), note(CH, b"delete me", 2)
-    t2 = tombstone(CH, fact_id(n2), 3)
-    n.admit(encode(t2)); n.run()                              # tombstone arrives FIRST
-    for f in (n1, n2): n.admit(encode(f))
+    m1, m2 = message(WID, CH, b"al", b"keep", 2), message(WID, CH, b"al", b"delete me", 3)
+    d2 = deletion(WID, fact_id(m2), 4)
+    n.admit(encode(d2)); n.run()                              # deletion arrives FIRST
+    for f in (m1, m2): n.admit(encode(f))
     n.run()
-    assert n.memo[fact_id(n1)] == "Valid"
-    assert n.memo[fact_id(n2)] == "Suppressed"                # cross-time match held
-    assert [a.value for _, _, a in n.watched(b"msg", CH)] == [b"keep"]
+    assert n.memo[fact_id(m1)] == "Parked"                    # no workspace yet: Require gates
+    n.admit(encode(WS)); n.run()                              # authority root lands, wakes both
+    assert n.memo[fact_id(m1)] == "Valid"
+    assert n.memo[fact_id(m2)] == "Suppressed"                # cross-time match held
+    assert [a.value for _, _, a in n.watched(b"msg", WID)] == [b"keep"]
 
 def test_outbox_and_replay():
     n, i1 = Node(ROOT), intent(b"peer1", b"hello", 1)
@@ -52,6 +56,6 @@ def test_outbox_and_replay():
     assert states[0] == states[1] == states[2] == n.derived() # replay is bit-identical
 
 if __name__ == "__main__":
-    for t in (test_identity_and_admission, test_suppression_and_wakes, test_outbox_and_replay):
+    for t in (test_identity_and_admission, test_requires_suppression_and_wakes, test_outbox_and_replay):
         t(); print(f"ok  {t.__name__}")
     print("\nall tests passed")
