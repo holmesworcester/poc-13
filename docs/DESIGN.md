@@ -86,9 +86,17 @@ Every durable/shareable fact carries one canonical timestamp atom
 reconciliation sort key and a retention input, never an authority proof.
 A fact without one promotes rows at `ts = 0`.
 
-Signatures are specified in the poc-12 design (embedded sig atoms verified
-at admission; detached signatures as ordinary facts) and are not yet in this
-kernel; the admission gate is where the embedded check will land.
+Signatures are detached facts (`auth.signature`): an ordinary fact offering
+`b"sig"` at a target fact's id, carrying the signer's public key and a real
+Ed25519 signature. It self-checks at the admission gate over exactly the
+32-byte target id — the id IS the whole canonical fact, so signing the id
+covers everything, and wrong math is a falsy check: an inert miss, never a bad
+fact. Membership Requires such an offer (`auth.user`, `auth.admin`), so a fact
+only validates once its signature lands. Verification runs exactly once, at
+first admission; replay loads from the trusted durable file with the check
+skipped — those bytes passed already. Tampering with the local file is a
+local-integrity problem, not a protocol one: bytes from outside enter only
+through the gate.
 
 ## Extraction and Durability
 
@@ -201,8 +209,9 @@ Durable + LocalOnly + Parked with no special casing.
 
 ## The Fact Contract
 
-Every fact family is one file, `facts/<scope>/<fact>.py`, with six parts,
-always in this order, enforced by a source-contract test:
+Every fact family is one file, `facts/<scope>/<fact>.py`, with six required
+parts (plus an optional CHECK between EXTRACT and PROJECT), always in this
+order, enforced by a source-contract test:
 
 - **SHAPE** — constructors returning canonical `Fact`s. The only place
   atoms are chosen. This is the whole codec story: the kernel's one
@@ -210,6 +219,8 @@ always in this order, enforced by a source-contract test:
   formats. A family that wants a private format inside a value is a signal
   the atom vocabulary is missing something.
 - **EXTRACT** — content-pure `(durable, shareable)`.
+- **CHECK** — optional, self-verification at the admission gate; pure
+  function of the fact's own bytes; runs once, never on replay.
 - **PROJECT** — the only place the family's meaning lives: validity,
   promoted offers, slice deltas. Pure function of `(fact, ctx, slice)`;
   never touches the node.

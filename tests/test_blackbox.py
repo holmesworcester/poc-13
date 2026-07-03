@@ -34,8 +34,10 @@ def test_workspace_story():
         wid = con(db, "auth.workspace.create", "acme", "1")
         con(db, "content.message.send", "00" * 32, "general", "al", "ghost", "2")
         assert con(db, "content.message.feed", "00" * 32, "general") == ""  # no workspace: parked
-        uid = con(db, "auth.user.join", wid, "al", "pk-al", "3")
-        assert con(db, "auth.user.roster", wid) == "al"
+        con(db, "auth.local_signer_secret.keygen", "2")     # this node's identity, once
+        assert len(con(db, "auth.local_signer_secret.whoami")) == 64   # 32-byte public key, hex
+        uid = con(db, "auth.user.join", wid, "al", "3")     # join signs itself with that key
+        assert con(db, "auth.user.roster", wid) == "al"     # valid only because the signature landed
         con(db, "auth.admin.grant", wid, uid, "4")
         assert con(db, "auth.admin.admins", wid) == uid
         mid = con(db, "content.message.send", wid, "general", "al", "hi", "5")
