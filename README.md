@@ -16,8 +16,11 @@ proven.
   running daemon at `<db>.sock`, else a crash-and-replay of the dumb file.
 - `bin/cond.py` — `cond <db> [--listen HOST:PORT] [--peer HOST:PORT ...]`.
   The daemon: owns the db, amortizes replay, serves con over the unix
-  socket, exchanges facts (the wire's only message) with TCP peers.
-  Backpressure everywhere is the frontier's rule: park, never drop.
+  socket, reconciles facts (the wire's only message) with TCP peers via the
+  sync family. Backpressure everywhere is the frontier's rule: park, never drop.
+- `facts/sync/compare.py` — dependency-aware negentropy: range-fingerprint
+  reconciliation over `(ts, FactId)` leaves, closures so tombstones travel,
+  compare frames that are themselves volatile, unshareable facts.
 - `tests/` — skeleton tests (kernel claims), a source-contract test (fact
   file shape), and black-box tests (one process per command, plus real
   daemon subprocesses on real sockets).
