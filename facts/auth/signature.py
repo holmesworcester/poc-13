@@ -1,7 +1,10 @@
 """facts/auth/signature.py — a detached Ed25519 signature over another fact's
-id. Offers b"sig" at the target's id in the workspace scope, satisfying the
-Require b"sig" that auth.user places on its own membership (either order —
-out-of-order safe). The signature is checked once at the admission gate (the
+id. Offers b"pk" (the signer's public key) and b"sig" at the target's id in the
+workspace scope. A signed fact Requires b"pk" at its own id, so the signer key
+lands in the projector's context and the authority chain can value-compare it
+against the pk it blessed (either order — out-of-order safe). The gate proves
+SOME key signed; that compare is what binds the key to workspace authority. The
+signature is checked once at the admission gate (the
 CHECK part) over exactly the 32-byte target id: the id IS the whole canonical
 fact, so signing it covers everything. Wrong math is falsy at the gate — an
 inert miss, never a bad fact, and replay never re-verifies. Durable and
@@ -31,8 +34,10 @@ def check(f):                            # verify over the sig offer's own targe
     return bool(pk and sig and tgt and verify(pk, tgt, sig))
 
 # PROJECT — the only place this family's meaning lives.
-def project(f, ctx, sl):
-    return Out(offers=tuple(a for a in f.atoms if a.role == b"sig"))
+def project(f, ctx, sl):                 # publish both the signer pk and the sig:
+    return Out(offers=tuple(a for a in f.atoms if a.role in (b"pk", b"sig")))
+# a fact Requires b"pk" at its own id to pull WHO signed it into ctx, then a
+# projector value-compares that pk against the pk its authority chain blessed.
 
 # COMMANDS — build a fact, admit it, stop.
 def attest(node, workspace_id, sk, pk, target_id, t):
