@@ -174,7 +174,7 @@ def bench_daemons():
             conv = time.time() - t0
             mb = os.path.getsize(dbb) / 1048576   # B's db is exactly the fact bytes shipped
             report("author rate (A, via socket)", cap / auth, "fact/s", None)
-            report("converged on B (end-to-end)", got / conv, "fact/s", 100, hi_ok=True)  # MEASURED 230-280/s
+            report("converged on B (end-to-end)", got / conv, "fact/s", 200, hi_ok=True)  # MEASURED 360-430/s
             report("converged volume (B's db)", mb / conv, "MB/s", None)
             report("mid-stream query B latency", qlat, "ms", 25)            # MEASURED 2-7ms under load
             assert got == cap, f"B converged only {got}/{cap}"
@@ -200,10 +200,14 @@ def bench_catchup():                      # sync off: bulk bytes straight to A's
                 time.sleep(0.05)
             dt = time.time() - t0
             assert got >= n, f"caught up only {got}/{n}"
-            # MEASURED ~225/s — same as live convergence: paced by one-fact-per-frame
-            # and per-turn sync rounds, not the pipe. Frame bundling is the lift.
-            report("catch-up (bulk sync)", n / dt, "fact/s", 100, hi_ok=True)
-            report("catch-up volume", mb / dt, "MB/s", None)
+            # MEASURED ~2100/s (was ~225/s). The old pace was per-fact wire frames
+            # churning the receiver's fingerprint every turn, so the sender re-scanned
+            # leaves and re-shipped on ~350 compare rounds. Now shipments ride
+            # connection.frame bundles (many facts per wire frame, admitted a bounded
+            # batch per turn) and a node defers re-initiating a round until its frontier
+            # drains — so a bulk catch-up settles in a handful of rounds, not hundreds.
+            report("catch-up (bulk sync)", n / dt, "fact/s", 1000, hi_ok=True)
+            report("catch-up volume", mb / dt, "MB/s", 0.3, hi_ok=True)
         finally: stop(pa, pb)
 
 # --- 6. crypto gate: verify folded into admission, zero on replay -------------

@@ -323,8 +323,51 @@ its single message type. Compare facts extract to `(False, False)`: volatile,
 so replay never resurrects session state, and unshareable, so they are excluded
 from the very leaves they reconcile; the daemon ships them explicitly. A daemon
 opens a round toward each peer on connect and whenever its own leaf fingerprint
-changes; every peer link is full-duplex, and reconciliation is what a fact
-authored on one side rides to reach the others.
+changes — but defers a fresh round while its own frontier is still draining, so a
+receiver mid-catch-up stops churning the sender with a new compare every turn
+(see Connections). Every peer link is full-duplex, and reconciliation is what a
+fact authored on one side rides to reach the others.
+
+## Connections
+
+Peer sessions are facts too — the transport is a fact family, not an engine
+primitive — living in `facts/connection/`. There is no kernel change.
+
+**Sessions as facts.** A `connection.request` (durable, LocalOnly) names an
+address to dial; the daemon watches its valid `peer` offers and dials each, and
+recurrence is liveness — a dropped socket redials while the request stays valid.
+A `connection.close` suppresses a request through the death key the request
+carries, so a closed peer stays closed across restart; both are LocalOnly because
+a node's dial list is its own config, never a fact to sync. `--peer` flags are
+bootstrap sugar: the daemon authors one request each, through the normal gate, at
+startup. A `connection.connection` (volatile, LocalOnly) is the daemon's record
+of a live peer, authored host-out from a verified hello, and dies with the process.
+
+**Hello binds a session to an identity key.** On connect each side ships a
+`connection.hello`: its identity public key, advertised listen address, a coarse
+time bucket, and an Ed25519 signature over `H(pk ‖ addr ‖ bucket)`, verified once
+at the admission gate (CHECK), so a tampered hello is an inert miss. It proves the
+sender holds the private key for `pk` and binds that key to the address for the
+signed epoch. The honest limits, stated plainly: stdlib has no DH or encryption,
+so confidentiality and forward secrecy are out of scope, and there is no session
+nonce — a captured hello is replayable, and the daemon does not gate on the bucket
+(a freshness window would be a one-line receiver check). Trust on first use: the
+receiver records the peer key; whether it is a workspace-authorized member/device
+key is a query-side value-compare (the `auth` column of
+`connection.connection.peers`), never a hard Require — two fresh nodes still talk,
+matching Authority's stance.
+
+**Frame bundles are ephemeral transport.** A `connection.frame` bundle is
+volatile and unshareable exactly like a sync compare — never stored, never in
+leaves, excluded from the reconciliation it carries. Its one value packs many
+length-framed canonical fact bytes; the sync driver's shipments ride bundles (a
+few KiB each) instead of one fact per wire frame. A receiver unpacks a bundle and
+admits each inner fact through the normal gate, a bounded batch per turn — a
+corrupt inner is a per-fact miss that never poisons its siblings, and the wrapper
+itself is never admitted. Bundling, paired with the deferred-round rule above,
+turns a bulk catch-up from hundreds of leaf-rescanning compare rounds into a
+handful: on the measured 5000-fact catch-up it is roughly a 10x lift in both
+facts/s and MB/s.
 
 ## Family Specs Not Yet Implemented
 
@@ -342,8 +385,9 @@ families without kernel changes (hydration adds one engine-answered need):
 - **Retention and purge** — timestamp order alone never purges: pins,
   retained closures, and live suppressor targets all hold facts; purge plus
   dumb-file compaction reclaims space.
-- **Drivers** — clock, connection, local input as host-authored fact
-  families; the event source reading the OS is outside the boundary.
+- **Drivers** — the clock and local input as host-authored fact families; the
+  event source reading the OS is outside the boundary. (The connection driver is
+  built — see Connections.)
 
 ## Testing
 
