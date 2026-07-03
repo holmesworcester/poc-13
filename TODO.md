@@ -1,3 +1,33 @@
+# TODO — handshake-port branch: remaining daemon integration
+
+The handshake-port branch has the sealed request/connection handshake, transit
+key agreement, sealed frame codec, and the trust-anchoring refactor (founder
+deleted, invite_accepted acceptance gate) — all green IN-PROCESS
+(test_handshake, test_crypto, test_sigs, test_invites, test_skeleton, test_sync
+in-process, test_clock, test_hydrate, test_contract).
+
+RED until M7 wires the daemon: the black-box story tests (test_solo, test_pair,
+test_trio, test_sync's daemon leg). They need cond.py rewired to the new model:
+- Dial model: no dial-request family; the pump dials any address with staged
+  `send` offers and no live socket (poc-10 pump). Delete --peer; add a
+  `connection.request.connect wid iid secret endpoint addr` CLI verb (bootstrap).
+- Seams: on inbound request arrival author fact_receipt(REQUEST); on a `respond`
+  offer call connection.respond and ship the connection bytes to the origin; on
+  a `connection` offer bind that socket to the connection id and set its secret.
+- Sealed frames on the wire: established peers (key = connection id) seal
+  outbound `send`/`ship` via frame.seal(secret) and open inbound via
+  frame.open_frame(secret); handshake facts (request/connection) travel bare.
+- Acceptance over the wire: a joiner authors invite_accepted from the link
+  (the connect verb already does via request.bootstrap), so the synced
+  workspace validates on it. Without this the black-box workspace parks on peers.
+- Then: wire-tap test (a known plaintext never appears post-handshake), and the
+  peers() `auth|anon` column via M6 endpoint_shared (membership reconnect).
+
+Follow-ups surfaced: admin DELEGATION (root key is dropped after bootstrap, so
+only the founder's bootstrap admin is valid until an existing-admin-grants-admin
+path lands, poc-10 authority_fact_id style); multi-workspace sync scoping
+(global leaf tree is single-tenant).
+
 # TODO — black-box tests
 
 ## Remaining: workspace isolation (needs sync scoping)
