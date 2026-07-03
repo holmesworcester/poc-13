@@ -1,12 +1,15 @@
 """facts/auth/admin.py — an admin grant naming a user. Requires that user's
 membership offer, so a grant can never outrun the membership it elevates, and
 binds authority the same way the rest of the chain does: the grant is valid only
-if the key that SIGNED it (b"pk" context) is the founder root (b"root"). So a
+if the key that SIGNED it (b"pk" context) is the workspace root (b"root"). So a
 random key cannot mint an admin any more than it can mint a member.
 
-Simplest honest rule (stated): only the founder grants admin. Delegating to
-existing admins is one more value-compare against gathered admin keys, not new
-machinery — kept out here to stay low-LOC."""
+This is the BOOTSTRAP admin: workspace.create() authors one, signed by the
+ephemeral root key, so the founder is admin. FOLLOW-UP (not yet built): admin
+DELEGATION — an existing admin granting another — the way poc-10 does via an
+`authority_fact_id` naming the granting admin. Until then, the root key is
+dropped after bootstrap, so the founder's bootstrap admin is the only admin a
+workspace has."""
 from kernel import (Atom, Exact, NEED, OFFER, Out, REQUIRE, SELF, by, encode,
                     fact, now, ts_atom)
 from facts.auth import local_signer_secret, signature

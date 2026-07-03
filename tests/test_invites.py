@@ -13,27 +13,31 @@ import ed25519 as e
 from kernel import Node, encode, fact_id
 from facts import ROOT
 from facts.auth import user as usermod
-from facts.auth.founder import founder
 from facts.auth.workspace import workspace
+from facts.auth.invite_accepted import invite_accepted
 from facts.auth.user_invite import user_invite
 from facts.auth.user import user
 from facts.auth.signature import signature
 
-WS = workspace(b"acme", 1)
+FSK, FPK = e.keygen()                                 # the workspace root key
+WS = workspace(b"acme", FPK, 1)                       # the root pk is embedded in the workspace
 WID = fact_id(WS)
-FSK, FPK = e.keygen()                                 # the founder's key: root of WID
 
-def _sig(sk, pk, target, t): return signature(WID, pk, target, e.sign(sk, target), t)
+def _sig(sk, pk, target, t, scope=WID):
+    return signature(scope, pk, target, e.sign(sk, target), t)
 
 def _chain(name, member_pk, member_sk):
-    """Every fact in a member's authority chain, plus the id we expect Valid."""
-    fo = founder(WID, FPK, 2); fid = fact_id(fo)
+    """Every fact in a member's authority chain, plus the id we expect Valid.
+    The workspace is valid only with a root self-signature AND a local
+    invite_accepted (the acceptance gate); the founder is enrolled the same way."""
     isk, ipk = e.keygen()                             # the invite keypair; isk is the link secret
     inv = user_invite(WID, ipk, 3); iid = fact_id(inv)
+    acc = invite_accepted(WID, iid, isk, b"", member_pk, 4)   # local acceptance -> workspace valid
     u = user(WID, name, member_pk, iid, 4); uid = fact_id(u)
-    facts = [WS, fo, _sig(FSK, FPK, fid, 2),          # founder roots FPK
-             inv, _sig(FSK, FPK, iid, 3),             # founder blesses the invite key
-             u, _sig(isk, ipk, uid, 4)]               # member fact signed BY the invite key
+    facts = [WS, _sig(FSK, FPK, WID, 1, scope=b"auth"),   # root signs the workspace (global scope)
+             acc,                                          # this node accepted an invite to WID
+             inv, _sig(FSK, FPK, iid, 3),                 # root blesses the invite key
+             u, _sig(isk, ipk, uid, 4)]                   # member fact signed BY the invite key
     return facts, uid, (isk, ipk)
 
 def _drain(facts):

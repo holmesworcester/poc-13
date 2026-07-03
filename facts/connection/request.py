@@ -20,7 +20,7 @@ from kernel import (Atom, Exact, NEED, OFFER, Out, Range, SELF, SUPPRESS, WATCH,
                     by, encode, fact, frame, now, ts_atom, _rd)
 from crypto import open_x25519
 from ed25519 import keygen, verify
-from facts.auth import endpoint, invite_secret as ish
+from facts.auth import endpoint, invite_accepted as ish
 from facts.store import hydrate
 
 TAG = b"connection.request"
@@ -139,8 +139,8 @@ def _seal(node, mode, from_ep, to_ep, dialed_addr, init_addr, branch, sk, t):
     ct = seal_x25519(esk, to_ep, REQUEST_PURPOSE, _header(epk, to_ep, nonce), nonce, pt)
     return node.admit(encode(request(_env(ct, epk, to_ep, nonce), to_ep, epk, t)))
 
-def bootstrap(node, secret, invite_id, to_ep, dialed_addr, init_addr, t):
-    ish.keep(node, secret, invite_id, dialed_addr, to_ep, t); node.run()   # joiner keeps the secret too
+def bootstrap(node, workspace_id, secret, invite_id, to_ep, dialed_addr, init_addr, t):
+    ish.accept(node, workspace_id, invite_id, secret, dialed_addr, to_ep, t); node.run()
     esk, epk = endpoint.current(node)
     isk = keygen(secret)[0]              # the invite key signs the request
     return _seal(node, BOOTSTRAP, epk, to_ep, dialed_addr, init_addr,

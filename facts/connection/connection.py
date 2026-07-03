@@ -19,7 +19,7 @@ request produces one and the same connection."""
 from kernel import (Atom, Exact, H, NEED, OFFER, Out, Range, REQUIRE, SELF,
                     SUPPRESS, WATCH, by, encode, fact, frame, ts_of, _rd)
 from crypto import dh, hkdf_sha256, keyed_hash, open_x25519, seal_x25519, x25519_pk
-from facts.auth import endpoint, invite_secret as ish
+from facts.auth import endpoint, invite_accepted as ish
 from facts.connection import ephemeral_secret as eph
 from facts.connection import request as req
 

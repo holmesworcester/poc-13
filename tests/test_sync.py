@@ -4,17 +4,27 @@ Mirrors the poc-12 proof quantifiers — shuffled admission orders converge to
 bit-identical derived state; a one-fact diff ships exactly that fact's closure."""
 import os, random, signal, subprocess, sys, tempfile, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import ed25519
 from kernel import Node, decode, encode, fact_id
 from facts import ROOT
 from facts.sync import compare as sync
 from facts.auth.workspace import workspace
+from facts.auth.invite_accepted import invite_accepted
+from facts.auth.signature import signature
 from facts.content.message import message, feed
 from facts.content.message_deletion import deletion
 
-WS = workspace(b"acme", 1); WID = fact_id(WS)
+RK, RPK = ed25519.keygen(bytes(32))                  # a fixed workspace root key
+WS = workspace(b"acme", RPK, 1); WID = fact_id(WS)
+# WS is Valid only with a root self-signature (shareable) AND local acceptance
+# (local-only). The signature rides sync in the closure; acceptance is authored
+# out-of-band on each node (the invite link), exactly as the real model requires.
+WS_SIG = signature(b"auth", RPK, WID, ed25519.sign(RK, WID), 1)
+_ACCEPT = invite_accepted(WID, bytes(32), bytes(32), b"", RPK, 1)
 
 def node(*facts):
     n = Node(ROOT)
+    n.admit(encode(_ACCEPT))                          # this node accepted the workspace
     for f in facts: n.admit(encode(f))
     n.run(); return n
 
@@ -40,7 +50,7 @@ def reconcile(a, b, maxr=1000):
 
 # --- The algorithm, in-process --------------------------------------------------
 def test_equal_sets_zero_ships():
-    a, b = node(WS), node(WS)
+    a, b = node(WS, WS_SIG), node(WS, WS_SIG)
     before = set(b.durable)
     reconcile(a, b)
     assert set(b.durable) == before               # nothing to send
@@ -48,28 +58,28 @@ def test_equal_sets_zero_ships():
 
 def test_one_fact_diff_ships_exactly_that_closure():
     msgs = [message(WID, b"g", b"al", b"m%d" % i, i + 2) for i in range(20)]
-    a, b = node(WS, *msgs), node(WS, *msgs[:-1])   # b lacks the last message; deps present
+    a, b = node(WS, WS_SIG, *msgs), node(WS, WS_SIG, *msgs[:-1])   # b lacks the last message; deps present
     before, missing = set(b.durable), fact_id(msgs[-1])
     reconcile(a, b)
     assert set(b.durable) - before == {missing}    # exactly the one missing leaf
     assert sync.leaves(a) == sync.leaves(b)
 
 def test_fresh_peer_gets_dependency_closure():
-    a, b = node(WS, message(WID, b"g", b"al", b"hi", 2)), node()
+    a, b = node(WS, WS_SIG, message(WID, b"g", b"al", b"hi", 2)), node()
     reconcile(a, b)
     assert set(a.durable) == set(b.durable)        # workspace rode along as the message's closure
     assert feed(b, WID, b"g") == [b"hi"]
 
 def test_tombstone_travels_and_suppresses():
     m = message(WID, b"g", b"al", b"doomed", 2)
-    a, b = node(WS, m, deletion(WID, fact_id(m), 3)), node()
+    a, b = node(WS, WS_SIG, m, deletion(WID, fact_id(m), 3)), node()
     reconcile(a, b)
     assert b.memo[fact_id(m)] == "Suppressed"      # arrived already dead: no resurrection window
     assert feed(b, WID, b"g") == []
     assert sync.leaves(a) == sync.leaves(b)         # the suppressed leaf still reconciles
 
 def test_sync_facts_volatile_and_excluded():
-    a, b = node(WS, message(WID, b"g", b"al", b"hi", 2)), node()
+    a, b = node(WS, WS_SIG, message(WID, b"g", b"al", b"hi", 2)), node()
     reconcile(a, b)
     for n in (a, b):
         syn = [fid for fid, f in n.facts.items() if f.type_tag == sync.TAG]
@@ -79,7 +89,7 @@ def test_sync_facts_volatile_and_excluded():
 
 def test_shuffled_orders_converge():
     msgs = [message(WID, b"g", b"al", b"m%d" % i, i + 2) for i in range(10)]
-    facts = [WS] + msgs + [deletion(WID, fact_id(msgs[3]), 100)]
+    facts = [WS, WS_SIG] + msgs + [deletion(WID, fact_id(msgs[3]), 100)]
     outs = []
     for seed in range(3):
         order = facts[:]; random.Random(seed).shuffle(order)
@@ -91,7 +101,7 @@ def test_shuffled_orders_converge():
 def test_reply_offers_stand_until_sent_receipt():
     from facts.sync import reply as sreply
     from facts.outbox import sent
-    a, b = node(WS, message(WID, b"g", b"al", b"hi", 2)), node(WS)
+    a, b = node(WS, WS_SIG, message(WID, b"g", b"al", b"hi", 2)), node(WS, WS_SIG)
     cid = b.admit(sync.initiate(a)[0]); b.run()      # a's root compare lands on b
     rid = sreply.answer(b, cid, b"dest", 5); b.run() # b's answer: offers at the outbox keys
     rows = [a for _, _, a in b.watched(b"send", b"outbox") + b.watched(b"ship", b"outbox")]
@@ -101,7 +111,7 @@ def test_reply_offers_stand_until_sent_receipt():
 
 def test_round_count_one_fact_in_hundred():
     msgs = [message(WID, b"g", b"al", b"m%d" % i, i + 2) for i in range(100)]
-    a, b = node(WS, *msgs), node(WS, *msgs[:-1])
+    a, b = node(WS, WS_SIG, *msgs), node(WS, WS_SIG, *msgs[:-1])
     rounds = reconcile(a, b)
     assert sync.leaves(a) == sync.leaves(b)
     assert rounds <= 30                             # ~logarithmic split, not a push-all scan

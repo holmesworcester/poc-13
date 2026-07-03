@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from kernel import Node, decode, encode, fact_id
 from facts import ROOT
-from facts.auth import endpoint, invite_secret, local_signer_secret, workspace as wsmod
+from facts.auth import endpoint, invite_accepted, local_signer_secret, workspace as wsmod
 from facts.auth import user_invite
 from facts.connection import request as req, connection as conn
 
@@ -32,13 +32,13 @@ def _invited_workspace(host):
     iid, secret = user_invite.invite(host, wid, 2); host.run()
     _, epk = endpoint.current(host)
     # the inviter keeps the bootstrap secret so it can authorize the request
-    invite_secret.keep(host, secret, iid, b"127.0.0.1:9", epk, 2); host.run()
+    invite_accepted.accept(host, wid, iid, secret, b"127.0.0.1:9", epk, 2); host.run()
     return wid, secret, iid, epk
 
 def _handshake(host, joiner):
     wid, secret, iid, host_ep = _invited_workspace(host)
     _, join_ep = endpoint.current(joiner)
-    rid = req.bootstrap(joiner, secret, iid, host_ep, b"127.0.0.1:9", b"127.0.0.1:7", 3)
+    rid = req.bootstrap(joiner, wid, secret, iid, host_ep, b"127.0.0.1:9", b"127.0.0.1:7", 3)
     joiner.run()
     assert joiner.memo[rid] == "Valid", "joiner's own request must validate"
     # wire: request -> host; host authors the connection; connection -> joiner
@@ -74,7 +74,7 @@ def test_mis_addressed_request_never_responds():
     host, joiner, other = _node(), _node(), _node()
     wid, secret, iid, host_ep = _invited_workspace(host)
     _, wrong_ep = endpoint.current(other)        # seal to the wrong endpoint
-    rid = req.bootstrap(joiner, secret, iid, wrong_ep, b"127.0.0.1:9", b"127.0.0.1:7", 3)
+    rid = req.bootstrap(joiner, wid, secret, iid, wrong_ep, b"127.0.0.1:9", b"127.0.0.1:7", 3)
     joiner.run()
     host.admit(joiner.durable[rid]); host.run()
     from facts.connection import fact_receipt
@@ -92,7 +92,7 @@ def test_wrong_invite_signature_is_invalid():
     orig = ed25519.sign
     try:
         ed25519.sign = lambda sk, m, _o=orig: _o(bad, m)   # every request sig is forged
-        rid = req.bootstrap(joiner, secret, iid, host_ep, b"127.0.0.1:9", b"127.0.0.1:7", 3)
+        rid = req.bootstrap(joiner, wid, secret, iid, host_ep, b"127.0.0.1:9", b"127.0.0.1:7", 3)
     finally:
         ed25519.sign = orig
     host.admit(joiner.durable[rid]); host.run()
@@ -101,7 +101,7 @@ def test_wrong_invite_signature_is_invalid():
 def test_tampered_request_ciphertext_is_inert():
     host, joiner = _node(), _node()
     wid, secret, iid, host_ep = _invited_workspace(host)
-    rid = req.bootstrap(joiner, secret, iid, host_ep, b"127.0.0.1:9", b"127.0.0.1:7", 3)
+    rid = req.bootstrap(joiner, wid, secret, iid, host_ep, b"127.0.0.1:9", b"127.0.0.1:7", 3)
     joiner.run()
     bad = bytearray(joiner.durable[rid]); bad[-1] ^= 1     # flip a ciphertext byte
     # structural CHECK still passes (widths intact); the host opens -> fails -> Parked, never responds

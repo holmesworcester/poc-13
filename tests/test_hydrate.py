@@ -19,9 +19,8 @@ CH = b"general"
 def _build():                            # the corpus is a REAL signed workspace
     n = Node(ROOT)
     local_signer_secret.keygen(n, 0)
-    wid = workspace.create(n, b"acme", 1); n.run()
-    uid = user.join(n, wid, b"al", 2); n.run()
-    admin.grant(n, wid, uid, 3); n.run()
+    wid = workspace.create(n, b"acme", 1); n.run()   # founder is auto member + bootstrap admin
+    uid = next(k for k, f in n.facts.items() if f.type_tag == b"auth.user")
     mids = [message.send(n, wid, CH, b"al", b"m%d" % i, 10 + i) for i in range(5)]
     message_deletion.delete(n, wid, mids[2], 99)
     iid = intent.queue(n, b"peer", b"hello", 5)

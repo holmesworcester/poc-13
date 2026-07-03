@@ -8,9 +8,11 @@ import ed25519 as e
 from kernel import Node, encode, fact, fact_id, ts_atom
 from facts import ROOT
 from facts.auth import signature as sigmod, user as usermod, workspace as wsmod
+from facts.auth import user_invite as uimod
 from facts.auth.workspace import workspace
-from facts.auth.founder import founder
+from facts.auth.invite_accepted import invite_accepted
 from facts.auth.user import user
+from facts.auth.user_invite import user_invite
 from facts.auth.signature import signature
 
 # RFC 8032 section 7.1 test vectors: (secret seed, public key, message, signature).
@@ -43,24 +45,31 @@ def test_roundtrip_and_bad_inputs():
     for bad in (b"", b"\x00" * 32, os.urandom(63), os.urandom(65)):
         assert e.verify(pk, b"hello", bad) is False   # malformed sig: never raises
 
-WS = workspace(b"acme", 1)
+SK, PK = e.keygen(bytes.fromhex(VECTORS[0][0]))      # PK is the workspace root in these tests
+WS = workspace(b"acme", PK, 1)                        # the root pk is embedded in the workspace
 WID = fact_id(WS)
-SK, PK = e.keygen(bytes.fromhex(VECTORS[0][0]))      # PK is the founder root of WS in these tests
 
-def _founder(t):                                     # the root fact + its self-signature
-    fo = founder(WID, PK, t); fid = fact_id(fo)
-    return fo, signature(WID, PK, fid, e.sign(SK, fid), t)
+def _sig(sk, pk, target, t, scope=WID):
+    return signature(scope, pk, target, e.sign(sk, target), t)
 
-def _member(name, t):                                # founder-path user, its id, its signature by PK
-    u = user(WID, name, PK, None, t); uid = fact_id(u)
-    return u, uid, signature(WID, PK, uid, e.sign(SK, uid), t)
+_ISK, _IPK = e.keygen(bytes.fromhex(VECTORS[1][0]))  # a fixed invite key, so chains are reproducible
+
+def _chain(name, t):                                 # (rooting facts, member fact, uid, member sig)
+    inv = user_invite(WID, _IPK, 3); iid = fact_id(inv)
+    roots = [WS, _sig(SK, PK, WID, 1, scope=b"auth"), invite_accepted(WID, iid, _ISK, b"", PK, 2),
+             inv, _sig(SK, PK, iid, 3)]              # workspace + acceptance + invite chain
+    u = user(WID, name, PK, iid, t); uid = fact_id(u)
+    return roots, u, uid, _sig(_ISK, _IPK, uid, t)
+
+def _member(node, name, t):                          # drain the rooting chain; return member + its sig
+    roots, u, uid, s = _chain(name, t)
+    for f in roots: node.admit(encode(f))
+    node.run(); return u, uid, s
 
 def test_tampered_signature_is_inert_at_gate():
-    n = Node(ROOT); n.admit(encode(WS)); n.run()
-    _, uid, s = _member(b"al", 3)
+    n = Node(ROOT); _, uid, s = _member(n, b"al", 4)
     bad = bytearray(encode(s)); bad[-1] ^= 1          # flip one byte of the signature
-    n2 = Node(ROOT)
-    assert n2.admit(bytes(bad)) is None               # falsy check -> inert miss
+    assert Node(ROOT).admit(bytes(bad)) is None       # falsy check -> inert miss
     assert n.admit(encode(s)) is not None             # the honest one admits
 
 def test_malformed_signature_never_crashes_the_gate():
@@ -73,25 +82,20 @@ def test_malformed_signature_never_crashes_the_gate():
     assert Node(ROOT).admit(encode(junk)) is None
 
 def test_user_parks_until_signature_lands_either_order():
-    u, uid, s = _member(b"al", 3)
-    fo, fs = _founder(2)                               # the root that blesses PK must be present
-    def rooted(node):
-        for b in (encode(WS), encode(fo), encode(fs)): node.admit(b)
-        node.run()
-    n = Node(ROOT); rooted(n)
+    n = Node(ROOT); u, uid, s = _member(n, b"al", 4)   # chain present, member's own sig withheld
     n.admit(encode(u)); n.run()
     assert n.memo[uid] == "Parked"                    # Require b"pk" (its signature) unmet
     n.admit(encode(s)); n.run()
-    assert n.memo[uid] == "Valid"                     # signature wakes it; signer PK == root
-    m = Node(ROOT); rooted(m)                          # reverse order: signature first
+    assert n.memo[uid] == "Valid"                     # signature wakes it; signer == the invite key
+    m = Node(ROOT); _member(m, b"al", 4)               # reverse order on a fresh node: signature first
     m.admit(encode(s)); m.run(); m.admit(encode(u)); m.run()
     assert m.memo[uid] == "Valid"
 
 def test_replay_never_reverifies():
     n = Node(ROOT)
-    wid = wsmod.create(n, b"acme", 1); n.run()        # workspace + founder root + its signature
-    uid = usermod.join(n, wid, b"al", 3); n.run()     # founder self-joins with the rooted local key
-    assert n.memo[uid] == "Valid"
+    wid = wsmod.create(n, b"acme", 1); n.run()        # full bootstrap: workspace + first member + admin
+    uid = next(k for k, f in n.facts.items() if f.type_tag == b"auth.user")
+    assert n.memo[uid] == "Valid"                     # the founder's own membership
     calls, orig = [], sigmod.verify
     sigmod.verify = lambda *a: (calls.append(1), orig(*a))[1]
     try:
