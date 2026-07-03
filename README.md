@@ -20,8 +20,8 @@ proven.
 Run: `pytest` or `python3 tests/test_<name>.py`. No dependencies.
 
 ```
-$ bin/con.py w.facts chat.note.send general "hello"
-b4c1…      # fact id
-$ bin/con.py w.facts chat.note.feed general
+$ bin/con.py w.facts auth.workspace.create acme        # prints <wid>
+$ bin/con.py w.facts content.message.send <wid> general al "hello"
+$ bin/con.py w.facts content.message.feed <wid> general
 hello
 ```
