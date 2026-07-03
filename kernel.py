@@ -2,8 +2,9 @@
 
 Facts are the unit of identity, atoms the unit of matching, and needs/offers
 are the whole fact language. The kernel owns exactly four things: canonical
-identity, admission, matching, and the turn loop. Everything else — sync,
-queues, effects, clocks, content, retention — is a fact family under facts/.
+identity, admission, matching, and the turn loop (which the host feeds `now`).
+Everything else — sync, queues, effects, content, retention — is a fact family
+under facts/; time alone is a turn primitive, not a family (see turn/now_need).
 
 Projectors ARE the routers: the kernel runs one root projector, and a Router
 is just a projector that dispatches on the next type-tag segment. Extraction

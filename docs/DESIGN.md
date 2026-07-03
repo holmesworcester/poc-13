@@ -435,23 +435,24 @@ facts/s and MB/s.
 
 ## The Clock
 
-The clock driver (`facts/clock/tick.py`) is host time as facts, demand-driven.
-A tick is one volatile fact offering `tick` at its 100ms bucket; the daemon
-admits at most one per bucket, and only while some fact keeps a standing
-`alarm` offer at a due deadline — zero alarms, zero ticks, ever. Standing
-alarms also bound the daemon's idle select timeout, so a deadline wakes the
-loop on time without polling.
+Time is not a fact family: it is the one input the host reads from the OS and
+hands to the turn. `kernel.turn(now)` presents `now` as a single transient
+offer at the NOW key; a time-waiting fact carries a Watch need over
+[deadline, ∞) (`now_need`), and when now reaches its deadline the offer falls
+in range and wakes it. There are no tick facts, so nothing accumulates;
+matching stays ordinary (a plain Range need over a plain offer); and durable
+derived state never depends on `now`, so replay with any `now` rebuilds it
+identically. The daemon just reads the clock each loop and passes it to the
+turn — it never sleeps *for* a deadline, because a time-need that comes due
+while it is blocked in `select()` is simply serviced on the next wake.
 
-The retry idiom, for any family that awaits an answer: bake a bounded backoff
-schedule of `alarm` offers at authoring (facts are immutable — a deadline can
-never move, so the schedule is chosen up front), Watch — never Require —
-`tick` over the bounded window from the first deadline to the last plus a
-grace period (a resolved or expired fact stops matching new ticks and can
-never storm), and drop the alarms and the send offers they pace the moment
-the resolution key appears in context. Purely operational repetition — socket
-redial damping, sync compare cadence — stays process-local in the daemon, as
-poc-10 keeps it: facts carry policy (deadlines, what to offer, when to stop),
-never socket schedules.
+Recurrence is central but the onus is on one party: everything that must
+happen repeats, and the repeating side drives it. The initiator's durable
+request re-dials on a process-local cadence; the responder answers each
+arrival with no cadence of its own. Sync compares repeat the same way. This
+operational repetition — which peer to talk to, and how often — stays
+process-local in the daemon (as poc-10 keeps it); the facts carry only policy
+(what to offer, when to stop), never socket schedules.
 
 ## Family Specs Not Yet Implemented
 
@@ -467,7 +468,7 @@ families without kernel changes:
   `DELETE` over the db, and `VACUUM` reclaims space.
 - **Drivers** — local input as a host-authored fact family; the event source
   reading the OS is outside the boundary. (The connection driver is built —
-  see Connections; the clock driver is built — see The Clock.)
+  see Connections; time is a turn primitive — see The Clock.)
 
 ## Testing
 
