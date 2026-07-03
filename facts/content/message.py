@@ -5,6 +5,7 @@ own death key (Suppress on SELF). Scope is the workspace id alone — channel
 rides as the feed offer's target, which beats a composite scope on LOC."""
 from kernel import (Atom, Exact, NEED, OFFER, Out, REQUIRE, SELF, SUPPRESS,
                     encode, fact, now, ts_atom)
+from facts.store import hydrate
 
 TAG = b"content.message"
 
@@ -28,7 +29,9 @@ def send(node, workspace_id, channel, author, body, t):
     return node.admit(encode(message(workspace_id, channel, author, body, t)))
 
 # QUERIES — observations over validated state only, ordered by (ts, owner).
+# Queries author volatile demand (never durable facts) and drain before reading.
 def feed(node, workspace_id, channel):
+    hydrate.demand(node, b"msg", workspace_id); node.run()
     return [a.value for o, t, a in sorted(node.watched(b"msg", workspace_id),
                                           key=lambda r: (r[1], r[0]))
             if a.target == Exact(channel)]

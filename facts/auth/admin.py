@@ -1,6 +1,7 @@
 """facts/auth/admin.py — an admin grant naming a user. Requires that user's
 membership offer, so a grant can never outrun the membership it elevates."""
 from kernel import Atom, Exact, NEED, OFFER, Out, REQUIRE, encode, fact, now, ts_atom
+from facts.store import hydrate
 
 TAG = b"auth.admin"
 
@@ -23,6 +24,7 @@ def grant(node, workspace_id, user_id, t):
 
 # QUERIES — observations over validated state only, ordered by (ts, owner).
 def admins(node, workspace_id):
+    hydrate.demand(node, b"admin", workspace_id); node.run()
     return [a.target[1] for o, t, a in sorted(node.watched(b"admin", workspace_id),
                                               key=lambda r: (r[1], r[0]))]
 

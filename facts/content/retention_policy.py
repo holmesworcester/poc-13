@@ -3,6 +3,7 @@ as an LWW slice entry: latest (ts, owner) wins by kernel rule, replacement is
 free. Recording only — the purge machinery that enforces the window is a
 later family (DESIGN.md, Retention and purge)."""
 from kernel import Atom, Exact, NEED, OFFER, Out, REQUIRE, encode, fact, now, ts_atom
+from facts.store import hydrate
 
 TAG = b"content.retention_policy"
 
@@ -27,6 +28,7 @@ def set_window(node, workspace_id, ttl, t):
 
 # QUERIES — observations over validated state only (here: the LWW slice).
 def window(node, workspace_id):
+    hydrate.demand(node, b"retention", workspace_id); node.run()
     row = node.slices.get(("retention", workspace_id))
     return int.from_bytes(row[1], "little") if row else None
 

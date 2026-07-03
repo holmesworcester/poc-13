@@ -5,6 +5,7 @@ one added Require in SHAPE: Atom(NEED, b"sig", workspace_id, SELF,
 effect=REQUIRE), gating membership on a detached signature offer."""
 from kernel import (Atom, Exact, NEED, OFFER, Out, REQUIRE, SELF, encode,
                     fact, now, ts_atom)
+from facts.store import hydrate
 
 TAG = b"auth.user"
 
@@ -28,6 +29,7 @@ def join(node, workspace_id, name, key, t):
 
 # QUERIES — observations over validated state only, ordered by (ts, owner).
 def roster(node, workspace_id):
+    hydrate.demand(node, b"member", workspace_id); node.run()
     return [a.value for o, t, a in sorted(node.watched(b"member", workspace_id),
                                           key=lambda r: (r[1], r[0]))]
 

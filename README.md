@@ -13,7 +13,8 @@ proven.
   the routers: `facts.ROOT` dispatches type tags, api paths, and CLI verbs
   through one tree. The module is the Python API.
 - `bin/con.py` — `con <db> <scope.fact.verb> [args...]`. Proxies to a
-  running daemon at `<db>.sock`, else a crash-and-replay of the dumb file.
+  running daemon at `<db>.sock`, else a crash-and-demand: the file is
+  indexed cold and hydration pulls only what the verb asks about.
 - `bin/cond.py` — `cond <db> [--listen HOST:PORT] [--peer HOST:PORT ...]`.
   The daemon: owns the db, amortizes replay, serves con over the unix
   socket, exchanges facts (the wire's only message) with TCP peers.

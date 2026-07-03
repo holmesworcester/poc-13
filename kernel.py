@@ -10,7 +10,9 @@ is just a projector that dispatches on the next type-tag segment. Extraction
 routes through the same tree.
 
 Derived state (validity memo, clean twin, slices, frontier) is rebuildable
-from the durable fact set alone: `replay()` is the whole crash story.
+from the durable fact set alone: `replay()` is the whole crash story. With a
+Store, replay is demand-driven: a stepped fact's needs pull matching cold
+facts resident (hydration), so a session pays for what it asks about.
 
 Stand-in: BLAKE2b-256 for BLAKE3-256 (stdlib has no BLAKE3).
 """
@@ -90,10 +92,13 @@ ts_of = lambda f: next((int.from_bytes(a.value, "little")
                         for a in f.atoms if a.kind == OFFER and a.role == b"ts"), 0)
 
 # --- Matching -------------------------------------------------------------------
-def covers(off_t, need_t):               # needs are exact; SELF never matches
-    if need_t[0] != EXACT: return False
-    return (off_t == need_t or
-            (off_t[0] == RANGE and off_t[1] <= need_t[1] <= off_t[2]))
+def covers(off_t, need_t):               # SELF never matches; range↔range never matches
+    if need_t[0] == EXACT:
+        return (off_t == need_t or
+                (off_t[0] == RANGE and off_t[1] <= need_t[1] <= off_t[2]))
+    if need_t[0] == RANGE:               # range need: demand over exact offers
+        return off_t[0] == EXACT and need_t[1] <= off_t[1] <= need_t[2]
+    return False
 
 # Materialization rule: every derived row rewrites SELF to the owner id.
 mat = lambda a, fid: replace(a, target=Exact(fid)) if a.target == SELF else a
@@ -133,13 +138,61 @@ class Router:
         c = self._child(f)
         return c.project(f, ctx, sl) if c else None
 
+# --- The durable store --------------------------------------------------------------
+# Hydration window, riding in a Watch need's value: engine-owned bytes, never
+# read by matching. Gating needs (Require/Suppress) ignore it — their pulls
+# are exhaustive, because a missed offer could change a verdict.
+def window(lo=0, hi=2**64 - 1, budget=2**32 - 1, order=0):
+    return (lo.to_bytes(8, "little") + hi.to_bytes(8, "little")
+            + budget.to_bytes(4, "little") + bytes([order]))
+
+_window = lambda v: (int.from_bytes(v[:8], "little"), int.from_bytes(v[8:16], "little"),
+                     int.from_bytes(v[16:20], "little"), v[20])
+
+class Store:
+    """The durable index: persisted facts not yet resident (cold), keyed by
+    fid, plus one materialized offer row per atom under its (role, scope) key.
+    Outside the trust boundary — the host feeds it frames, and every pull
+    re-enters through checked admission, so wrong bytes are a miss. Popping a
+    pulled fact from cold is the per-fact dedup: re-scanning a window never
+    delivers the same owner twice."""
+
+    def __init__(self):
+        self.ids, self.cold, self.idx = set(), {}, {}   # all fids ; fid -> bytes ; key -> rows
+
+    def add(self, fb):                   # checked load: bad bytes are a miss
+        try: f = decode(fb)
+        except Exception: return
+        fid = fact_id(f)
+        if fid in self.ids: return
+        self.ids.add(fid); self.cold[fid] = fb
+        for a in f.atoms:
+            if a.kind == OFFER:
+                m = mat(a, fid)
+                self.idx.setdefault((m.role, m.scope), []).append((ts_of(f), fid, m))
+
+    def pull(self, need):                # cold matches, (ts, fid) order, budget = primary hits
+        rows = [r for r in self.idx.get((need.role, need.scope), ())
+                if r[1] in self.cold and covers(r[2].target, need.target)]
+        rows.sort(key=lambda r: (r[0], r[1]))
+        budget = None
+        if need.effect == WATCH and need.value and len(need.value) == 21:
+            lo, hi, budget, order = _window(need.value)
+            rows = [r for r in rows if lo <= r[0] <= hi]
+            if order: rows.reverse()
+        fids = list(dict.fromkeys(r[1] for r in rows))
+        return [self.cold.pop(x) for x in (fids if budget is None else fids[:budget])]
+
 # --- The engine --------------------------------------------------------------------
 class Node:
     """One engine over one root projector. Durable authority = self.durable
-    (canonical bytes, 'the disk'); memo/clean/slices/frontier are derived."""
+    (canonical bytes, 'the disk'); memo/clean/slices/frontier are derived.
+    With a store, residency is demand-driven: a stepped fact's needs pull
+    matching cold facts through ordinary admission — replay is the fixpoint
+    of demand, and full replay is the degenerate case (one unbounded need)."""
 
-    def __init__(self, root):
-        self.root = root
+    def __init__(self, root, store=None):
+        self.root, self.store = root, store
         self.facts, self.durable = {}, {}    # id -> Fact ; id -> canonical bytes
         self.rows, self.intake = [], []      # asserted index + session overlay: (owner, atom)
         self.memo, self.clean = {}, []       # id -> verdict ; validated offers (owner, ts, atom)
@@ -190,6 +243,9 @@ class Node:
     def _step(self, fid):
         if fid not in self.facts: return
         f = self.facts[fid]; ns = needs_of(f, fid)
+        if self.store:                   # demand: needs pull their cold matches
+            for n in ns:                 # resident first; offers never wake cold
+                for b in self.store.pull(n): self.admit(b, checked=True)
         # Precedence (ratified): Suppress > Require(Park) > Resolve.
         if any(self.valid_offers(n) for n in ns if n.effect == SUPPRESS):
             out = Out("Suppressed")
