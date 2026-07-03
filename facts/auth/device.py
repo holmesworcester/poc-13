@@ -8,6 +8,7 @@ from kernel import (Atom, Exact, NEED, OFFER, Out, REQUIRE, SELF, by, encode,
                     fact, now, ts_atom)
 from facts.auth import signature
 from ed25519 import keygen
+from facts.store import hydrate
 
 TAG = b"auth.device"
 
@@ -36,6 +37,7 @@ def enroll(node, workspace_id, label, invite, t):
 
 # QUERIES — observations over validated state only, ordered by (ts, owner).
 def devices(node, workspace_id):
+    hydrate.demand(node, b"device", workspace_id); node.run()
     return [a.value for o, t, a in sorted(node.watched(b"device", workspace_id),
                                           key=lambda r: (r[1], r[0]))]
 

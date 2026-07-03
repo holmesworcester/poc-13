@@ -12,6 +12,7 @@ shareable: a signature must travel with what it signs, and being a Require
 dep it ships automatically under dep-aware sync."""
 from kernel import Atom, EXACT, Exact, OFFER, Out, encode, fact, now, ts_atom
 from ed25519 import sign, verify
+from facts.store import hydrate
 
 TAG = b"auth.signature"
 
@@ -45,6 +46,7 @@ def attest(node, workspace_id, sk, pk, target_id, t):
 
 # QUERIES — observations over validated state only.
 def signed(node, workspace_id, target_id):
+    hydrate.demand(node, b"sig", workspace_id); node.run()
     return [a.value for _, _, a in node.watched(b"sig", workspace_id)
             if a.target == Exact(target_id)]
 

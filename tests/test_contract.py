@@ -1,6 +1,6 @@
 """Source-contract test: every fact file has the six-part shape, in order,
 with responsibilities where they belong (docs/DESIGN.md, The Fact Contract)."""
-import pathlib
+import ast, pathlib
 
 FACTS = pathlib.Path(__file__).resolve().parent.parent / "facts"
 SECTIONS = ["# SHAPE", "# EXTRACT", "# PROJECT", "# COMMANDS", "# QUERIES", "# CLI"]
@@ -27,5 +27,22 @@ def test_fact_contract():
                 assert "ctx" not in part[s], (p, s)
         assert "CLI = {" in part["# CLI"], p                      # explicit verb table
 
+def test_needs_carry_no_values():
+    """Need values belong to the engine — today that is the hydration window
+    on Watch needs (kernel Store.pull keys on a 21-byte value). A family
+    that put a value on a need would get silently windowed pulls, so no
+    family constructs one; store/hydrate is the single exemption, since
+    authoring the window is its whole job."""
+    for p in FACTS.rglob("*.py"):
+        if p.name == "__init__.py" or p.relative_to(FACTS).parts == ("store", "hydrate.py"):
+            continue
+        for node in ast.walk(ast.parse(p.read_text())):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == "Atom" and node.args
+                    and isinstance(node.args[0], ast.Name) and node.args[0].id == "NEED"):
+                assert len(node.args) <= 4, (p, node.lineno)      # no positional value
+                assert all(k.arg != "value" for k in node.keywords), (p, node.lineno)
+
 if __name__ == "__main__":
-    test_fact_contract(); print("ok  test_fact_contract")
+    for t in (test_fact_contract, test_needs_carry_no_values):
+        t(); print(f"ok  {t.__name__}")

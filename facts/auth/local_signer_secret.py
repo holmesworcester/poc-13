@@ -7,6 +7,7 @@ sign with; whoami prints the public key. Trusting the durable file here is a
 local-integrity assumption, not a protocol one — see docs/DESIGN.md."""
 from kernel import Atom, OFFER, Out, SELF, encode, fact, now, ts_atom
 from ed25519 import keygen as _keygen
+from facts.store import hydrate
 
 TAG = b"auth.local_signer_secret"
 
@@ -31,6 +32,7 @@ def keygen(node, t):
 
 # QUERIES — observations over validated state only.
 def current(node):
+    hydrate.demand(node, b"sk", b"local"); hydrate.demand(node, b"pk", b"local"); node.run()
     sk = next((a.value for _, _, a in node.watched(b"sk", b"local")), None)
     pk = next((a.value for _, _, a in node.watched(b"pk", b"local")), None)
     return (sk, pk) if sk and pk else None

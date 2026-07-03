@@ -16,6 +16,7 @@ from kernel import (Atom, Exact, NEED, OFFER, Out, REQUIRE, SELF, by, encode,
                     fact, now, ts_atom)
 from facts.auth import local_signer_secret, signature
 from ed25519 import keygen
+from facts.store import hydrate
 
 TAG = b"auth.user"
 
@@ -53,6 +54,7 @@ def join(node, workspace_id, name, t, invite=None):
 
 # QUERIES — observations over validated state only, ordered by (ts, owner).
 def roster(node, workspace_id):
+    hydrate.demand(node, b"member", workspace_id); node.run()
     return [a.value for o, t, a in sorted(node.watched(b"member", workspace_id),
                                           key=lambda r: (r[1], r[0]))]
 

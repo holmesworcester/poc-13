@@ -3,6 +3,7 @@ host-watched outbox key until a performed fact — which it Watches, never
 Requires — reports the effect happened."""
 from kernel import (Atom, Exact, NEED, OFFER, Out, SELF, WATCH, by, encode,
                     fact, now, ts_atom)
+from facts.store import hydrate
 
 TAG = b"outbox.intent"
 
@@ -26,6 +27,7 @@ def queue(node, dest, payload, t):
 
 # QUERIES — observations over validated state only, ordered by (ts, owner).
 def pending(node):
+    hydrate.demand(node, b"send", b"outbox"); node.run()
     return sorted(node.watched(b"send", b"outbox"), key=lambda r: (r[1], r[0]))
 
 # CLI — string boundary over COMMANDS/QUERIES.

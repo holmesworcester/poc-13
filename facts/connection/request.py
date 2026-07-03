@@ -8,6 +8,7 @@ so a closed peer stays closed across restart. --peer flags are bootstrap sugar:
 the daemon authors one request per flag through the normal gate at startup."""
 from kernel import (Atom, NEED, OFFER, Out, SELF, SUPPRESS, encode, fact, now,
                     ts_atom)
+from facts.store import hydrate
 
 TAG = b"connection.request"
 SC = b"conn"
@@ -31,6 +32,7 @@ def connect(node, addr, t):
 
 # QUERIES — the daemon's dial set: the addresses of still-valid requests.
 def dials(node):
+    hydrate.demand(node, b"peer", SC); node.run()
     return sorted({a.value for _, _, a in node.watched(b"peer", SC)})
 
 # CLI — string boundary over COMMANDS/QUERIES.

@@ -1,22 +1,27 @@
 #!/usr/bin/env python3
 """con — the poc-13 CLI.  Usage: con <db> <scope.fact.verb> [args...]
 
-The db is the dumb file: length-framed canonical fact bytes, append-only,
-nothing else. If a daemon owns the db (<db>.sock connects), the verb is
-proxied to it: one framed request out, one framed +ok/-err reply back.
-Otherwise every invocation is a crash-and-replay — load, replay to
-quiescence, run one verb, append whatever new durable facts appeared."""
+The db is sqlite holding one dumb table — facts(fid, bytes), canonical fact
+bytes and nothing else — plus a derived atom index the kernel Store owns. If
+a daemon owns the db (<db>.sock connects), the verb is proxied to it: one
+framed request out, one framed +ok/-err reply back. Otherwise every
+invocation is a crash-and-demand — open the db cold, run one verb, and let
+hydration pull only what the verb's facts and queries ask about; flush
+whatever new durable facts appeared."""
 import os, socket, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from kernel import Node, _rd, frame
+from kernel import Node, Store, _rd, frame
 from facts import ROOT
 
-def load(node, path):                    # own file: already passed the gate once
-    if os.path.exists(path):
-        b, i = open(path, "rb").read(), 0
-        while i < len(b):
-            fb, i = _rd(b, i); node.admit(fb, checked=True)
+def load(node, store):                   # full replay: own db passed the gate once
+    for fb in store.all(): node.admit(fb, checked=True)
     node.run()
+
+def flush(node, store, flushed):         # one transaction per host turn; the
+    if len(flushed) == len(node.durable): return      # flushed set keeps repeats cheap
+    for fid, fb in node.durable.items():
+        if fid not in flushed: store.add(fb, hot=True); flushed.add(fid)
+    store.commit()
 
 def proxy(s, path, args):                # the daemon owns the db; just ask it
     s.sendall(frame(path.encode(), *(a.encode() for a in args)))
@@ -30,19 +35,17 @@ def proxy(s, path, args):                # the daemon owns the db; just ask it
 def main(db, path, *args):
     s = socket.socket(socket.AF_UNIX)
     try: s.connect(db + ".sock")
-    except OSError: s = None             # no daemon: crash-and-replay below
+    except OSError: s = None             # no daemon: crash-and-demand below
     if s: return proxy(s, path, args)
-    node = Node(ROOT); load(node, db)
+    store = Store(db)
+    node = Node(ROOT, store)
     *segs, verb = path.split(".")
     mod = ROOT.resolve([x.encode() for x in segs])
     if mod is None or verb not in getattr(mod, "CLI", {}):
         sys.exit(f"unknown verb: {path}")
-    before = set(node.durable)
     out = mod.CLI[verb](node, *args)
     node.run()
-    with open(db, "ab") as f:
-        for fid, fb in node.durable.items():
-            if fid not in before: f.write(frame(fb))
+    flush(node, store, set())            # add is idempotent: hydrated ≠ new
     if out: print(out)
 
 if __name__ == "__main__":

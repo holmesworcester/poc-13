@@ -7,6 +7,7 @@ AUTHORITY root (which key founds the workspace) is a separate auth.founder fact
 that create emits alongside it."""
 from kernel import Atom, OFFER, Out, SELF, encode, fact, now, ts_atom
 from facts.auth import founder
+from facts.store import hydrate
 
 TAG = b"auth.workspace"
 
@@ -30,6 +31,7 @@ def create(node, name, t):
 
 # QUERIES — observations over validated state only, ordered by (ts, owner).
 def index(node):
+    hydrate.demand(node, b"workspace", b"auth"); node.run()
     return [(o, a.value) for o, t, a in sorted(node.watched(b"workspace", b"auth"),
                                                key=lambda r: (r[1], r[0]))]
 

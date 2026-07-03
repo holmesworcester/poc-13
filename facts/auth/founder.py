@@ -12,6 +12,7 @@ a root it can see, and legitimately-invited members chain to the founder whose
 key signed their invite — a rival root roots only its own disjoint tree."""
 from kernel import Atom, Exact, NEED, OFFER, Out, REQUIRE, SELF, by, encode, fact, now, ts_atom
 from facts.auth import local_signer_secret, signature
+from facts.store import hydrate
 
 TAG = b"auth.founder"
 
@@ -42,6 +43,7 @@ def claim(node, workspace_id, t):
 
 # QUERIES — observations over validated state only.
 def root(node, workspace_id):
+    hydrate.demand(node, b"root", b"auth"); node.run()
     return next((a.value for _, _, a in node.watched(b"root", b"auth")
                  if a.target == Exact(workspace_id)), None)
 

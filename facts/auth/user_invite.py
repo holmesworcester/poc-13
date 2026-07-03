@@ -12,6 +12,7 @@ from kernel import (Atom, Exact, NEED, OFFER, Out, REQUIRE, SELF, WATCH, by,
                     encode, fact, now, ts_atom)
 from facts.auth import local_signer_secret, signature
 from ed25519 import keygen
+from facts.store import hydrate
 
 TAG = b"auth.user_invite"
 
@@ -45,6 +46,7 @@ def invite(node, workspace_id, t):
 
 # QUERIES — observations over validated state only.
 def outstanding(node, workspace_id):
+    hydrate.demand(node, b"invite", workspace_id); node.run()
     return [o for o, t, a in node.watched(b"invite", workspace_id)]
 
 # CLI — string boundary over COMMANDS/QUERIES.

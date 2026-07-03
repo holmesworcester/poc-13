@@ -10,14 +10,16 @@ is just a projector that dispatches on the next type-tag segment. Extraction
 routes through the same tree.
 
 Derived state (validity memo, clean twin, slices, frontier) is rebuildable
-from the durable fact set alone: `replay()` is the whole crash story.
+from the durable fact set alone: `replay()` is the whole crash story. With a
+Store, replay is demand-driven: a stepped fact's needs pull matching cold
+facts resident (hydration), so a session pays for what it asks about.
 
 Stand-in: BLAKE2b-256 for BLAKE3-256 (stdlib has no BLAKE3).
 """
 from collections import deque
 from dataclasses import dataclass, field, replace
 from itertools import chain
-import hashlib, time
+import hashlib, sqlite3, time
 
 H = lambda b: hashlib.blake2b(b, digest_size=32).digest()
 now = lambda: int(time.time())           # host convenience; never engine input
@@ -90,10 +92,13 @@ ts_of = lambda f: next((int.from_bytes(a.value, "little")
                         for a in f.atoms if a.kind == OFFER and a.role == b"ts"), 0)
 
 # --- Matching -------------------------------------------------------------------
-def covers(off_t, need_t):               # needs are exact; SELF never matches
-    if need_t[0] != EXACT: return False
-    return (off_t == need_t or
-            (off_t[0] == RANGE and off_t[1] <= need_t[1] <= off_t[2]))
+def covers(off_t, need_t):               # SELF never matches; range↔range never matches
+    if need_t[0] == EXACT:
+        return (off_t == need_t or
+                (off_t[0] == RANGE and off_t[1] <= need_t[1] <= off_t[2]))
+    if need_t[0] == RANGE:               # range need: demand over exact offers
+        return off_t[0] == EXACT and need_t[1] <= off_t[1] <= need_t[2]
+    return False
 
 # Materialization rule: every derived row rewrites SELF to the owner id.
 mat = lambda a, fid: replace(a, target=Exact(fid)) if a.target == SELF else a
@@ -133,13 +138,87 @@ class Router:
         c = self._child(f)
         return c.project(f, ctx, sl) if c else None
 
+# --- The durable store --------------------------------------------------------------
+# Hydration window, riding in a Watch need's value: engine-owned bytes, never
+# read by matching. Gating needs (Require/Suppress) ignore it — their pulls
+# are exhaustive, because a missed offer could change a verdict.
+def window(lo=0, hi=2**64 - 1, budget=2**32 - 1, order=0):
+    return (lo.to_bytes(8, "little") + hi.to_bytes(8, "little")
+            + budget.to_bytes(4, "little") + bytes([order]))
+
+_window = lambda v: (int.from_bytes(v[:8], "little"), int.from_bytes(v[8:16], "little"),
+                     int.from_bytes(v[16:20], "little"), v[20])
+
+_t8 = lambda t: t.to_bytes(8, "big")     # u64 ts as blob: memcmp order, no i64 overflow
+
+class Store:
+    """The db: `facts(fid, bytes)` — the dumb table, canonical fact bytes and
+    nothing else — is the one durable authority; `atoms` is a derived match
+    index (one materialized offer row per atom, rebuildable from facts); TEMP
+    `hot` is this session's delivered set, the per-fact dedup that makes a
+    window re-scan never deliver the same owner twice. Outside the trust
+    boundary — every pull re-enters through checked admission, so wrong
+    bytes are a miss. The atom coverage relation is the one WHERE clause in
+    pull(); kernel `covers` is its spec (mirror-tested)."""
+
+    def __init__(self, path=":memory:"):
+        self.db = sqlite3.connect(path)
+        self.db.execute("PRAGMA busy_timeout=5000")  # daemonless cons may briefly overlap
+        self.db.execute("PRAGMA journal_mode=WAL")   # commit-per-turn without an fsync
+        self.db.execute("PRAGMA synchronous=NORMAL") # per turn; still beats the old file append
+        self.db.executescript("""
+          CREATE TABLE IF NOT EXISTS facts(fid BLOB PRIMARY KEY, bytes BLOB) WITHOUT ROWID;
+          CREATE TABLE IF NOT EXISTS atoms(fid BLOB, ts BLOB, role BLOB, scope BLOB,
+                                           ex INT, lo BLOB, hi BLOB);
+          CREATE INDEX IF NOT EXISTS match_ix ON atoms(role, scope, lo, ts);
+          CREATE TEMP TABLE hot(fid BLOB PRIMARY KEY);""")
+
+    def add(self, fb, hot=False):        # checked load: bad bytes are a miss
+        try: f = decode(fb)
+        except Exception: return
+        fid = fact_id(f)
+        if not self.db.execute("INSERT OR IGNORE INTO facts VALUES(?,?)", (fid, fb)).rowcount:
+            return                       # already stored: atoms are already indexed
+        if hot: self.db.execute("INSERT OR IGNORE INTO hot VALUES(?)", (fid,))
+        self.db.executemany("INSERT INTO atoms VALUES(?,?,?,?,?,?,?)",
+            [(fid, _t8(ts_of(f)), m.role, m.scope, m.target[0] == EXACT,
+              m.target[1], m.target[-1])
+             for a in f.atoms if a.kind == OFFER for m in (mat(a, fid),)])
+
+    def pull(self, need):                # matches not yet delivered, (ts, fid) order,
+        nlo, nhi = need.target[1], need.target[-1]     # budget counts primary hits
+        sql = """SELECT DISTINCT ts, fid FROM atoms WHERE role=? AND scope=?
+                 AND ((ex AND lo BETWEEN ? AND ?) OR (NOT ex AND ? AND ? BETWEEN lo AND hi))
+                 AND fid NOT IN (SELECT fid FROM hot)"""
+        args = [need.role, need.scope, nlo, nhi, need.target[0] == EXACT, nlo]
+        if need.effect == WATCH and need.value and len(need.value) == 21:
+            lo, hi, budget, order = _window(need.value)
+            d = "DESC" if order else "ASC"
+            sql += f" AND ts BETWEEN ? AND ? ORDER BY ts {d}, fid {d} LIMIT ?"
+            args += [_t8(lo), _t8(hi), budget]
+        else:
+            sql += " ORDER BY ts, fid"   # gating: exhaustive, a miss could flip a verdict
+        out = []
+        for _, fid in self.db.execute(sql, args).fetchall():
+            self.db.execute("INSERT OR IGNORE INTO hot VALUES(?)", (fid,))
+            out.append(self.db.execute("SELECT bytes FROM facts WHERE fid=?", (fid,)).fetchone()[0])
+        return out
+
+    def all(self):                       # full replay: the degenerate demand
+        return [r[0] for r in self.db.execute("SELECT bytes FROM facts")]
+
+    def commit(self): self.db.commit()   # host calls it: durable before the reply
+
 # --- The engine --------------------------------------------------------------------
 class Node:
     """One engine over one root projector. Durable authority = self.durable
-    (canonical bytes, 'the disk'); memo/clean/slices/frontier are derived."""
+    (canonical bytes, 'the disk'); memo/clean/slices/frontier are derived.
+    With a store, residency is demand-driven: a stepped fact's needs pull
+    matching cold facts through ordinary admission — replay is the fixpoint
+    of demand, and full replay is the degenerate case (one unbounded need)."""
 
-    def __init__(self, root):
-        self.root = root
+    def __init__(self, root, store=None):
+        self.root, self.store = root, store
         self.facts, self.durable = {}, {}    # id -> Fact ; id -> canonical bytes
         # Match indexes bucketed by (kind, role, scope) / (role, scope): a need
         # only ever matches offers sharing its role+scope, so one bucket is the
@@ -198,6 +277,9 @@ class Node:
     def _step(self, fid):
         if fid not in self.facts: return
         f = self.facts[fid]; ns = needs_of(f, fid)
+        if self.store:                   # demand: needs pull their cold matches
+            for n in ns:                 # resident first; offers never wake cold
+                for b in self.store.pull(n): self.admit(b, checked=True)
         # Precedence (ratified): Suppress > Require(Park) > Resolve.
         if any(self.valid_offers(n) for n in ns if n.effect == SUPPRESS):
             out = Out("Suppressed")

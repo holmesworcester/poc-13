@@ -2,7 +2,8 @@
 
 The atom model played for conciseness: a single-file kernel, a `facts/` tree
 where every fact family is one file with one fixed contract, and a CLI whose
-db is a dumb append-only file of canonical fact bytes. The design of record
+db is sqlite holding one dumb table of canonical fact bytes (plus a derived
+match index the kernel's Store owns). The design of record
 is `docs/DESIGN.md`; protocol semantics descend from poc-12, where they were
 proven.
 
@@ -13,7 +14,8 @@ proven.
   the routers: `facts.ROOT` dispatches type tags, api paths, and CLI verbs
   through one tree. The module is the Python API.
 - `bin/con.py` — `con <db> <scope.fact.verb> [args...]`. Proxies to a
-  running daemon at `<db>.sock`, else a crash-and-replay of the dumb file.
+  running daemon at `<db>.sock`, else a crash-and-demand: the file is
+  indexed cold and hydration pulls only what the verb asks about.
 - `bin/cond.py` — `cond <db> [--listen HOST:PORT] [--peer HOST:PORT ...]`.
   The daemon: owns the db, amortizes replay, serves con over the unix
   socket, reconciles facts (the wire's only message) with TCP peers via the
@@ -50,24 +52,24 @@ real regression. Headline numbers over a 10,000-fact workspace (one laptop core)
 | path | cost |
 |---|---|
 | admit + run 10k facts | ~0.35s (0.035 ms/fact) |
-| replay 10k facts (linear, no index) | ~0.54s |
-| one verb, cold `con.py` (crash + replay 10k + verb) | ~0.63s |
-| same verb via the daemon (replay amortized) | ~0.03s |
+| full in-memory replay of 10k facts | ~0.54s |
+| one verb, cold `con.py` (crash + demand + verb) | ~0.04s |
+| same verb via the daemon (replay amortized) | ~0.04s |
 | `feed()` query over 10k messages | ~1 ms |
 | sync a 1-fact diff into a 10k set | 28 rounds, ~9 KiB, ~0.35s |
-| two daemons over TCP, sustained | ~400 authored facts/s converged, query stays low-ms |
-| bulk sync catch-up (5000 facts, fresh peer) | ~2100 facts/s, ~0.67 MB/s (frame bundles) |
+| two daemons over TCP, sustained | ~395 authored facts/s converged, query stays low-ms |
+| bulk sync catch-up (5000 facts, fresh peer) | ~1900 facts/s, ~0.58 MB/s (frame bundles) |
 | signed-fact admission (Ed25519 verify) | ~14/s; replay re-verifies **0** |
 
-**The no-index caveat.** There is deliberately no on-disk index. The db is the
-dumb append-only file, and both `replay()` and every sync `leaves()` are LINEAR
-over the durable set — an O(n) scan is the whole crash story and the whole sync
-query. The daemon is what makes this cheap in practice: it loads once and holds
-the derived state, so the 0.63s cold-replay cost above collapses to 0.03s per
-verb. The documented upgrade, if a single db ever outgrows a linear scan, is
-SQLite-as-cache: keep the dumb file as authority, project derived rows into a
-local SQLite mirror that survives restart, and let replay reconcile the mirror
-instead of rebuilding from zero. That is a cache, not a new source of truth — it
-changes neither the wire nor the fact model. Until then, linear is accepted and
-measured, not hidden.
+**Where the linearity lives now.** The db is the kernel `Store`: sqlite holding
+the dumb `facts(fid, bytes)` table plus a derived atom index, WAL-journaled.
+A cold `con.py` is demand-driven — hydration pulls only the facts the verb's
+needs and queries ask about, which is why the cold-verb cost above matches the
+daemon-proxy cost instead of a full replay. Full `replay()` and every sync
+`leaves()` remain linear over the resident set — the daemon full-loads
+deliberately, because sync fingerprints must cover the whole durable set (a
+partially-hydrated node must never initiate compare rounds). If a single db
+ever outgrows the daemon's resident set, the next step is teaching the sync
+family to ship from the Store rather than from residency — a family change,
+not a kernel one. Linear is accepted and measured, not hidden.
 

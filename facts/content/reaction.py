@@ -5,6 +5,7 @@ target's death key (suppression closure, DESIGN.md Need Effects), so it dies
 with the message — Suppressed and purgeable — rather than merely parking."""
 from kernel import (Atom, Exact, NEED, OFFER, Out, REQUIRE, SUPPRESS, encode,
                     fact, now, ts_atom)
+from facts.store import hydrate
 
 TAG = b"content.reaction"
 
@@ -28,6 +29,7 @@ def react(node, workspace_id, message_id, emoji, t):
 
 # QUERIES — observations over validated state only, ordered by (ts, owner).
 def on(node, workspace_id, message_id):
+    hydrate.demand(node, b"reaction", workspace_id); node.run()
     return [a.value for o, t, a in sorted(node.watched(b"reaction", workspace_id),
                                           key=lambda r: (r[1], r[0]))
             if a.target == Exact(message_id)]

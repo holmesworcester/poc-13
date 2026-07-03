@@ -7,15 +7,16 @@ at ~2x the value measured on the build machine (recorded next to each as
 MEASURED) — headroom for a slower box, a tripwire for a real regression.
 
 The load is deliberately the shape the design assumes: one workspace, messages
-fanned across a few channels. The one caveat the design accepts is made visible
-here: replay and every sync `leaves()` are LINEAR over the durable set — there
-is no on-disk index. Those numbers are reported, not gated tight; see README.
+fanned across a few channels. Two costs are made visible rather than hidden:
+full in-memory replay and every sync `leaves()` are LINEAR over the resident
+set; the cold CLI path is demand-driven over the sqlite Store and pays only
+for what the verb asks about (compare 1 vs 2). See README.
 """
 import os, signal, socket, subprocess, sys, tempfile, time
 BENCH = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(BENCH)
 sys.path.insert(0, ROOT_DIR)
-from kernel import Node, encode, decode, fact_id, frame, _rd
+from kernel import Node, Store, encode, decode, fact_id, frame, _rd
 from facts import ROOT
 from facts.auth.workspace import workspace
 from facts.content.message import message, feed
@@ -80,14 +81,14 @@ def bench_engine():
     report("  per fact", dt / N * 1e3, "ms", None)
     t = time.time(); m = n.replay(); rp = time.time() - t
     assert m.derived() == n.derived(), "replay diverged"
-    report("replay (LINEAR, no index)", rp, "s", 1.3)  # MEASURED 0.5-0.7s
+    report("replay (full, in-memory)", rp, "s", 1.3)   # MEASURED 0.5-0.7s
     return n
 
 # --- 2. cold CLI crash-and-replay vs the daemon it amortizes ------------------
 def bench_cli(db):
     section("2. one verb against a %d-fact db" % N)
     t = time.time(); cli(db, "content.message.send", WID.hex(), "c0", "al", "cold", "99")
-    report("cold con.py (crash+replay+verb)", time.time() - t, "s", 1.5)  # MEASURED 0.6-0.7s
+    report("cold con.py (crash+demand+verb)", time.time() - t, "s", 0.3)  # MEASURED 0.04s (hydration)
     p, _ = spawn(db)
     try:
         uverb(db + ".sock", "content.message.feed", WID.hex(), "c0")      # warm the loaded node
@@ -185,10 +186,11 @@ def bench_catchup():                      # sync off: bulk bytes straight to A's
     section("5b. sync catch-up over TCP (%d facts bulk-authored on A, fresh B)" % n)
     with tempfile.TemporaryDirectory() as d:
         dba, dbb = os.path.join(d, "a.facts"), os.path.join(d, "b.facts")
-        with open(dba, "wb") as f:
-            f.write(frame(encode(WS)))
-            for b in MSGS[:n]: f.write(frame(b))
-        mb = os.path.getsize(dba) / 1048576
+        st = Store(dba)
+        st.add(encode(WS))
+        for b in MSGS[:n]: st.add(b)
+        st.commit(); st.db.close()
+        mb = (len(encode(WS)) + sum(len(b) for b in MSGS[:n])) / 1048576
         pb, addr = spawn(dbb, "--listen", "127.0.0.1:0")
         pa, _ = spawn(dba, "--peer", addr)
         t0 = time.time()
@@ -241,9 +243,10 @@ def main():
     n = bench_engine()
     with tempfile.TemporaryDirectory() as d:
         db = os.path.join(d, "big.facts")
-        with open(db, "wb") as f:
-            f.write(frame(encode(WS)))
-            for b in MSGS: f.write(frame(b))
+        st = Store(db)
+        st.add(encode(WS))
+        for b in MSGS: st.add(b)
+        st.commit(); st.db.close()
         bench_cli(db)
     bench_query(n)
     bench_sync()
