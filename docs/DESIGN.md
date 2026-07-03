@@ -240,6 +240,40 @@ accepts, the verb path and args go out as one framed request, one framed
 reply). Otherwise the crash-and-replay path is unchanged — the daemon only
 amortizes it.
 
+## Sync
+
+Sync reconciles facts, never atoms, and lives entirely in `facts/sync/` — no
+kernel change. A leaf is `(ts, FactId) -> H(FactId ‖ ts ‖ H(bytes))` for every
+fact that is durable, shareable, and `Valid|Suppressed`; suppressed facts stay
+in the set, which is how deletions reconcile. A range fingerprint is the hash
+of its leaf-hashes plus a count, so rebuilding it from the durable set is
+order-independent. Reconciliation is a compare over half-open `[lo, hi)` ranges
+of the composite key `ts‖FactId`: a range whose fingerprints match emits
+nothing; a small range (≤4 keys on the sender's side) is sent as a complete
+leaf list; any larger mismatch splits at the item-count median and recurses. A
+one-fact difference over a hundred facts settles in a logarithmic number of
+compare frames, not a push-all scan.
+
+Shipping is dependency-aware: when an id must travel it goes with its
+`closure` — the backward Require ancestors plus the suppressors of everything
+in the closure (and theirs), transitively. So a tombstone rides along with the
+fact it kills and the fact arrives already Suppressed: no resurrection window.
+The receiver admits every shipped frame through the normal gate (the
+replay-only `checked` path is never used for peer input).
+
+The split of labor is crisp. `leaves`, the range fingerprint, and `closure`
+are QUERIES — pure reads of the engine, authority for nothing. The round-trip
+driver is COMMANDS the daemon calls: `initiate` opens a round with one
+whole-space fingerprint, `respond` turns an admitted peer compare into the next
+frames (sub-range compares, `want` pulls, and the closure shipments
+themselves). A compare frame crossing the wire IS a fact — the transport keeps
+its single message type. Compare facts extract to `(False, False)`: volatile,
+so replay never resurrects session state, and unshareable, so they are excluded
+from the very leaves they reconcile; the daemon ships them explicitly. A daemon
+opens a round toward each peer on connect and whenever its own leaf fingerprint
+changes; every peer link is full-duplex, and reconciliation is what a fact
+authored on one side rides to reach the others.
+
 ## Family Specs Not Yet Implemented
 
 These are protocol, specified fully in the poc-12 design; they land as fact
@@ -253,10 +287,6 @@ families without kernel changes (hydration adds one engine-answered need):
   `chunk -> outboard -> descriptor -> anchor` arrows; anchors never require
   chunks; validity is public over ciphertext; the tree shares the
   descriptor's death keys.
-- **Sync** — reconciles facts, never atoms; range-fingerprint compare over
-  `(ts, FactId)` leaves of validated|suppressed, shareable, durable facts;
-  dep-aware shipping so suppressors travel (no resurrection); sync's own
-  facts are LocalOnly and excluded from their own reconciliation set.
 - **Retention and purge** — timestamp order alone never purges: pins,
   retained closures, and live suppressor targets all hold facts; purge plus
   dumb-file compaction reclaims space.
