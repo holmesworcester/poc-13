@@ -11,8 +11,7 @@ from facts.auth.invite_accepted import invite_accepted
 from facts.auth.signature import signature
 from facts.content.message import message
 from facts.content.message_deletion import deletion
-from facts.outbox.intent import intent
-from facts.outbox.performed import performed
+from facts.outbox.send import send
 
 RK, RPK = _c.ed25519_keygen(bytes(32))                  # a fixed workspace root key
 WS = workspace(b"acme", RPK, 1)
@@ -62,13 +61,17 @@ def test_admission_check_hook():
     assert n.admit(bad) is None                       # falsy check: inert miss
     assert n.admit(bad, checked=True) is not None     # replay path never re-runs the check
 
-def test_outbox_and_replay():
-    n, i1 = Node(ROOT), intent(b"peer1", b"hello", 1)
-    n.admit(encode(i1)); n.run()
+def test_outbox_reap_and_replay():
+    n = Node(ROOT)
+    fid = n.admit(encode(send(b"peer1", b"hello", 1))); n.run()
     assert [a.value for _, _, a in n.watched(b"send", b"outbox")] == [b"hello"]
-    n.admit(encode(performed(fact_id(i1), 2))); n.run()       # host reports the effect
-    assert n.watched(b"send", b"outbox") == []                # watch reprojected the intent
-    assert n.memo[fact_id(i1)] == "Valid"                     # watch never gated validity
+    assert n.memo[fid] == "Valid"                             # watch never gated validity
+    n.turn(shipped=[fid]); n.run()                            # the daemon reports the flush
+    assert n.watched(b"send", b"outbox") == []                # reaped: the offer is gone
+    assert fid not in n.facts and fid not in n.memo           # the body left no residue
+    assert not n.durable                                      # a volatile send persists nothing
+    for f in WS_CHAIN + [message(WID, CH, b"al", b"hi", 5)]: n.admit(encode(f))
+    n.run()
     ids, states = list(n.durable), []
     for seed in range(3):                                     # shuffled admission orders
         random.Random(seed).shuffle(ids)
@@ -77,6 +80,6 @@ def test_outbox_and_replay():
 
 if __name__ == "__main__":
     for t in (test_identity_and_admission, test_requires_suppression_and_wakes,
-              test_admission_check_hook, test_outbox_and_replay):
+              test_admission_check_hook, test_outbox_reap_and_replay):
         t(); print(f"ok  {t.__name__}")
     print("\nall tests passed")

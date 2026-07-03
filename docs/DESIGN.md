@@ -372,8 +372,9 @@ pulls, and the closure ship list) are QUERIES — pure reads of the engine,
 authority for nothing. The send side is the `sync.reply` family: a reply fact
 carries the answer's compare frame as a `send` offer and its shipments as
 by-reference `ship` offers (fact ids, resolved against the durable set at
-send time) at the host-watched outbox keys, retired by the pump's volatile
-`sent` receipt — even sync's own frames ride the one send path. A compare
+send time) at the host-watched outbox keys; when the daemon reports the flush
+(`shipped@SELF`, see The Clock) the reply reaps, leaving no residue — even
+sync's own frames ride the one send path. A compare
 frame crossing the wire IS a fact — the transport keeps its single message
 type. Compare and reply facts extract to `(False, False)`: volatile, so replay
 never resurrects session state, and unshareable, so they are excluded from the
@@ -433,7 +434,7 @@ turns a bulk catch-up from hundreds of leaf-rescanning compare rounds into a
 handful: on the measured 5000-fact catch-up it is roughly a 10x lift in both
 facts/s and MB/s.
 
-## The Clock
+## The Clock and the Flush Report
 
 Time is not a fact family: it is the one input the host reads from the OS and
 hands to the turn. `kernel.turn(now)` presents `now` as a single transient
@@ -445,6 +446,24 @@ derived state never depends on `now`, so replay with any `now` rebuilds it
 identically. The daemon just reads the clock each loop and passes it to the
 turn — it never sleeps *for* a deadline, because a time-need that comes due
 while it is blocked in `select()` is simply serviced on the next wake.
+
+The flush report is the clock's sibling — the other host signal handed to the
+turn. Just as the host hands in `now`, it hands back the ids of the
+host-watched offers it flushed to the socket: `kernel.turn(now, shipped)`
+presents each as a transient offer at the SHIPPED key, waking any sender that
+Watches `shipped@SELF`. A one-shot sender (an `outbox.send`, a `sync.reply`)
+answers by returning the terminal **Reap** verdict, on which the engine evicts
+the fact whole — offers, memo, and match rows — so a busy session leaves no
+drained-send residue. Reap is the only verdict that *removes* a fact (Suppress
+merely neutralizes and keeps a tombstone); it is safe precisely because these
+senders are volatile and host-watched, so nothing gates on their offers — an
+invariant the engine asserts before evicting. The daemon re-presents an
+unacked `shipped` until its sender acts (a bounded drain never drops the
+report) and drives no retirement itself: the policy — reap, or re-arm a retry
+— lives in the family, never in the pump. Persistence is the same shape
+inverted: the host's other completion set, `flushed`, tracks which durable
+facts have reached the db, but a durable fact must *survive*, so it is written
+by `con.flush` and never reaped.
 
 Recurrence is central but the onus is on one party: everything that must
 happen repeats, and the repeating side drives it. The initiator's durable

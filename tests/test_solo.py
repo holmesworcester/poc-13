@@ -31,13 +31,9 @@ def test_solo_story():
         con(db, "content.message_deletion.delete", wid, m_hi, "8")
         converge(db, "there", "content.message.feed", wid, "general", secs=0, phase="deletion suppresses")
         converge(db, "", "content.reaction.on", wid, m_hi, secs=0, phase="reaction dies with its message")
-        # retention + outbox roundtrips
+        # retention roundtrip (outbox sends are volatile: exercised in the daemon pair/trio tests)
         con(db, "content.retention_policy.set", wid, "1440", "9")
         converge(db, "1440", "content.retention_policy.window", wid, secs=0, phase="retention window")
-        iid = con(db, "outbox.intent.queue", "peer1", "hello", "10")
-        assert con(db, "outbox.intent.pending").startswith(iid), "queued intent must be pending"
-        con(db, "outbox.performed.report", iid, "11")
-        converge(db, "", "outbox.intent.pending", secs=0, phase="performed clears pending")
         # daemon proxy parity, clean shutdown, restart replay
         with fleet() as f:
             f.spawn(db)

@@ -98,16 +98,16 @@ def test_shuffled_orders_converge():
         outs.append(b.derived())
     assert outs[0] == outs[1] == outs[2]            # order-independent derived state
 
-def test_reply_offers_stand_until_sent_receipt():
+def test_reply_offers_stand_until_shipped():
     from facts.sync import reply as sreply
-    from facts.outbox import sent
     a, b = node(WS, WS_SIG, message(WID, b"g", b"al", b"hi", 2)), node(WS, WS_SIG)
     cid = b.admit(sync.initiate(a)[0]); b.run()      # a's root compare lands on b
     rid = sreply.answer(b, cid, b"dest", 5); b.run() # b's answer: offers at the outbox keys
     rows = [a for _, _, a in b.watched(b"send", b"outbox") + b.watched(b"ship", b"outbox")]
     assert rows and all(r.target == (0, b"dest") for r in rows)   # staged toward the peer
-    sent.report(b, rid, 6); b.run()                  # the receipt retires the queue rows
+    b.turn(shipped=[rid]); b.run()                   # daemon reports the flush: the reply reaps
     assert not b.watched(b"send", b"outbox") and not b.watched(b"ship", b"outbox")
+    assert rid not in b.facts                         # reaped: no residue
 
 def test_round_count_one_fact_in_hundred():
     msgs = [message(WID, b"g", b"al", b"m%d" % i, i + 2) for i in range(100)]
@@ -121,6 +121,6 @@ if __name__ == "__main__":
     for t in (test_equal_sets_zero_ships, test_one_fact_diff_ships_exactly_that_closure,
               test_fresh_peer_gets_dependency_closure, test_tombstone_travels_and_suppresses,
               test_sync_facts_volatile_and_excluded, test_shuffled_orders_converge,
-              test_reply_offers_stand_until_sent_receipt,
+              test_reply_offers_stand_until_shipped,
               test_round_count_one_fact_in_hundred):
         t(); print(f"ok  {t.__name__}")

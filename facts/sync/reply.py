@@ -1,13 +1,14 @@
 """facts/sync/reply.py — one sync answer as a send intent. A reply carries the
 compare frame and the closure shipments that answering a peer's compare (or
 opening a fresh root compare) calls for, offered at the host-watched outbox
-keys until a sent receipt retires them. Shipments ride by reference — fact
-ids, resolved against the durable set at send time, so a queued shipment is
-never stale bytes. Volatile session state: a reply dies with the session and
-is never resent on restart; the next cadence compare regenerates whatever
-still matters (poc-10: network_outgoing is a TEMP table)."""
-from kernel import (Atom, Exact, NEED, OFFER, Out, SELF, WATCH, by, encode,
-                    fact, frame, ts_atom)
+keys until the daemon reports the flush (shipped@SELF), on which it reaps.
+Shipments ride by reference — fact ids, resolved against the durable set at
+send time, so a queued shipment is never stale bytes. Volatile session state: a
+reply dies with the session and is never resent on restart; the next cadence
+compare regenerates whatever still matters (poc-10: network_outgoing is a TEMP
+table)."""
+from kernel import (Atom, Exact, OFFER, Out, by, encode, fact, frame,
+                    shipped_need, ts_atom)
 from facts.sync import compare
 
 TAG = b"sync.reply"
@@ -16,7 +17,7 @@ CHUNK = 256                              # fact ids per ship offer (~9 KiB of va
 
 # SHAPE — the canonical atom set; the only place atoms are chosen.
 def reply(dest, cmp_frame, ship_ids, t):
-    atoms = [ts_atom(t, SC), Atom(NEED, b"done", SC, SELF, effect=WATCH)]
+    atoms = [ts_atom(t, SC), shipped_need]
     if cmp_frame:
         atoms.append(Atom(OFFER, b"send", SC, Exact(dest), cmp_frame))
     for i in range(0, len(ship_ids), CHUNK):
@@ -26,9 +27,9 @@ def reply(dest, cmp_frame, ship_ids, t):
 # EXTRACT — content-pure: (durable, shareable). Session state is neither.
 def extract(f): return False, False
 
-# PROJECT — offer the queue rows until the sent receipt lands.
+# PROJECT — offer the queue rows until the flush report, then reap.
 def project(f, ctx, sl):
-    if by(ctx, b"done"): return Out()    # sent: the queue rows are gone
+    if by(ctx, b"shipped"): return Out("Reap")   # flushed: the queue rows vanish
     return Out(offers=tuple(a for a in f.atoms if a.role in (b"send", b"ship")))
 
 # COMMANDS — build a fact, admit it, stop.

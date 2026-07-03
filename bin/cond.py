@@ -23,7 +23,6 @@ BIN = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [BIN, os.path.dirname(BIN)]
 from kernel import Node, Store, _rd, decode, fact_id, frame
 from facts import ROOT
-from facts.outbox import sent
 from facts.sync import compare as sync, reply as sreply
 from facts.auth import local_signer_secret, endpoint
 from facts.connection import request, connection as conn, frame as frames
@@ -99,7 +98,7 @@ def main(db, *argv):
         tsock = socket.create_server((h, int(pt))); tsock.setblocking(False)
     links, inbound = {}, []              # links: addr -> outbound socket; inbound: read sources
     redial, compared = {}, {}                         # process-local cadence markers (addr/cid -> last)
-    shipped, known = set(), {fid for _, fid in sync.leaves(node)}
+    to_ship, known = set(), {fid for _, fid in sync.leaves(node)}   # flushed senders awaiting their reap
     for sg in (signal.SIGINT, signal.SIGTERM): signal.signal(sg, lambda *a: sys.exit(0))
     print("listening:", "%s:%s" % tsock.getsockname()[:2] if tsock else sp, flush=True)
     work = True
@@ -139,8 +138,11 @@ def main(db, *argv):
                     n += 1; work = True
                     if n >= BOUND: break
                 if n >= BOUND: break
-            # ENGINE DRAIN — bounded; leftover frontier is next turn's work.
-            node.turn(now_ms(), BOUND); work |= bool(node.frontier)
+            # ENGINE DRAIN — bounded; leftover frontier is next turn's work. Hand the
+            # wire's flush reports to the turn: a flushed sender that Watches shipped
+            # reaps this turn; keep re-presenting until it does, then prune the acted-on.
+            node.turn(now_ms(), to_ship, BOUND); work |= bool(node.frontier)
+            to_ship &= {o for role in (b"send", b"ship") for o, _, _ in node.watched(role, b"outbox")}
             # respond seam: the onus is on the requester — its durable request re-dials on
             # a cadence; the responder just answers each ARRIVAL (no cadence of its own), so
             # a peer that lost its volatile session simply re-asks until it re-handshakes.
@@ -157,7 +159,7 @@ def main(db, *argv):
                 a = addr.decode()
                 if nowm - redial.get(a, 0) >= CADENCE:
                     enqueue(link(links, a), BARE, env); redial[a] = nowm; work = True
-            work |= _pump_data(node, links, shipped)
+            work |= _pump_data(node, links, to_ship)
             if not node.frontier:
                 ls = sync.leaves(node)
                 fresh = [fid for _, fid in ls if fid not in known]
@@ -201,11 +203,11 @@ def _admit_frame(node, body, sreply):    # a sealed data frame: open by its own 
         if fid and node.facts[fid].type_tag == sync.TAG:
             sreply.answer(node, fid, cid, int(time.time()))
 
-def _pump_data(node, links, shipped):    # stage validated send/ship offers as sealed frames
+def _pump_data(node, links, to_ship):    # stage validated send/ship offers as sealed frames
     rows = {}
     for role in (b"send", b"ship"):
         for o, _, a in node.watched(role, b"outbox"):
-            if o not in shipped: rows.setdefault(o, []).append(a)
+            if o not in to_ship: rows.setdefault(o, []).append(a)   # edge-drain: not already flushed
     moved = False
     for o, atoms in sorted(rows.items()):
         cid = atoms[0].target[1]
@@ -219,7 +221,7 @@ def _pump_data(node, links, shipped):    # stage validated send/ship offers as s
             else: inners += [node.durable[x] for x in _ids(a.value) if x in node.durable]
         for blob in frames.pack(inners):
             enqueue(p, SEALED, frames.seal(blob, cid, secret, os.urandom(24)))
-        shipped.add(o); sent.report(node, o, int(time.time())); moved = True
+        to_ship.add(o); moved = True     # flushed: next turn presents shipped@o and it reaps
     return moved
 
 if __name__ == "__main__":

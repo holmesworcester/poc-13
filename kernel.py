@@ -125,6 +125,14 @@ now_need = lambda deadline_ms: Atom(NEED, NOW_ROLE, NOW_SCOPE,
                                     Range(deadline_ms.to_bytes(8, "big"), b"\xff" * 8), effect=WATCH)
 now_of = lambda ctx: next((int.from_bytes(r[2].target[1], "big") for r in by(ctx, NOW_ROLE)), None)
 
+# The wire's flush report is the other host signal, and like `now` it is not a
+# fact: the daemon presents shipped@Exact(fid) for each host-watched offer it
+# flushed, and a sender Watching shipped@SELF wakes and decides its own
+# retirement — Reap (a one-shot vanishes with no receipt) or re-arm a retry.
+# Re-presented until the sender acts, so a bounded drain never drops it.
+SHIPPED_ROLE, SHIPPED_SCOPE, _SHIP = b"shipped", b"wire", b"\x00ship"
+shipped_need = Atom(NEED, SHIPPED_ROLE, SHIPPED_SCOPE, SELF, effect=WATCH)
+
 class Router:
     """A projector that dispatches on one type-tag segment and delegates whole.
     Routers narrow inputs and cannot widen a delegate's context; delegation
@@ -282,9 +290,20 @@ class Node:
         for o, _ in self.needs_for(off):
             if o not in self.frontier: self.frontier.append(o)
 
+    # Present the daemon's flush reports as transient offers at the SHIPPED key,
+    # one per host-watched offer that left the socket, waking the senders that
+    # Watch shipped@SELF. Not facts: one clean-twin slot, replaced each turn.
+    def _present_shipped(self, fids):
+        rows = [(_SHIP, 0, Atom(OFFER, SHIPPED_ROLE, SHIPPED_SCOPE, Exact(fid))) for fid in fids]
+        self.clean[(SHIPPED_ROLE, SHIPPED_SCOPE)] = rows
+        for _, _, off in rows:
+            for o, _ in self.needs_for(off):
+                if o not in self.frontier: self.frontier.append(o)
+
     # Engine drain — bounded; overflow parks on the frontier, never drops.
-    def turn(self, now=None, bound=64):
+    def turn(self, now=None, shipped=(), bound=64):
         if now is not None: self._present_now(now)   # the host hands time to the turn
+        self._present_shipped(shipped)               # and the wire hands back its flush reports
         for _ in range(min(bound, len(self.frontier))):
             self._step(self.frontier.popleft())
         for k, v in self.intake.items(): self.rows.setdefault(k, []).extend(v)
@@ -331,6 +350,15 @@ class Node:
         for _, _, a in set(old) ^ set(new):   # wake fanout on every changed offer
             for o, _ in self.needs_for(a):
                 if o != fid and o not in self.frontier: self.frontier.append(o)
+        if out.verdict == "Reap":            # terminal: evict the body, leaving no residue
+            for r in old:                    # guard: never reap an offer another fact gates on
+                for o, na in self.needs_for(r[2]):
+                    assert o == fid or na.effect not in (REQUIRE, SUPPRESS), "reap of a gating offer"
+            self.facts.pop(fid, None); self.memo.pop(fid, None)
+            for a in f.atoms:                # drop its asserted/overlay rows so nothing re-wakes it
+                k, m = (a.kind, a.role, a.scope), mat(a, fid)
+                for tbl in (self.rows, self.intake):
+                    if (bk := tbl.get(k)) and (fid, m) in bk: bk.remove((fid, m))
 
     # Host out — the host drains validated offers at keys it watches, performs
     # external work, and admits facts reporting what happened. It never writes.

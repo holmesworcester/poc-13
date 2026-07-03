@@ -10,8 +10,6 @@ from facts import ROOT
 from facts.auth import admin, local_signer_secret, user, workspace
 from facts.content import message, message_deletion
 from facts.content.message import feed
-from facts.outbox import intent, performed
-from facts.outbox.intent import pending
 from facts.store import hydrate
 
 CH = b"general"
@@ -23,11 +21,9 @@ def _build():                            # the corpus is a REAL signed workspace
     uid = next(k for k, f in n.facts.items() if f.type_tag == b"auth.user")
     mids = [message.send(n, wid, CH, b"al", b"m%d" % i, 10 + i) for i in range(5)]
     message_deletion.delete(n, wid, mids[2], 99)
-    iid = intent.queue(n, b"peer", b"hello", 5)
-    performed.report(n, iid, 6)
-    return n.run(), wid, uid, mids, iid
+    return n.run(), wid, uid, mids
 
-FULL, WID, UID, MIDS, IID = _build()
+FULL, WID, UID, MIDS = _build()
 CORPUS = list(FULL.durable.values())     # exactly what a db would hold
 
 def store_of(bs, seed=0):
@@ -58,15 +54,10 @@ def test_suppression_across_the_cold_boundary():
     assert n.memo[MIDS[2]] == "Suppressed"                   # tombstone was pulled
     assert n.memo[MIDS[3]] == "Valid"
 
-def test_watch_pulls_the_performed_unit():
-    n = Node(ROOT, store_of(CORPUS))
-    assert pending(n) == []              # intent hydrated WITH its performed fact
-    assert n.memo[IID] == "Valid" # watch never gated
-
 def test_unrelated_facts_stay_cold():
     n = Node(ROOT, store_of(CORPUS))
     feed(n, WID, CH)
-    assert all(f.type_tag != b"outbox.intent" for f in n.facts.values())
+    assert UID not in n.facts            # a channel feed pulls message closure, not membership
 
 def test_budget_is_amortization_only():
     f = full()
@@ -110,7 +101,7 @@ def test_sql_pull_mirrors_covers():
 
 if __name__ == "__main__":
     for t in (test_demand_agrees_with_full_replay, test_gating_needs_pull_their_closure,
-              test_suppression_across_the_cold_boundary, test_watch_pulls_the_performed_unit,
+              test_suppression_across_the_cold_boundary,
               test_unrelated_facts_stay_cold, test_budget_is_amortization_only,
               test_sql_pull_mirrors_covers):
         t(); print(f"ok  {t.__name__}")
