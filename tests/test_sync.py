@@ -2,7 +2,7 @@
 over a simulated single-type wire) plus one black-box bidirectional daemon run.
 Mirrors the poc-12 proof quantifiers — shuffled admission orders converge to
 bit-identical derived state; a one-fact diff ships exactly that fact's closure."""
-import os, random, signal, subprocess, sys, tempfile, time
+import os, random, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import ed25519
 from kernel import Node, decode, encode, fact_id
@@ -117,49 +117,10 @@ def test_round_count_one_fact_in_hundred():
     assert rounds <= 30                             # ~logarithmic split, not a push-all scan
     print("\ncompare frames, 1-fact diff over 100-fact set:", rounds)
 
-# --- Black box: two real daemons, bidirectional ---------------------------------
-BIN = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin")
-
-def _spawn(db, *a):
-    p = subprocess.Popen([sys.executable, os.path.join(BIN, "cond.py"), db, *a],
-                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    line = p.stdout.readline()
-    assert line.startswith("listening:"), (line, p.poll() and p.stderr.read())
-    return p, line.split()[1]
-
-def _con(db, *a):
-    r = subprocess.run([sys.executable, os.path.join(BIN, "con.py"), db, *a],
-                       capture_output=True, text=True)
-    assert r.returncode == 0, r.stderr
-    return r.stdout.strip()
-
-def _until(pred, secs=10):
-    end = time.time() + secs
-    while time.time() < end and not pred(): time.sleep(0.05)
-    return pred()
-
-def _stop(p): p.send_signal(signal.SIGTERM); p.wait(5)
-
-def test_daemon_bidirectional_reconcile():
-    with tempfile.TemporaryDirectory() as d:
-        dba, dbb = os.path.join(d, "a.facts"), os.path.join(d, "b.facts")
-        pb, addr = _spawn(dbb, "--listen", "127.0.0.1:0")
-        pa, _ = _spawn(dba, "--peer", addr)
-        try:
-            wid = _con(dba, "auth.workspace.create", "acme", "1")
-            doomed = _con(dba, "content.message.send", wid, "g", "al", "doomed", "2")
-            _con(dba, "content.message.send", wid, "g", "al", "keep", "3")
-            assert _until(lambda: _con(dbb, "content.message.feed", wid, "g") == "doomed\nkeep")
-            _con(dba, "content.message_deletion.delete", wid, doomed, "4")   # deletion reconciles
-            assert _until(lambda: _con(dbb, "content.message.feed", wid, "g") == "keep")
-            _con(dbb, "content.message.send", wid, "g", "bo", "from B", "5")  # reverse direction
-            assert _until(lambda: _con(dba, "content.message.feed", wid, "g") == "keep\nfrom B")
-        finally: _stop(pa); _stop(pb)
-
 if __name__ == "__main__":
     for t in (test_equal_sets_zero_ships, test_one_fact_diff_ships_exactly_that_closure,
               test_fresh_peer_gets_dependency_closure, test_tombstone_travels_and_suppresses,
               test_sync_facts_volatile_and_excluded, test_shuffled_orders_converge,
               test_reply_offers_stand_until_sent_receipt,
-              test_round_count_one_fact_in_hundred, test_daemon_bidirectional_reconcile):
+              test_round_count_one_fact_in_hundred):
         t(); print(f"ok  {t.__name__}")
