@@ -17,13 +17,10 @@ def load(node, store):                   # full replay: own db passed the gate o
     for fb in store.all(): node.admit(fb, checked=True)
     node.run()
 
-def flush(node, store, flushed=None):    # one transaction per host turn; a
-    if flushed is not None:              # flushed set makes repeat calls cheap
-        if len(flushed) == len(node.durable): return
-        new = [fb for fid, fb in node.durable.items() if fid not in flushed]
-        flushed.update(node.durable)
-    else: new = node.durable.values()
-    for fb in new: store.add(fb, hot=True)
+def flush(node, store, flushed):         # one transaction per host turn; the
+    if len(flushed) == len(node.durable): return      # flushed set keeps repeats cheap
+    for fid, fb in node.durable.items():
+        if fid not in flushed: store.add(fb, hot=True); flushed.add(fid)
     store.commit()
 
 def proxy(s, path, args):                # the daemon owns the db; just ask it
@@ -48,7 +45,7 @@ def main(db, path, *args):
         sys.exit(f"unknown verb: {path}")
     out = mod.CLI[verb](node, *args)
     node.run()
-    flush(node, store)                   # add is idempotent: hydrated ≠ new
+    flush(node, store, set())            # add is idempotent: hydrated ≠ new
     if out: print(out)
 
 if __name__ == "__main__":

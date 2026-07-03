@@ -5,7 +5,7 @@ import os, random, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from kernel import (Atom, Exact, NEED, OFFER, Node, RANGE, REQUIRE, Store,
-                    covers, decode, encode, fact, fact_id, ts_atom, window)
+                    WATCH, covers, decode, encode, fact, fact_id, ts_atom, window)
 from facts import ROOT
 from facts.auth.admin import admin, admins
 from facts.auth.user import user
@@ -78,29 +78,36 @@ def test_budget_is_amortization_only():
     for fid in n.facts:
         if fid in f.memo: assert n.memo[fid] == f.memo[fid]
 
-def test_sql_clause_mirrors_covers():
-    rnd = random.Random(7)
-    ks = [bytes([b]) for b in range(5)]
-    def tgt():
-        if rnd.random() < .5: return Exact(rnd.choice(ks))
-        lo, hi = sorted((rnd.choice(ks), rnd.choice(ks)))
-        return (RANGE, lo, hi)
-    offers = [(i, tgt()) for i in range(40)]
-    for _ in range(60):                  # pull's WHERE clause == kernel covers, always
-        need = Atom(NEED, b"r", b"s", tgt(), effect=REQUIRE)
-        s = Store()                      # fresh store: hot-set dedup stays out of frame
-        fids = {}
-        for i, ot in offers:
-            f = fact(b"no.such", ts_atom(i), Atom(OFFER, b"r", b"s", ot))
-            s.add(encode(f)); fids[fact_id(f)] = ot
-        got = {fact_id(decode(fb)) for fb in s.pull(need)}
-        want = {fid for fid, ot in fids.items() if covers(ot, need.target)}
-        assert got == want, (need.target, sorted(ot for _, ot in offers))
+def test_sql_pull_mirrors_covers():
+    """Exhaustive mirror: Store.pull == the kernel-covers reference, for every
+    target-shape pair on a small alphabet and every window arm — coverage,
+    ts filter, asc/desc order, budget, and blob-ts ordering across the byte
+    boundary (all ts > 255, where a wrong-endian encoding would missort)."""
+    ks = [bytes([b]) for b in range(4)]
+    shapes = ([Exact(k) for k in ks] +
+              [(RANGE, a, b) for a in ks for b in ks if a <= b])
+    offers = [(250 + 7 * i, t) for i, t in enumerate(shapes)]
+    for nt in shapes:
+        for w in (None, (0, 2**64 - 1, 3, 0), (260, 320, 2, 1)):
+            need = Atom(NEED, b"r", b"s", nt, w and window(*w),
+                        effect=REQUIRE if w is None else WATCH)
+            s = Store()                  # fresh store: hot-set dedup stays out of frame
+            fids = {}
+            for ts, ot in offers:
+                f = fact(b"no.such", ts_atom(ts), Atom(OFFER, b"r", b"s", ot))
+                s.add(encode(f)); fids[fact_id(f)] = (ts, ot)
+            got = [fact_id(decode(fb)) for fb in s.pull(need)]
+            want = sorted((ts, fid) for fid, (ts, ot) in fids.items() if covers(ot, nt))
+            if w:
+                lo, hi, budget, order = w
+                want = sorted((r for r in want if lo <= r[0] <= hi),
+                              reverse=bool(order))[:budget]
+            assert got == [fid for _, fid in want], (nt, w)
 
 if __name__ == "__main__":
     for t in (test_demand_agrees_with_full_replay, test_gating_needs_pull_their_closure,
               test_suppression_across_the_cold_boundary, test_watch_pulls_the_performed_unit,
               test_unrelated_facts_stay_cold, test_budget_is_amortization_only,
-              test_sql_clause_mirrors_covers):
+              test_sql_pull_mirrors_covers):
         t(); print(f"ok  {t.__name__}")
     print("\nall tests passed")

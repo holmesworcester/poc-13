@@ -163,6 +163,7 @@ class Store:
 
     def __init__(self, path=":memory:"):
         self.db = sqlite3.connect(path)
+        self.db.execute("PRAGMA busy_timeout=5000")  # daemonless cons may briefly overlap
         self.db.executescript("""
           CREATE TABLE IF NOT EXISTS facts(fid BLOB PRIMARY KEY, bytes BLOB) WITHOUT ROWID;
           CREATE TABLE IF NOT EXISTS atoms(fid BLOB, ts BLOB, role BLOB, scope BLOB,
@@ -184,20 +185,19 @@ class Store:
 
     def pull(self, need):                # matches not yet delivered, (ts, fid) order,
         nlo, nhi = need.target[1], need.target[-1]     # budget counts primary hits
-        q = ("""SELECT DISTINCT ts, fid FROM atoms WHERE role=? AND scope=?
-                AND ((ex AND lo BETWEEN ? AND ?) OR (NOT ex AND ? AND ? BETWEEN lo AND hi))
-                AND fid NOT IN (SELECT fid FROM hot)""",
-             [need.role, need.scope, nlo, nhi, need.target[0] == EXACT, nlo])
-        budget = None
+        sql = """SELECT DISTINCT ts, fid FROM atoms WHERE role=? AND scope=?
+                 AND ((ex AND lo BETWEEN ? AND ?) OR (NOT ex AND ? AND ? BETWEEN lo AND hi))
+                 AND fid NOT IN (SELECT fid FROM hot)"""
+        args = [need.role, need.scope, nlo, nhi, need.target[0] == EXACT, nlo]
         if need.effect == WATCH and need.value and len(need.value) == 21:
             lo, hi, budget, order = _window(need.value)
-            q = (q[0] + " AND ts BETWEEN ? AND ? ORDER BY ts %s, fid %s LIMIT ?"
-                 % (("ASC", "ASC") if not order else ("DESC", "DESC")),
-                 q[1] + [_t8(lo), _t8(hi), budget])
+            d = "DESC" if order else "ASC"
+            sql += f" AND ts BETWEEN ? AND ? ORDER BY ts {d}, fid {d} LIMIT ?"
+            args += [_t8(lo), _t8(hi), budget]
         else:
-            q = (q[0] + " ORDER BY ts, fid", q[1])
+            sql += " ORDER BY ts, fid"   # gating: exhaustive, a miss could flip a verdict
         out = []
-        for _, fid in self.db.execute(*q).fetchall():
+        for _, fid in self.db.execute(sql, args).fetchall():
             self.db.execute("INSERT OR IGNORE INTO hot VALUES(?)", (fid,))
             out.append(self.db.execute("SELECT bytes FROM facts WHERE fid=?", (fid,)).fetchone()[0])
         return out
