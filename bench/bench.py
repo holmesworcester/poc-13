@@ -180,6 +180,32 @@ def bench_daemons():
             assert got == cap, f"B converged only {got}/{cap}"
         finally: stop(pa, pb)
 
+def bench_catchup():                      # sync off: bulk bytes straight to A's file;
+    n = 5000                              # sync on: spawn both peered, time B's catch-up
+    section("5b. sync catch-up over TCP (%d facts bulk-authored on A, fresh B)" % n)
+    with tempfile.TemporaryDirectory() as d:
+        dba, dbb = os.path.join(d, "a.facts"), os.path.join(d, "b.facts")
+        with open(dba, "wb") as f:
+            f.write(frame(encode(WS)))
+            for b in MSGS[:n]: f.write(frame(b))
+        mb = os.path.getsize(dba) / 1048576
+        pb, addr = spawn(dbb, "--listen", "127.0.0.1:0")
+        pa, _ = spawn(dba, "--peer", addr)
+        t0 = time.time()
+        try:
+            got, end = 0, time.time() + 120
+            while got < n and time.time() < end:
+                got = sum(len(uverb(dbb + ".sock", "content.message.feed",
+                                    WID.hex(), c.decode()).splitlines()) for c in CHANS)
+                time.sleep(0.05)
+            dt = time.time() - t0
+            assert got >= n, f"caught up only {got}/{n}"
+            # MEASURED ~225/s — same as live convergence: paced by one-fact-per-frame
+            # and per-turn sync rounds, not the pipe. Frame bundling is the lift.
+            report("catch-up (bulk sync)", n / dt, "fact/s", 100, hi_ok=True)
+            report("catch-up volume", mb / dt, "MB/s", None)
+        finally: stop(pa, pb)
+
 # --- 6. crypto gate: verify folded into admission, zero on replay -------------
 def bench_crypto():
     section("6. signed-fact admission (Ed25519 gate)")
@@ -218,6 +244,7 @@ def main():
     bench_query(n)
     bench_sync()
     bench_daemons()
+    bench_catchup()
     bench_crypto()
     print("\n" + ("BUDGET VIOLATED: " + ", ".join(FAIL) if FAIL else "all budgets met"))
     sys.exit(1 if FAIL else 0)
