@@ -114,11 +114,20 @@ function of the durable fact set. Storage loss shrinks the set — it costs
 completeness, never coherence. Storage is outside the trust boundary;
 bytes enter through checked loads, and wrong bytes are a miss.
 
-When the dumb file stops being enough, the upgrades are independent and
-deferrable, and none change the kernel or the file's meaning: a daemon to
-amortize replay, compaction to reclaim purged facts (rewrite the file from
-the surviving durable set), and a real durable index (e.g. SQLite as an
-untrusted cache) when facts outgrow RAM.
+When the dumb file stops being enough, the upgrades are independent and none
+change the kernel or the file's meaning. The first is built: `bin/cond.py`,
+a daemon that amortizes replay. It owns the db exclusively, replays once,
+then runs the three-phase host turn in a single-threaded select loop —
+client verbs over a unix socket at `<db>.sock`, peers over TCP. The wire
+carries one message type only, length-framed canonical fact bytes; what to
+push is a volatile per-peer sent-set until the sync family replaces it.
+Backpressure is the frontier's rule at the socket — overflow parks, never
+drops: bounded admits per turn, a bounded per-peer outbox whose overflow
+stays unsent until a later turn, and select-gated non-blocking writes so a
+slow or absent peer never blocks the loop. Still deferrable: compaction to
+reclaim purged facts (rewrite the file from the surviving durable set) and a
+real durable index (e.g. SQLite as an untrusted cache) when facts outgrow
+RAM.
 
 ## Turn Semantics
 
@@ -184,7 +193,8 @@ result.
 The kernel runs one root projector. A `Router` is a projector that
 dispatches on the next type-tag segment and delegates whole; extraction
 routes through the same tree, and so does the dotted api/CLI namespace
-(`chat.note.send` resolves through the same routes as the `chat.note` tag).
+(`content.message.send` resolves through the same routes as the
+`content.message` tag).
 Routers narrow inputs and cannot widen a delegate's context; delegation
 must equal the delegate run alone. Unknown tags fall out as
 Durable + LocalOnly + Parked with no special casing.
@@ -214,7 +224,7 @@ always in this order, enforced by a source-contract test:
   thin wrappers over COMMANDS/QUERIES that coerce strings in and out.
   Exposure is deliberate; verbs, not helpers.
 
-The module itself is the Python API — `facts.chat.note.send(node, ...)` —
+The module itself is the Python API — `facts.content.message.send(node, ...)` —
 and scope `__init__.py` files are router-only tables of contents.
 
 ## The CLI
@@ -223,6 +233,12 @@ and scope `__init__.py` files are router-only tables of contents.
 through the root router, replay the dumb file, run the verb, append new
 durable facts. Every invocation is a crash-and-replay, so black-box tests
 exercise the replay story constantly and for free.
+
+If a daemon owns the db, con proxies instead of replaying: `<db>.sock`
+accepts, the verb path and args go out as one framed request, one framed
+`+ok`/`-err` reply comes back (new durable facts hit the file before the
+reply). Otherwise the crash-and-replay path is unchanged — the daemon only
+amortizes it.
 
 ## Family Specs Not Yet Implemented
 

@@ -2,24 +2,39 @@
 """con — the poc-13 CLI.  Usage: con <db> <scope.fact.verb> [args...]
 
 The db is the dumb file: length-framed canonical fact bytes, append-only,
-nothing else. Every invocation is a crash-and-replay — load, replay to
+nothing else. If a daemon owns the db (<db>.sock connects), the verb is
+proxied to it: one framed request out, one framed +ok/-err reply back.
+Otherwise every invocation is a crash-and-replay — load, replay to
 quiescence, run one verb, append whatever new durable facts appeared."""
-import os, sys
+import os, socket, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from kernel import Node, _rd, frame
 from facts import ROOT
 
-def load(node, path):
+def load(node, path):                    # own file: already passed the gate once
     if os.path.exists(path):
         b, i = open(path, "rb").read(), 0
         while i < len(b):
-            fb, i = _rd(b, i); node.admit(fb)
+            fb, i = _rd(b, i); node.admit(fb, checked=True)
     node.run()
 
+def proxy(s, path, args):                # the daemon owns the db; just ask it
+    s.sendall(frame(path.encode(), *(a.encode() for a in args)))
+    s.shutdown(socket.SHUT_WR)
+    b = b""
+    while (c := s.recv(65536)): b += c
+    r, _ = _rd(b, 0)
+    if not r.startswith(b"+"): sys.exit(r[1:].decode())
+    if len(r) > 1: print(r[1:].decode())
+
 def main(db, path, *args):
+    s = socket.socket(socket.AF_UNIX)
+    try: s.connect(db + ".sock")
+    except OSError: s = None             # no daemon: crash-and-replay below
+    if s: return proxy(s, path, args)
     node = Node(ROOT); load(node, db)
     *segs, verb = path.split(".")
-    mod = ROOT.resolve([s.encode() for s in segs])
+    mod = ROOT.resolve([x.encode() for x in segs])
     if mod is None or verb not in getattr(mod, "CLI", {}):
         sys.exit(f"unknown verb: {path}")
     before = set(node.durable)

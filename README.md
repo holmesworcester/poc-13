@@ -12,10 +12,15 @@ proven.
   order: SHAPE, EXTRACT, PROJECT, COMMANDS, QUERIES, CLI. Projectors are
   the routers: `facts.ROOT` dispatches type tags, api paths, and CLI verbs
   through one tree. The module is the Python API.
-- `bin/con.py` — `con <db> <scope.fact.verb> [args...]`. Every invocation
-  is a crash-and-replay of the dumb file.
+- `bin/con.py` — `con <db> <scope.fact.verb> [args...]`. Proxies to a
+  running daemon at `<db>.sock`, else a crash-and-replay of the dumb file.
+- `bin/cond.py` — `cond <db> [--listen HOST:PORT] [--peer HOST:PORT ...]`.
+  The daemon: owns the db, amortizes replay, serves con over the unix
+  socket, exchanges facts (the wire's only message) with TCP peers.
+  Backpressure everywhere is the frontier's rule: park, never drop.
 - `tests/` — skeleton tests (kernel claims), a source-contract test (fact
-  file shape), and black-box tests (one process per command).
+  file shape), and black-box tests (one process per command, plus real
+  daemon subprocesses on real sockets).
 
 Run: `pytest` or `python3 tests/test_<name>.py`. No dependencies.
 
