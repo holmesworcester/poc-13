@@ -217,7 +217,9 @@ Soundness fixes the asymmetry between effects. `Require` and `Suppress`
 pulls are exhaustive — a missed offer could change a verdict (a cold
 tombstone would resurrect its target). `Watch` pulls honor a window riding
 in the need's value — `(ts_lo, ts_hi, budget, order)`, engine-owned bytes
-never read by matching — because Watch never gates. Budget counts primary
+never read by matching — because Watch never gates. Need values belong to
+the engine: a source-contract test keeps every family SHAPE from
+constructing a valued need (`store.hydrate` is the single exemption). Budget counts primary
 hits in `(ts, FactId)` order; each hit's own pulls complete its validation
 unit uncounted, so a delivered hit is never partial. Budget is an
 amortization knob, never a semantic limit: the store pops delivered facts
