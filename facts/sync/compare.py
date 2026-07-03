@@ -49,10 +49,12 @@ def extract(f): return False, False
 def project(f, ctx, sl): return Out()
 
 # COMMANDS — driver functions the daemon calls; they build wire frames, not verbs.
-def initiate(node):                      # open a round: one fingerprint over the whole space
-    return [encode(compare(_emit(leaves(node), LO, HI)))]
+def initiate(node, ls=None):             # a root compare: one fingerprint over the whole space
+    return [encode(compare(_emit(leaves(node) if ls is None else ls, LO, HI)))]
 
-def respond(node, cid):                  # answer a peer's admitted compare with the next frames
+def answer_of(node, cid):                # -> (compare frame | None, closure-expanded ship ids)
+    if node.memo.get(cid, "Invalid") in ("Invalid", "Suppressed"):
+        return None, []                  # answer nothing the engine refused
     C, ls, atoms, ship = node.facts[cid], leaves(node), [], []
     for a in C.atoms:
         if a.role == b"fp":              # fingerprint claim: split on mismatch
@@ -67,11 +69,15 @@ def respond(node, cid):                  # answer a peer's admitted compare with
             ship += [k[1] for k in mine - peer]                   # peer lacks -> ship
             atoms += [want_atom(fid) for _, fid in peer - mine]   # I lack -> want
         elif a.role == b"want": ship.append(a.target[1])          # explicit pull
-    frames, seen = ([encode(compare(atoms))] if atoms else []), set()
+    out, seen = [], set()
     for fid in ship:                     # each shipped id travels with its whole closure
         for x in closure(node, fid):
-            if x in node.durable and x not in seen: seen.add(x); frames.append(node.durable[x])
-    return frames
+            if x in node.durable and x not in seen: seen.add(x); out.append(x)
+    return (encode(compare(atoms)) if atoms else None), out
+
+def respond(node, cid):                  # the answer as wire frames (in-process harnesses)
+    cmp_frame, ship = answer_of(node, cid)
+    return ([cmp_frame] if cmp_frame else []) + [node.durable[x] for x in ship]
 
 # QUERIES — the pure algorithm; reads the engine, authority for nothing.
 _LEAF = {}                               # fid -> (key, leaf hash); content-addressed, so

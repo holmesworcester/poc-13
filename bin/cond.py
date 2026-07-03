@@ -18,13 +18,16 @@ BIN = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [BIN, os.path.dirname(BIN)]
 from kernel import Node, Store, _rd, decode, fact_id, frame
 from facts import ROOT
-from facts.sync import compare as sync
+from facts.clock import tick as clock
+from facts.outbox import sent
+from facts.sync import compare as sync, reply as sreply
 from facts.auth import local_signer_secret
 from facts.connection import request, hello, connection as conn, frame as bundles
 from con import flush, load
 
 BOUND = 64                               # admits per peer per turn; engine drain bound
 OUTCAP = 1 << 20                         # per-peer outbox byte cap: overflow stays unsent
+CADENCE = 0.5                            # s between root compares per peer (poc-10 maintain_sync)
 
 def serve(node, s, store, flushed):      # one framed verb request per connection
     try:
@@ -41,20 +44,22 @@ def serve(node, s, store, flushed):      # one framed verb request per connectio
         except OSError: pass
     s.close()
 
-def peer(s, addr):                       # a full-duplex link; addr set only for outbound peers
-    return {"s": s, "addr": addr, "out": b"", "inb": b"", "pend": [], "down": 0.0, "fp": None}
+def peer(s, addr, key):                  # a full-duplex link; addr set only for outbound peers
+    return {"s": s, "addr": addr, "key": key,          # key: this link's outbox dest
+            "out": b"", "inb": b"", "pend": [], "down": 0.0,
+            "due": 0.0, "heard": 0.0}    # due: next root compare; heard: last peer compare
 
 def connect(p):                          # outbound (re)connect: recurrence = liveness
     h, pt = p["addr"].rsplit(":", 1)
     s = socket.socket(); s.setblocking(False)
     if s.connect_ex((h, int(pt))) not in (0, errno.EINPROGRESS):
         s.close(); p["down"] = time.monotonic() + 0.05
-    else: p["s"], p["fp"] = s, None
+    else: p["s"], p["due"] = s, 0.0
 
 def drop(p, peers):                      # dead link: outbound damps + reconnects, inbound is forgotten
     if p["s"]: p["s"].close()
     p["s"], p["inb"], p["pend"] = None, b"", []
-    if p["addr"]: p["out"], p["fp"], p["down"] = b"", None, time.monotonic() + 0.05
+    if p["addr"]: p["out"], p["due"], p["down"] = b"", 0.0, time.monotonic() + 0.05
     else: peers.remove(p)
 
 def enqueue(p, fb):                      # frame one wire message into the outbox; overflow parks
@@ -67,6 +72,28 @@ def unpack(fb):                          # one wire fact -> the fact frames it d
     try: f = decode(fb)
     except Exception: return [fb]        # a bad wire frame: admit it, miss it, count it as one
     return bundles.items(f) if f.type_tag == bundles.TAG else [fb]   # a bundle -> its inners
+
+def _ids(v):                             # a ship offer's value: length-framed fact ids
+    out, i = [], 0
+    while i < len(v):
+        x, i = _rd(v, i); out.append(x)
+    return out
+
+def pump(node, peers, shipped):          # stage validated send/ship offers onto live links
+    rows = {}
+    for role in (b"send", b"ship"):
+        for o, _, a in node.watched(role, b"outbox"):
+            if o not in shipped: rows.setdefault(o, []).append(a)
+    moved = False
+    for o, atoms in sorted(rows.items()):            # one sender: one dest, all or nothing
+        p = next((q for q in peers if q["s"] and q["key"] == atoms[0].target[1]), None)
+        if not p or len(p["out"]) > OUTCAP: continue # offer stands: park, never drop
+        for a in sorted(atoms, key=lambda a: (a.role, a.value)):
+            if a.role == b"send": enqueue(p, a.value)
+            else:                                    # by reference: resolve ids at send time
+                ship(p, [node.durable[x] for x in _ids(a.value) if x in node.durable])
+        shipped.add(o); sent.report(node, o, int(time.time())); moved = True
+    return moved
 
 def admit_one(node, fb, fresh):          # admit one inner fact through the normal gate
     try: new = fact_id(decode(fb)) not in node.facts
@@ -108,14 +135,17 @@ def main(db, *argv):
         tsock = socket.create_server((h, int(pt))); tsock.setblocking(False)
     my_addr = ("%s:%s" % tsock.getsockname()[:2]).encode() if tsock else b""
     hi = hello.greeting(sk, pk, my_addr, int(time.time()))   # our signed handshake, sent on every connect
-    peers = []
+    peers, struck, shipped = [], -1, set()           # struck: last tick bucket; shipped: pumped senders
+    srcs = {}                                        # fid -> arrival key: tails never echo home
+    known = {fid for _, fid in sync.leaves(node)}    # the loaded leaf set is not "fresh": no startup flood
     for sg in (signal.SIGINT, signal.SIGTERM): signal.signal(sg, lambda *a: sys.exit(0))
     print("listening:", "%s:%s" % tsock.getsockname()[:2] if tsock else sp, flush=True)
     work = True
     try:
         while True:
             want = {a.decode() for a in request.dials(node)}   # dial set from valid request facts
-            for a in want - {p["addr"] for p in peers if p["addr"]}: peers.append(peer(None, a))
+            for a in want - {p["addr"] for p in peers if p["addr"]}:
+                peers.append(peer(None, a, a.encode()))
             for p in list(peers):                    # a closed request: forget the link, stop dialing
                 if p["addr"] and p["addr"] not in want:
                     if p["s"]: p["s"].close()
@@ -127,15 +157,20 @@ def main(db, *argv):
             live = [p for p in peers if p["s"]]
             rd = [usock] + ([tsock] if tsock else []) + [p["s"] for p in live]
             wr = [p["s"] for p in live if p["out"]]
-            r, w, _ = select.select(rd, wr, [], 0 if work else 0.05)  # idle turn: brief sleep
+            nxt = clock.next_alarm(node)             # standing alarms bound the idle sleep
+            idle = 0.05 if nxt is None else min(0.05, max(0.0, nxt / 1000 - time.time()))
+            r, w, _ = select.select(rd, wr, [], 0 if work else idle)
             work = False
+            ms = int(time.time() * 1000)
+            if nxt is not None and nxt <= ms and ms // clock.BUCKET != struck:
+                clock.strike(node, ms); struck = ms // clock.BUCKET; work = True  # ≤1 tick per bucket
             # HOST IN — clients, new inbound peers, peer bytes.
             for s in r:
                 if s is usock: serve(node, s.accept()[0], store, flushed); work = True
                 elif s is tsock:
                     try:
                         c = s.accept()[0]; c.setblocking(False)
-                        np = peer(c, None); ship(np, [hi]); peers.append(np)
+                        np = peer(c, None, b"fd:%d" % c.fileno()); ship(np, [hi]); peers.append(np)
                     except OSError: pass
                 else:
                     p = next(p for p in live if p["s"] is s)
@@ -147,20 +182,38 @@ def main(db, *argv):
             for p in list(peers):                    # admit peer frames; answer compares, note hellos
                 if not p["s"]: continue
                 for fid, tag in intake(node, p):
-                    if tag == sync.TAG: ship(p, sync.respond(node, fid)); work = True
+                    srcs[fid] = p["key"]             # remember arrivals: tails never echo home
+                    if tag == sync.TAG:              # the answer rides the pump, not this socket
+                        p["heard"] = time.monotonic()
+                        sreply.answer(node, fid, p["key"], int(time.time())); work = True
                     elif tag == hello.TAG: hellos.append(fid)
                 if p["pend"]: work = True            # a bundle still draining: don't idle-sleep on it
             for hid in hellos:                       # record each verified peer as a live connection
                 conn.observe(node, *hello.claim(node, hid), int(time.time())); work = True
             if not node.frontier and any(p["s"] for p in peers):
-                mf = sync.myfp(node)                 # quiescent: only now is our leaf set settled
-                for p in peers:                      # open a round on connect / on leaf-fp change
-                    if p["s"] and p["fp"] != mf:     # deferring while draining kills the catch-up storm:
-                        ship(p, sync.initiate(node)); p["fp"], work = mf, True  # a peer re-inits once, not per turn
+                ls = sync.leaves(node)               # quiescent: only now is our leaf set settled
+                new = [fid for _, fid in ls if fid not in known]
+                if new:                              # live tail: fresh leaves go straight to peers
+                    known.update(new); t = int(time.time())
+                    seen = set()
+                    for fid in new: seen |= sync.closure(node, fid)
+                    for p in peers:
+                        if p["s"]:
+                            ids = [x for x in sorted(seen) if srcs.get(x) != p["key"]]
+                            if ids: sreply.tail(node, p["key"], ids, t); work = True
+                root, nowm = None, time.monotonic()  # cadence repair: fresh root compares
+                for p in peers:                      # (deferring while draining kills the catch-up storm)
+                    if p["s"] and nowm >= p["due"]:
+                        if nowm - p["heard"] >= CADENCE:   # damp: their compares are mid-flight
+                            root = root or sync.initiate(node, ls)[0]
+                            sreply.open_round(node, p["key"], int(time.time()), root)
+                            work = True
+                        p["due"] = nowm + CADENCE
             # ENGINE DRAIN — bounded; leftover frontier is next turn's work.
             node.turn(BOUND); work |= bool(node.frontier)
-            # HOST OUT — flush new durables, drain per-peer outboxes (select-gated).
+            # HOST OUT — flush new durables, pump send offers, drain outboxes (select-gated).
             flush(node, store, flushed)
+            work |= pump(node, peers, shipped)
             for p in list(peers):
                 if p["s"] and p["out"] and p["s"] in w:
                     try: k = p["s"].send(p["out"]); p["out"] = p["out"][k:]; work |= k > 0

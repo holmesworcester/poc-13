@@ -236,12 +236,11 @@ def bench_newest():                       # the number a user feels: a FRESH mes
                 time.sleep(0.02)
             dt = time.time() - t0
             assert got.endswith("newest"), "newest message never displayed on B"
-            # MEASURED ~3.6s — the fresh fact does NOT jump the queue: it rides the
-            # same (ts, FactId)-ordered reconcile as the backlog, so its visibility
-            # is the remaining catch-up time. The budget is a tripwire against this
-            # getting WORSE; making it near-instant (fresh facts first) is an open
-            # design item, and this number is where that work would show up.
-            report("newest visible on B", dt, "s", 7.5)
+            # MEASURED ~0.7s (was ~3.6s before live-tail sends): a freshly validated
+            # leaf ships straight to every peer instead of riding the (ts, FactId)-
+            # ordered reconcile behind the backlog. The residue is outbox/intake
+            # pacing, not queue position. The budget is a tripwire.
+            report("newest visible on B", dt, "s", 2.5)
         finally: stop(pa, pb)
 
 # --- 6. crypto gate: verify folded into admission, zero on replay -------------

@@ -17,10 +17,10 @@ the spec for the sync-scoping work, and xfail flipping to xpass is the signal
 it landed. The positive lanes (multiple mutual workspaces converge
 independently) should pass immediately.
 
-Related open design item, measured by `bench.py` 5c: a fresh message authored
-mid catch-up does not jump the queue — its visibility on the receiver is the
-remaining catch-up time (~3.6s against a 5k backlog). Fresh-facts-first would
-show up as that number collapsing.
+Done (2026-07-03): fresh-facts-first landed as live-tail sends (poc-10
+`advertise_indexed_fact_to_connections` ported into the daemon's quiescence
+block) — bench 5c collapsed from ~3.6s to ~0.7s against the 5k backlog; the
+budget is now 2.5s.
 
 ## Done (2026-07-03): consolidation + ports
 

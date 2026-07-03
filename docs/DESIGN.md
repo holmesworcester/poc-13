@@ -366,20 +366,31 @@ fact it kills and the fact arrives already Suppressed: no resurrection window.
 The receiver admits every shipped frame through the normal gate (the
 replay-only `checked` path is never used for peer input).
 
-The split of labor is crisp. `leaves`, the range fingerprint, and `closure`
-are QUERIES — pure reads of the engine, authority for nothing. The round-trip
-driver is COMMANDS the daemon calls: `initiate` opens a round with one
-whole-space fingerprint, `respond` turns an admitted peer compare into the next
-frames (sub-range compares, `want` pulls, and the closure shipments
-themselves). A compare frame crossing the wire IS a fact — the transport keeps
-its single message type. Compare facts extract to `(False, False)`: volatile,
-so replay never resurrects session state, and unshareable, so they are excluded
-from the very leaves they reconcile; the daemon ships them explicitly. A daemon
-opens a round toward each peer on connect and whenever its own leaf fingerprint
-changes — but defers a fresh round while its own frontier is still draining, so a
-receiver mid-catch-up stops churning the sender with a new compare every turn
-(see Connections). Every peer link is full-duplex, and reconciliation is what a
-fact authored on one side rides to reach the others.
+The split of labor is crisp. `leaves`, the range fingerprint, `closure`, and
+`answer_of` (an admitted peer compare's answer: sub-range compares, `want`
+pulls, and the closure ship list) are QUERIES — pure reads of the engine,
+authority for nothing. The send side is the `sync.reply` family: a reply fact
+carries the answer's compare frame as a `send` offer and its shipments as
+by-reference `ship` offers (fact ids, resolved against the durable set at
+send time) at the host-watched outbox keys, retired by the pump's volatile
+`sent` receipt — even sync's own frames ride the one send path. A compare
+frame crossing the wire IS a fact — the transport keeps its single message
+type. Compare and reply facts extract to `(False, False)`: volatile, so replay
+never resurrects session state, and unshareable, so they are excluded from the
+very leaves they reconcile.
+
+Sync is roundless (poc-10's `maintain_sync` model): there is no round or
+session state anywhere. The daemon sends a fresh root compare to each live
+peer on a process-local cadence — damped while that peer's own compares are
+mid-flight, and deferred while the frontier is still draining, so a receiver
+mid-catch-up stops churning the sender with a new compare every turn. A lost
+frame needs no retry bookkeeping; the next cadence compare repairs it.
+Freshness does not wait for the cadence: at quiescence, leaves that newly
+entered the set ride a live-tail reply straight to every peer except the one
+they arrived from (measured on bench 5c, a fresh message against a 5000-fact
+backlog: ~3.6s riding the reconcile, ~0.7s tailed). Every peer link is
+full-duplex, and reconciliation is what a fact authored on one side rides to
+reach the others.
 
 ## Connections
 
@@ -422,6 +433,26 @@ turns a bulk catch-up from hundreds of leaf-rescanning compare rounds into a
 handful: on the measured 5000-fact catch-up it is roughly a 10x lift in both
 facts/s and MB/s.
 
+## The Clock
+
+The clock driver (`facts/clock/tick.py`) is host time as facts, demand-driven.
+A tick is one volatile fact offering `tick` at its 100ms bucket; the daemon
+admits at most one per bucket, and only while some fact keeps a standing
+`alarm` offer at a due deadline — zero alarms, zero ticks, ever. Standing
+alarms also bound the daemon's idle select timeout, so a deadline wakes the
+loop on time without polling.
+
+The retry idiom, for any family that awaits an answer: bake a bounded backoff
+schedule of `alarm` offers at authoring (facts are immutable — a deadline can
+never move, so the schedule is chosen up front), Watch — never Require —
+`tick` over the bounded window from the first deadline to the last plus a
+grace period (a resolved or expired fact stops matching new ticks and can
+never storm), and drop the alarms and the send offers they pace the moment
+the resolution key appears in context. Purely operational repetition — socket
+redial damping, sync compare cadence — stays process-local in the daemon, as
+poc-10 keeps it: facts carry policy (deadlines, what to offer, when to stop),
+never socket schedules.
+
 ## Family Specs Not Yet Implemented
 
 These are protocol, specified fully in the poc-12 design; they land as fact
@@ -434,9 +465,9 @@ families without kernel changes:
 - **Retention and purge** — timestamp order alone never purges: pins,
   retained closures, and live suppressor targets all hold facts; purge is
   `DELETE` over the db, and `VACUUM` reclaims space.
-- **Drivers** — the clock and local input as host-authored fact families; the
-  event source reading the OS is outside the boundary. (The connection driver is
-  built — see Connections.)
+- **Drivers** — local input as a host-authored fact family; the event source
+  reading the OS is outside the boundary. (The connection driver is built —
+  see Connections; the clock driver is built — see The Clock.)
 
 ## Testing
 
