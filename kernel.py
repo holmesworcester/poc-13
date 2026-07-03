@@ -141,8 +141,12 @@ class Node:
     def __init__(self, root):
         self.root = root
         self.facts, self.durable = {}, {}    # id -> Fact ; id -> canonical bytes
-        self.rows, self.intake = [], []      # asserted index + session overlay: (owner, atom)
-        self.memo, self.clean = {}, []       # id -> verdict ; validated offers (owner, ts, atom)
+        # Match indexes bucketed by (kind, role, scope) / (role, scope): a need
+        # only ever matches offers sharing its role+scope, so one bucket is the
+        # whole candidate set — no linear scan of the asserted set per query.
+        self.rows, self.intake = {}, {}      # (kind,role,scope) -> [(owner, atom)]: asserted + overlay
+        self.memo, self.clean = {}, {}       # id -> verdict ; (role,scope) -> [(owner, ts, atom)]
+        self.owned = {}                      # id -> its clean rows, for owner-scoped replacement
         self.slices = {}                     # key -> (owner, ts, value), LWW by (ts, owner)
         self.frontier = deque()
 
@@ -159,27 +163,31 @@ class Node:
         durable, _shareable = self.root.extract(f)
         self.facts[fid], self.memo[fid] = f, "Unknown"
         if durable: self.durable[fid] = b    # atomic flush
-        self.intake += [(fid, mat(a, fid)) for a in f.atoms]
+        for a in f.atoms:
+            self.intake.setdefault((a.kind, a.role, a.scope), []).append((fid, mat(a, fid)))
         self.frontier.append(fid)
         return fid
 
     # Both match directions run over index ∪ intake; the overlay is transparent.
-    def _hit(self, need, offer): return ((offer.role, offer.scope) ==
-                                         (need.role, need.scope) and covers(offer.target, need.target))
+    # A shared role+scope is the whole precondition for a match, so it keys the
+    # bucket; covers() decides the rest over just those candidates.
+    def _bucket(self, k): return chain(self.rows.get(k, ()), self.intake.get(k, ()))
     def offers_for(self, need):          # asserted, dirty: discovery only
-        return [(o, a) for o, a in chain(self.rows, self.intake)
-                if a.kind == OFFER and self._hit(need, a)]
+        return [(o, a) for o, a in self._bucket((OFFER, need.role, need.scope))
+                if covers(a.target, need.target)]
     def needs_for(self, offer):          # wake fanout direction
-        return [(o, a) for o, a in chain(self.rows, self.intake)
-                if a.kind == NEED and self._hit(a, offer)]
+        return [(o, a) for o, a in self._bucket((NEED, offer.role, offer.scope))
+                if covers(offer.target, a.target)]
     def valid_offers(self, need):        # the clean twin: the only justifier
-        return [r for r in self.clean if self._hit(need, r[2])]
+        return [r for r in self.clean.get((need.role, need.scope), ())
+                if covers(r[2].target, need.target)]
 
     # Engine drain — bounded; overflow parks on the frontier, never drops.
     def turn(self, bound=64):
         for _ in range(min(bound, len(self.frontier))):
             self._step(self.frontier.popleft())
-        self.rows += self.intake; self.intake = []   # flush: moves rows, changes no result
+        for k, v in self.intake.items(): self.rows.setdefault(k, []).extend(v)
+        self.intake = {}                             # flush: moves rows, changes no result
 
     def run(self):
         for _ in range(100_000):
@@ -202,25 +210,28 @@ class Node:
 
     def _promote(self, fid, f, out):
         self.memo[fid] = out.verdict
-        old = {(t, a) for o, t, a in self.clean if o == fid}
-        new = ({(ts_of(f), mat(a, fid)) for a in out.offers}
-               if out.verdict == "Valid" else set())
-        # Owner-scoped replacement: old and new output are never both visible.
-        self.clean = [r for r in self.clean if r[0] != fid] + [(fid, t, a) for t, a in new]
+        # Owner-scoped replacement: pull this fact's current rows from their
+        # buckets, add the new ones — old and new output are never both visible.
+        old = self.owned.pop(fid, [])
+        for r in old: self.clean[(r[2].role, r[2].scope)].remove(r)
+        new = ([(fid, ts_of(f), mat(a, fid)) for a in out.offers]
+               if out.verdict == "Valid" else [])
+        for r in new: self.clean.setdefault((r[2].role, r[2].scope), []).append(r)
+        if new: self.owned[fid] = new
         self.slices = {k: v for k, v in self.slices.items() if v[0] != fid}
         if out.verdict == "Valid":
             for k, v in out.slice_delta.items():
                 cur = self.slices.get(k)
                 if not cur or (cur[2], cur[0]) <= (ts_of(f), fid):
                     self.slices[k] = (fid, v, ts_of(f))
-        for _, a in old ^ new:           # wake fanout on every changed offer
+        for _, _, a in set(old) ^ set(new):   # wake fanout on every changed offer
             for o, _ in self.needs_for(a):
                 if o != fid and o not in self.frontier: self.frontier.append(o)
 
     # Host out — the host drains validated offers at keys it watches, performs
     # external work, and admits facts reporting what happened. It never writes.
     def watched(self, role, scope):
-        return [r for r in self.clean if (r[2].role, r[2].scope) == (role, scope)]
+        return list(self.clean.get((role, scope), ()))
 
     # Crash story: derived state is a pure, order-independent function of the
     # durable set. Volatile facts vanish — completeness, never coherence.
@@ -230,6 +241,6 @@ class Node:
         return m.run()
 
     def derived(self):
-        return (sorted((o, t, enc_atom(a)) for o, t, a in self.clean),
+        return (sorted((o, t, enc_atom(a)) for rs in self.clean.values() for o, t, a in rs),
                 sorted((k, *v) for k, v in self.slices.items()),
                 sorted(self.memo.items()))

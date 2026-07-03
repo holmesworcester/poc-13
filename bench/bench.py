@@ -1,0 +1,224 @@
+#!/usr/bin/env python3
+"""bench/bench.py — poc-13 performance harness.  Run: python3 bench/bench.py
+
+One file, stdlib only. Measures the six load paths that matter, prints a table,
+and exits nonzero if any budget is violated (so it can gate CI). Budgets are set
+at ~2x the value measured on the build machine (recorded next to each as
+MEASURED) — headroom for a slower box, a tripwire for a real regression.
+
+The load is deliberately the shape the design assumes: one workspace, messages
+fanned across a few channels. The one caveat the design accepts is made visible
+here: replay and every sync `leaves()` are LINEAR over the durable set — there
+is no on-disk index. Those numbers are reported, not gated tight; see README.
+"""
+import os, signal, socket, subprocess, sys, tempfile, time
+BENCH = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.dirname(BENCH)
+sys.path.insert(0, ROOT_DIR)
+from kernel import Node, encode, decode, fact_id, frame, _rd
+from facts import ROOT
+from facts.auth.workspace import workspace
+from facts.content.message import message, feed
+from facts.sync import compare as sync
+from facts.auth import signature
+import ed25519 as ed
+
+N = 10_000                               # the standard load: facts admitted + run
+CHANS = [b"c%d" % i for i in range(5)]   # a few channels, messages fanned across them
+WS = workspace(b"acme", 1); WID = fact_id(WS)
+MSGS = [encode(message(WID, CHANS[i % 5], b"al", b"m%d" % i, i + 2)) for i in range(N)]
+BIN = os.path.join(ROOT_DIR, "bin")
+
+# --- table + budgets ----------------------------------------------------------
+FAIL = []
+def report(name, val, unit, budget, hi_ok=False):
+    # hi_ok=False: lower is better, violate if val > budget (a ceiling).
+    # hi_ok=True : higher is better, violate if val < budget (a floor).
+    bad = budget is not None and ((val < budget) if hi_ok else (val > budget))
+    if bad: FAIL.append(name)
+    mark = "  " if budget is None else ("!!" if bad else "ok")
+    b = "" if budget is None else f"{'>=' if hi_ok else '<='} {budget:g}"
+    print(f"  {mark} {name:<42} {val:>10.3f} {unit:<7} {b}")
+
+def section(t): print(f"\n{t}")
+
+# --- daemon plumbing ----------------------------------------------------------
+def spawn(db, *a):                       # a cond.py daemon; returns (proc, announced addr)
+    p = subprocess.Popen([sys.executable, os.path.join(BIN, "cond.py"), db, *a],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    line = p.stdout.readline()
+    assert line.startswith("listening:"), (line, p.poll() and p.stderr.read())
+    return p, line.split()[1]
+
+def stop(*ps):
+    for p in ps: p.send_signal(signal.SIGTERM)
+    for p in ps: p.wait(5)
+
+def uverb(sockpath, path, *args):        # one proxy roundtrip over the daemon's unix socket
+    s = socket.socket(socket.AF_UNIX); s.connect(sockpath)
+    s.sendall(frame(path.encode(), *(a.encode() for a in args))); s.shutdown(socket.SHUT_WR)
+    b = b""
+    while (c := s.recv(65536)): b += c
+    s.close(); r, _ = _rd(b, 0)
+    if not r.startswith(b"+"): raise RuntimeError(r[1:].decode())
+    return r[1:].decode()
+
+def cli(db, *args):                      # a full con.py invocation (subprocess: crash-and-replay or proxy)
+    r = subprocess.run([sys.executable, os.path.join(BIN, "con.py"), db, *args],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    return r.stdout.strip()
+
+# --- 1. in-process engine: admit + run, then linear replay --------------------
+def bench_engine():
+    section("1. in-process engine (%d facts)" % N)
+    n = Node(ROOT); n.admit(encode(WS)); n.run()
+    t = time.time()
+    for b in MSGS: n.admit(b)
+    n.run(); dt = time.time() - t
+    report("admit+run", dt, "s", 1.2)                 # MEASURED 0.4-0.6s
+    report("  per fact", dt / N * 1e3, "ms", None)
+    t = time.time(); m = n.replay(); rp = time.time() - t
+    assert m.derived() == n.derived(), "replay diverged"
+    report("replay (LINEAR, no index)", rp, "s", 1.3)  # MEASURED 0.5-0.7s
+    return n
+
+# --- 2. cold CLI crash-and-replay vs the daemon it amortizes ------------------
+def bench_cli(db):
+    section("2. one verb against a %d-fact db" % N)
+    t = time.time(); cli(db, "content.message.send", WID.hex(), "c0", "al", "cold", "99")
+    report("cold con.py (crash+replay+verb)", time.time() - t, "s", 1.5)  # MEASURED 0.6-0.7s
+    p, _ = spawn(db)
+    try:
+        uverb(db + ".sock", "content.message.feed", WID.hex(), "c0")      # warm the loaded node
+        t = time.time(); cli(db, "content.message.send", WID.hex(), "c0", "al", "warm", "98")
+        report("daemon-proxy con.py (same verb)", time.time() - t, "s", 0.2)  # MEASURED 0.03s
+    finally: stop(p)
+
+# --- 3. query under load ------------------------------------------------------
+def bench_query(n):
+    section("3. query under load (%d messages)" % N)
+    R = 50
+    t = time.time()
+    for _ in range(R): rows = feed(n, WID, b"c0")
+    report("feed() / watched() scan", (time.time() - t) / R * 1e3, "ms", 5.0)  # MEASURED 1.0ms
+    need = message(WID, b"c0", b"al", b"x", 1).atoms[1]                          # the workspace REQUIRE
+    t = time.time()
+    for _ in range(R): n.valid_offers(need)
+    report("valid_offers() bucket lookup", (time.time() - t) / R * 1e6, "us", None)
+    assert len(rows) == N // 5
+
+# --- 4. sync: dependency-aware negentropy over a big set ----------------------
+def _node(bs):
+    n = Node(ROOT)
+    for b in bs: n.admit(b)
+    n.run(); return n
+
+def _reconcile(a, b, maxr=100_000):      # the daemon's exact wire discipline, in-process
+    pend, fp, rounds, frames, wire = {a: [], b: []}, {a: None, b: None}, [0], [0], [0]
+    def half(me, other):
+        mf = sync.myfp(me); opened = fp[me] != mf
+        if opened:
+            fr = sync.initiate(me); pend[other] += fr; fp[me] = mf
+            frames[0] += len(fr); wire[0] += sum(len(x) for x in fr)
+        box, pend[me] = pend[me], []
+        for fb in box:
+            fresh = fact_id(decode(fb)) not in me.facts
+            fid = me.admit(fb)
+            if fid and fresh and me.facts[fid].type_tag == sync.TAG:
+                rounds[0] += 1; fr = sync.respond(me, fid); pend[other] += fr
+                frames[0] += len(fr); wire[0] += sum(len(x) for x in fr)
+        me.run(); return opened or bool(box)
+    while (half(a, b) | half(b, a)) and rounds[0] < maxr: pass
+    return rounds[0], frames[0], wire[0]
+
+def bench_sync():
+    section("4. sync over a %d-fact set" % N)
+    a, b = _node([encode(WS)] + MSGS), _node([encode(WS)] + MSGS[:-1])   # 1-fact diff
+    t = time.time(); r, fr, w = _reconcile(a, b); dt = time.time() - t
+    assert sync.leaves(a) == sync.leaves(b)
+    report("1-fact diff: wall", dt, "s", 0.8)          # MEASURED 0.35s
+    report("  rounds", r, "", 60)
+    report("  frames", fr, "", 80)
+    report("  wire", w / 1024, "KiB", 40)
+    a, b = _node([encode(WS)] + MSGS), _node([])                          # cold: B empty
+    t = time.time(); r, fr, w = _reconcile(a, b); dt = time.time() - t
+    assert set(a.durable) == set(b.durable)
+    report("cold (empty B): wall", dt, "s", 3.5)       # MEASURED 1.45s
+    report("  frames", fr, "", None)
+    report("  wire", w / 1024, "KiB", None)
+
+# --- 5. two real daemons over TCP: sustained convergence ----------------------
+def bench_daemons():
+    section("5. two daemons over TCP (min 30s / 2000 facts)")
+    with tempfile.TemporaryDirectory() as d:
+        dba, dbb = os.path.join(d, "a.facts"), os.path.join(d, "b.facts")
+        pb, addr = spawn(dbb, "--listen", "127.0.0.1:0")
+        pa, _ = spawn(dba, "--peer", addr)
+        sa, sb = dba + ".sock", dbb + ".sock"
+        try:
+            wid = uverb(sa, "auth.workspace.create", "acme", "1")
+            cap, t0, qlat = 2000, time.time(), None
+            for i in range(cap):
+                uverb(sa, "content.message.send", wid, "g", "al", "m%d" % i, str(i + 2))
+                if i == cap // 2:                         # a query on B mid-stream
+                    q = time.time(); uverb(sb, "content.message.feed", wid, "g")
+                    qlat = (time.time() - q) * 1e3
+                if time.time() - t0 > 30: cap = i + 1; break
+            auth = time.time() - t0
+            end = time.time() + 60
+            while time.time() < end:
+                got = len(uverb(sb, "content.message.feed", wid, "g").splitlines())
+                if got >= cap: break
+                time.sleep(0.05)
+            conv = time.time() - t0
+            report("author rate (A, via socket)", cap / auth, "fact/s", None)
+            report("converged on B (end-to-end)", got / conv, "fact/s", 100, hi_ok=True)  # MEASURED 230-280/s
+            report("mid-stream query B latency", qlat, "ms", 25)            # MEASURED 2-7ms under load
+            assert got == cap, f"B converged only {got}/{cap}"
+        finally: stop(pa, pb)
+
+# --- 6. crypto gate: verify folded into admission, zero on replay -------------
+def bench_crypto():
+    section("6. signed-fact admission (Ed25519 gate)")
+    sk, pk = ed.keygen()
+    M = 25
+    # a valid detached signature over each target id (the id IS the signed message)
+    facts = []
+    for _ in range(M):
+        tid = os.urandom(32)
+        facts.append(encode(signature.signature(WID, pk, tid, ed.sign(sk, tid), 3)))
+    calls, orig = [0], signature.verify
+    signature.verify = lambda *a: (calls.__setitem__(0, calls[0] + 1), orig(*a))[1]
+    try:
+        n = Node(ROOT); n.admit(encode(WS)); n.run()
+        t = time.time()
+        for b in facts: assert n.admit(b) is not None
+        n.run(); dt = time.time() - t
+        report("signed admits", M / dt, "adm/s", 6, hi_ok=True)   # MEASURED ~13/s
+        report("  verify() cost", dt / M * 1e3, "ms", None)
+        assert calls[0] >= M, "the gate must have verified each signature"
+        calls[0] = 0
+        m = n.replay()                                            # rebuild from durable file
+        report("replay verifies (must be 0)", calls[0], "", 0)
+        assert m.derived() == n.derived()
+    finally: signature.verify = orig
+
+def main():
+    print("poc-13 bench  |  python", sys.version.split()[0], " facts:", N)
+    n = bench_engine()
+    with tempfile.TemporaryDirectory() as d:
+        db = os.path.join(d, "big.facts")
+        with open(db, "wb") as f:
+            f.write(frame(encode(WS)))
+            for b in MSGS: f.write(frame(b))
+        bench_cli(db)
+    bench_query(n)
+    bench_sync()
+    bench_daemons()
+    bench_crypto()
+    print("\n" + ("BUDGET VIOLATED: " + ", ".join(FAIL) if FAIL else "all budgets met"))
+    sys.exit(1 if FAIL else 0)
+
+if __name__ == "__main__":
+    main()

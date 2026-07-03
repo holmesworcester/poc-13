@@ -74,12 +74,20 @@ def respond(node, cid):                  # answer a peer's admitted compare with
     return frames
 
 # QUERIES — the pure algorithm; reads the engine, authority for nothing.
+_LEAF = {}                               # fid -> (key, leaf hash); content-addressed, so
+def _leaf(node, fid, b):                 # write-once and node-independent — never invalidated
+    e = _LEAF.get(fid)
+    if e is None:
+        ts = ts_of(node.facts[fid])
+        e = _LEAF[fid] = ((ts, fid), H(frame(fid, ts.to_bytes(8, "little"), H(b))))
+    return e
+
 def leaves(node):                        # durable, shareable, Valid|Suppressed -> leaf hash
-    return {(ts_of(node.facts[fid]), fid):
-                H(frame(fid, ts_of(node.facts[fid]).to_bytes(8, "little"), H(b)))
-            for fid, b in node.durable.items()
-            if node.root.extract(node.facts[fid])[1]
-            and node.memo.get(fid) in ("Valid", "Suppressed")}
+    out = {}                             # only membership (the memo verdict) varies per call
+    for fid, b in node.durable.items():
+        if node.memo.get(fid) in ("Valid", "Suppressed") and node.root.extract(node.facts[fid])[1]:
+            k, h = _leaf(node, fid, b); out[k] = h
+    return out
 
 def closure(node, fid):                  # Require ancestors + suppressors, transitively
     out, todo = set(), {fid}
