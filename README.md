@@ -1,17 +1,27 @@
 # poc-13
 
-The atom model (poc-12 `docs/DESIGN.md`) as a minimal Python skeleton:
-a single-file kernel plus a `facts/` tree in the poc-10 style.
+The atom model played for conciseness: a single-file kernel, a `facts/` tree
+where every fact family is one file with one fixed contract, and a CLI whose
+db is a dumb append-only file of canonical fact bytes. The design of record
+is `docs/DESIGN.md`; protocol semantics descend from poc-12, where they were
+proven.
 
-- `kernel.py` — identity, admission, matching, and the turn loop. Nothing
-  else: sync, hydration, retention, queues, effects, clocks, and content are
-  fact families, not engine primitives, and live outside this file.
-- `facts/` — one directory per scope, one module per fact family
-  (constructor + `extract` + `project`). Projectors **are** the routers:
-  `facts.ROOT` is a projector that dispatches on type-tag segments, and the
-  kernel runs it like any other. `facts/__init__.py` is the table of contents.
-- `tests/test_skeleton.py` — high-level tests of the headline claims:
-  content-addressed idempotent admission, strict decode, cross-time
-  suppression, watch-driven queues, and order-independent replay.
+- `kernel.py` — identity, admission, matching, the turn loop. Nothing else:
+  sync, queues, effects, clocks, content, and retention are fact families.
+- `facts/<scope>/<fact>.py` — one file per family, six parts, always in
+  order: SHAPE, EXTRACT, PROJECT, COMMANDS, QUERIES, CLI. Projectors are
+  the routers: `facts.ROOT` dispatches type tags, api paths, and CLI verbs
+  through one tree. The module is the Python API.
+- `bin/con.py` — `con <db> <scope.fact.verb> [args...]`. Every invocation
+  is a crash-and-replay of the dumb file.
+- `tests/` — skeleton tests (kernel claims), a source-contract test (fact
+  file shape), and black-box tests (one process per command).
 
-Run: `python3 tests/test_skeleton.py` (or `pytest`). No dependencies.
+Run: `pytest` or `python3 tests/test_<name>.py`. No dependencies.
+
+```
+$ bin/con.py w.facts chat.note.send general "hello"
+b4c1…      # fact id
+$ bin/con.py w.facts chat.note.feed general
+hello
+```

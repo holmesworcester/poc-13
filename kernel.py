@@ -17,9 +17,10 @@ Stand-in: BLAKE2b-256 for BLAKE3-256 (stdlib has no BLAKE3).
 from collections import deque
 from dataclasses import dataclass, field, replace
 from itertools import chain
-import hashlib
+import hashlib, time
 
 H = lambda b: hashlib.blake2b(b, digest_size=32).digest()
+now = lambda: int(time.time())           # host convenience; never engine input
 
 def frame(*ps):                          # ‖ : length-framed concat (injective)
     assert all(len(p) < 2**32 for p in ps)
@@ -119,6 +120,10 @@ class Router:
     def _child(self, f):
         seg = f.type_tag.split(b".")
         return self.routes.get(seg[self.depth]) if len(seg) > self.depth else None
+
+    def resolve(self, segs):             # dotted api/CLI path -> fact module
+        c = self.routes.get(segs[self.depth]) if len(segs) > self.depth else None
+        return c.resolve(segs) if isinstance(c, Router) else c
 
     def extract(self, f):                # -> (durable, shareable)
         c = self._child(f)
