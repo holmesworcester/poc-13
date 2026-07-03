@@ -17,12 +17,11 @@ def test_solo_story():
             "resending the same fact must return the same id"
         con(db, "content.message.send", wid, "general", "bo", "there", "3")
         converge(db, "hi\nthere", "content.message.feed", wid, "general", secs=0, phase="cold feed")
-        # membership + authority (create rooted this node's key)
+        # membership + authority: create ran the whole bootstrap DAG with an
+        # ephemeral root key (then dropped), enrolling the founder as member+admin
         assert len(con(db, "auth.local_signer_secret.whoami")) == 64, "whoami must print the 32-byte pk hex"
-        uid = con(db, "auth.user.join", wid, "al", "4")
-        converge(db, "al", "auth.user.roster", wid, secs=0, phase="founder self-join")
-        con(db, "auth.admin.grant", wid, uid, "5")
-        converge(db, uid, "auth.admin.admins", wid, secs=0, phase="admin grant")
+        converge(db, "founder", "auth.user.roster", wid, secs=0, phase="founder enrolled by create")
+        converge(db, 1, "auth.admin.admins", wid, secs=0, phase="founder is the bootstrap admin")
         # a scope with no workspace parks its messages
         con(db, "content.message.send", "00" * 32, "general", "al", "ghost", "6")
         converge(db, "", "content.message.feed", "00" * 32, "general", secs=0, phase="ghost workspace parks")

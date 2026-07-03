@@ -98,7 +98,7 @@ def main(db, *argv):
         h, pt = listen.rsplit(":", 1)
         tsock = socket.create_server((h, int(pt))); tsock.setblocking(False)
     links, inbound = {}, []              # links: addr -> outbound socket; inbound: read sources
-    responded, redial, compared = set(), {}, {}      # process-local cadence markers
+    redial, compared = {}, {}                         # process-local cadence markers (addr/cid -> last)
     shipped, known = set(), {fid for _, fid in sync.leaves(node)}
     for sg in (signal.SIGINT, signal.SIGTERM): signal.signal(sg, lambda *a: sys.exit(0))
     print("listening:", "%s:%s" % tsock.getsockname()[:2] if tsock else sp, flush=True)
@@ -128,26 +128,28 @@ def main(db, *argv):
                     except OSError: c = b""
                     if c: src["inb"] = src.get("inb", b"") + c; work = True
                     elif src in inbound: s.close(); inbound.remove(src)
-            n = 0                                     # admit inbound, bounded per turn
+            n, arrived = 0, []                        # admit inbound, bounded per turn
             for src in inbound + [p for p in links.values() if p["s"]]:
                 if "inb" not in src: continue
                 for kind, body in messages(src):
-                    if kind == BARE: _admit_bare(node, body)
+                    if kind == BARE:
+                        rid = _admit_bare(node, body)
+                        if rid: arrived.append(rid)   # a request arrived: react after the turn
                     else: _admit_frame(node, body, sreply)
                     n += 1; work = True
                     if n >= BOUND: break
                 if n >= BOUND: break
-            # respond seam: only the addressee offers `respond`; author + ship the connection.
-            for o, _, a in node.watched(b"respond", conn.SC):
-                rid, reply = a.target[1], a.value
-                if rid in responded or not reply: continue
-                cid = conn.respond(node, rid, reply, int(time.time()))
-                if cid:
-                    responded.add(rid)
-                    enqueue(link(links, reply.decode()), BARE, node.durable.get(cid) or _enc(node, cid))
-                    work = True
             # ENGINE DRAIN — bounded; leftover frontier is next turn's work.
             node.turn(now_ms(), BOUND); work |= bool(node.frontier)
+            # respond seam: the onus is on the requester — its durable request re-dials on
+            # a cadence; the responder just answers each ARRIVAL (no cadence of its own), so
+            # a peer that lost its volatile session simply re-asks until it re-handshakes.
+            for rid in arrived:
+                reply = next((a.value for o, _, a in node.watched(b"respond", conn.SC)
+                              if o == rid and a.value), None)
+                if reply:
+                    cid = conn.respond(node, rid, reply, int(time.time()))
+                    if cid: enqueue(link(links, reply.decode()), BARE, _enc(node, cid)); work = True
             # HOST OUT — flush, redial, pump data, sync cadence + live tail, drain writes.
             flush(node, store, flushed)
             nowm = time.monotonic()
@@ -182,9 +184,10 @@ def _enc(node, fid):
     from kernel import encode
     return encode(node.facts[fid])
 
-def _admit_bare(node, body):             # a handshake fact (sealed request / connection)
-    try: node.admit(body)
-    except Exception: pass
+def _admit_bare(node, body):             # a handshake fact; returns the rid if it was a request
+    try: fid = node.admit(body)
+    except Exception: return None
+    return fid if fid and node.facts[fid].type_tag == request.TAG else None
 
 def _admit_frame(node, body, sreply):    # a sealed data frame: open by its own connection id
     cid = frames.frame_cid(body)
