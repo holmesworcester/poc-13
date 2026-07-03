@@ -7,7 +7,7 @@ family from auth.user because a device edge is its own authority statement."""
 from kernel import (Atom, Exact, NEED, OFFER, Out, REQUIRE, SELF, by, encode,
                     fact, now, ts_atom)
 from facts.auth import signature
-from ed25519 import keygen
+from crypto import ed25519_keygen as keygen
 from facts.store import hydrate
 
 TAG = b"auth.device"

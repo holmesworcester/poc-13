@@ -4,7 +4,7 @@ it first enters; a user parks until its signature lands (either order)."""
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import ed25519 as e
+import crypto as e
 from kernel import Node, encode, fact, fact_id, ts_atom
 from facts import ROOT
 from facts.auth import signature as sigmod, user as usermod, workspace as wsmod
@@ -30,29 +30,29 @@ VECTORS = [
 def test_rfc8032_vectors():
     for sk_h, pk_h, msg_h, sig_h in VECTORS:
         sk, pk, msg, sig = (bytes.fromhex(x) for x in (sk_h, pk_h, msg_h, sig_h))
-        assert e.keygen(sk) == (sk, pk)               # deterministic public key
-        assert e.sign(sk, msg) == sig                 # deterministic signature
-        assert e.verify(pk, msg, sig)                 # and it verifies
-        assert not e.verify(pk, msg + b"!", sig)      # over the wrong message: no
-        assert not e.verify(pk, msg, bytes(64))       # garbage never raises, just False
+        assert e.ed25519_keygen(sk) == (sk, pk)               # deterministic public key
+        assert e.ed25519_sign(sk, msg) == sig                 # deterministic signature
+        assert e.ed25519_verify(pk, msg, sig)                 # and it verifies
+        assert not e.ed25519_verify(pk, msg + b"!", sig)      # over the wrong message: no
+        assert not e.ed25519_verify(pk, msg, bytes(64))       # garbage never raises, just False
 
 def test_roundtrip_and_bad_inputs():
-    sk, pk = e.keygen()                               # fresh random identity
-    sig = e.sign(sk, b"hello")
-    assert e.verify(pk, b"hello", sig)
-    assert not e.verify(pk, b"hell0", sig)            # wrong message
-    _, pk2 = e.keygen(); assert not e.verify(pk2, b"hello", sig)   # wrong key
+    sk, pk = e.ed25519_keygen()                               # fresh random identity
+    sig = e.ed25519_sign(sk, b"hello")
+    assert e.ed25519_verify(pk, b"hello", sig)
+    assert not e.ed25519_verify(pk, b"hell0", sig)            # wrong message
+    _, pk2 = e.ed25519_keygen(); assert not e.ed25519_verify(pk2, b"hello", sig)   # wrong key
     for bad in (b"", b"\x00" * 32, os.urandom(63), os.urandom(65)):
-        assert e.verify(pk, b"hello", bad) is False   # malformed sig: never raises
+        assert e.ed25519_verify(pk, b"hello", bad) is False   # malformed sig: never raises
 
-SK, PK = e.keygen(bytes.fromhex(VECTORS[0][0]))      # PK is the workspace root in these tests
+SK, PK = e.ed25519_keygen(bytes.fromhex(VECTORS[0][0]))      # PK is the workspace root in these tests
 WS = workspace(b"acme", PK, 1)                        # the root pk is embedded in the workspace
 WID = fact_id(WS)
 
 def _sig(sk, pk, target, t, scope=WID):
-    return signature(scope, pk, target, e.sign(sk, target), t)
+    return signature(scope, pk, target, e.ed25519_sign(sk, target), t)
 
-_ISK, _IPK = e.keygen(bytes.fromhex(VECTORS[1][0]))  # a fixed invite key, so chains are reproducible
+_ISK, _IPK = e.ed25519_keygen(bytes.fromhex(VECTORS[1][0]))  # a fixed invite key, so chains are reproducible
 
 def _chain(name, t):                                 # (rooting facts, member fact, uid, member sig)
     inv = user_invite(WID, _IPK, 3); iid = fact_id(inv)
@@ -78,7 +78,7 @@ def test_malformed_signature_never_crashes_the_gate():
     # must return falsy, not raise reading a target it cannot use.
     junk = fact(b"auth.signature", ts_atom(3, WID),
                 Atom(OFFER, b"pk", WID, SELF, PK),
-                Atom(OFFER, b"sig", WID, SELF, e.sign(SK, b"whatever")))
+                Atom(OFFER, b"sig", WID, SELF, e.ed25519_sign(SK, b"whatever")))
     assert Node(ROOT).admit(encode(junk)) is None
 
 def test_user_parks_until_signature_lands_either_order():

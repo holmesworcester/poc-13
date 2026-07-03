@@ -4,7 +4,7 @@ Mirrors the poc-12 proof quantifiers — shuffled admission orders converge to
 bit-identical derived state; a one-fact diff ships exactly that fact's closure."""
 import os, random, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import ed25519
+import crypto as _c
 from kernel import Node, decode, encode, fact_id
 from facts import ROOT
 from facts.sync import compare as sync
@@ -14,12 +14,12 @@ from facts.auth.signature import signature
 from facts.content.message import message, feed
 from facts.content.message_deletion import deletion
 
-RK, RPK = ed25519.keygen(bytes(32))                  # a fixed workspace root key
+RK, RPK = _c.ed25519_keygen(bytes(32))                  # a fixed workspace root key
 WS = workspace(b"acme", RPK, 1); WID = fact_id(WS)
 # WS is Valid only with a root self-signature (shareable) AND local acceptance
 # (local-only). The signature rides sync in the closure; acceptance is authored
 # out-of-band on each node (the invite link), exactly as the real model requires.
-WS_SIG = signature(b"auth", RPK, WID, ed25519.sign(RK, WID), 1)
+WS_SIG = signature(b"auth", RPK, WID, _c.ed25519_sign(RK, WID), 1)
 _ACCEPT = invite_accepted(WID, bytes(32), bytes(32), b"", RPK, 1)
 
 def node(*facts):

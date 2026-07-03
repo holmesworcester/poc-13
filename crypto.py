@@ -11,6 +11,7 @@ import hashlib, hmac, os
 
 try:
     from nacl import bindings as _na
+    from nacl.signing import SigningKey, VerifyKey
 except ImportError as e:                               # the repo's one dependency
     raise ImportError("poc-13 needs PyNaCl (pip install pynacl)") from e
 
@@ -21,6 +22,24 @@ X25519_KEY_INFO = b"poc13 x25519 xchacha20poly1305 key"
 
 def keyed_hash(key32, domain, info):                   # deterministic derivation
     return hashlib.blake2b(frame(domain, info), digest_size=32, key=key32).digest()
+
+
+# --- Ed25519 (RFC 8032): the fact-authority signature ---------------------------
+def ed25519_keygen(seed=None):                         # (sk, pk); sk is the 32-byte seed
+    sk = os.urandom(32) if seed is None else seed
+    return sk, bytes(SigningKey(sk).verify_key)
+
+
+def ed25519_sign(sk, msg):                             # 64-byte detached signature
+    return SigningKey(sk).sign(msg).signature
+
+
+def ed25519_verify(pk, msg, sig):                      # never raises on attacker bytes
+    try:
+        VerifyKey(pk).verify(msg, sig)
+        return True
+    except Exception:
+        return False
 
 
 # --- X25519 ---------------------------------------------------------------------

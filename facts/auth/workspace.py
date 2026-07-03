@@ -38,7 +38,7 @@ def project(f, ctx, sl):
 def create(node, name, t):
     from facts.auth import (admin, invite_accepted, local_signer_secret, signature,
                             user, user_invite)
-    from ed25519 import keygen
+    from crypto import ed25519_keygen as keygen
     rsk, rpk = keygen()                              # the ephemeral workspace root key
     wid = node.admit(encode(workspace(name, rpk, t)))
     signature.attest(node, b"auth", rsk, rpk, wid, t)           # root signs the workspace

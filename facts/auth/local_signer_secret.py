@@ -6,7 +6,7 @@ identity is single and stable. current() hands commands the (sk, pk) they
 sign with; whoami prints the public key. Trusting the durable file here is a
 local-integrity assumption, not a protocol one — see docs/DESIGN.md."""
 from kernel import Atom, OFFER, Out, SELF, encode, fact, now, ts_atom
-from ed25519 import keygen as _keygen
+from crypto import ed25519_keygen as _keygen
 from facts.store import hydrate
 
 TAG = b"auth.local_signer_secret"

@@ -4,7 +4,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from kernel import (Node, Out, Router, decode, encode, fact, fact_id, ts_atom,
                     ts_of, Atom, Exact, OFFER)
-import ed25519
+import crypto as _c
 from facts import ROOT
 from facts.auth.workspace import workspace
 from facts.auth.invite_accepted import invite_accepted
@@ -14,11 +14,11 @@ from facts.content.message_deletion import deletion
 from facts.outbox.intent import intent
 from facts.outbox.performed import performed
 
-RK, RPK = ed25519.keygen(bytes(32))                  # a fixed workspace root key
+RK, RPK = _c.ed25519_keygen(bytes(32))                  # a fixed workspace root key
 WS = workspace(b"acme", RPK, 1)
 WID, CH = fact_id(WS), b"general"
 # The facts that make WS Valid: its root self-signature + a local acceptance.
-WS_CHAIN = [WS, signature(b"auth", RPK, WID, ed25519.sign(RK, WID), 1),
+WS_CHAIN = [WS, signature(b"auth", RPK, WID, _c.ed25519_sign(RK, WID), 1),
             invite_accepted(WID, bytes(32), bytes(32), b"", RPK, 1)]
 
 def test_identity_and_admission():

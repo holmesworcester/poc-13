@@ -9,7 +9,7 @@ Simplest honest rule (stated): any member, or the founder, may invite a device."
 from kernel import (Atom, Exact, NEED, OFFER, Out, REQUIRE, SELF, WATCH, by,
                     encode, fact, now, ts_atom)
 from facts.auth import local_signer_secret, signature
-from ed25519 import keygen
+from crypto import ed25519_keygen as keygen
 from facts.store import hydrate
 
 TAG = b"auth.device_invite"

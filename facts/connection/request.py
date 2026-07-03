@@ -19,7 +19,7 @@ the request arrived — a host-watched `respond` naming the reply route."""
 from kernel import (Atom, Exact, NEED, OFFER, Out, Range, SELF, SUPPRESS, WATCH,
                     by, encode, fact, frame, now, ts_atom, _rd)
 from crypto import open_x25519
-from ed25519 import keygen, verify
+from crypto import ed25519_keygen as keygen, ed25519_sign as sign, ed25519_verify as verify
 from facts.auth import endpoint, invite_accepted as ish
 from facts.store import hydrate
 
@@ -141,7 +141,7 @@ def bootstrap(node, workspace_id, secret, invite_id, to_ep, dialed_addr, init_ad
     isk = keygen(secret)[0]              # the invite key signs the request
     return _seal(node, BOOTSTRAP, epk, to_ep, dialed_addr, init_addr,
                  dict(invite_id=invite_id, bootstrap_hash=ish.bootstrap_hash(secret)),
-                 lambda m: __import__("ed25519").sign(isk, m), t)
+                 lambda m: sign(isk, m), t)
 
 # QUERIES — the dials the daemon still owes (addr -> bare handshake bytes).
 def dials(node):

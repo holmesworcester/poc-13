@@ -22,11 +22,16 @@ from facts.auth.workspace import workspace
 from facts.content.message import message, feed
 from facts.sync import compare as sync
 from facts.auth import signature
-import ed25519 as ed
+from facts.auth.invite_accepted import invite_accepted
+import crypto as ed
 
 N = 10_000                               # the standard load: facts admitted + run
 CHANS = [b"c%d" % i for i in range(5)]   # a few channels, messages fanned across them
-WS = workspace(b"acme", 1); WID = fact_id(WS)
+RK, RPK = ed.ed25519_keygen(bytes(32))
+WS = workspace(b"acme", RPK, 1); WID = fact_id(WS)
+# the facts that make WS Valid: root self-signature (shareable) + local acceptance
+WSPRE = [encode(WS), encode(signature.signature(b"auth", RPK, WID, ed.ed25519_sign(RK, WID), 1)),
+         encode(invite_accepted(WID, bytes(32), bytes(32), b"", RPK, 1))]
 MSGS = [encode(message(WID, CHANS[i % 5], b"al", b"m%d" % i, i + 2)) for i in range(N)]
 BIN = os.path.join(ROOT_DIR, "bin")
 
@@ -73,7 +78,9 @@ def cli(db, *args):                      # a full con.py invocation (subprocess:
 # --- 1. in-process engine: admit + run, then linear replay --------------------
 def bench_engine():
     section("1. in-process engine (%d facts)" % N)
-    n = Node(ROOT); n.admit(encode(WS)); n.run()
+    n = Node(ROOT)
+    for b in WSPRE: n.admit(b)
+    n.run()
     t = time.time()
     for b in MSGS: n.admit(b)
     n.run(); dt = time.time() - t
@@ -135,14 +142,14 @@ def _reconcile(a, b, maxr=100_000):      # the daemon's exact wire discipline, i
 
 def bench_sync():
     section("4. sync over a %d-fact set" % N)
-    a, b = _node([encode(WS)] + MSGS), _node([encode(WS)] + MSGS[:-1])   # 1-fact diff
+    a, b = _node(WSPRE + MSGS), _node(WSPRE + MSGS[:-1])   # 1-fact diff
     t = time.time(); r, fr, w = _reconcile(a, b); dt = time.time() - t
     assert sync.leaves(a) == sync.leaves(b)
     report("1-fact diff: wall", dt, "s", 0.8)          # MEASURED 0.35s
     report("  rounds", r, "", 60)
     report("  frames", fr, "", 80)
     report("  wire", w / 1024, "KiB", 40)
-    a, b = _node([encode(WS)] + MSGS), _node([])                          # cold: B empty
+    a, b = _node(WSPRE + MSGS), _node([])                          # cold: B empty
     t = time.time(); r, fr, w = _reconcile(a, b); dt = time.time() - t
     assert set(a.durable) == set(b.durable)
     report("cold (empty B): wall", dt, "s", 3.5)       # MEASURED 1.45s
@@ -187,10 +194,10 @@ def bench_catchup():                      # sync off: bulk bytes straight to A's
     with tempfile.TemporaryDirectory() as d:
         dba, dbb = os.path.join(d, "a.facts"), os.path.join(d, "b.facts")
         st = Store(dba)
-        st.add(encode(WS))
+        for b in WSPRE: st.add(b)
         for b in MSGS[:n]: st.add(b)
         st.commit(); st.db.close()
-        mb = (len(encode(WS)) + sum(len(b) for b in MSGS[:n])) / 1048576
+        mb = (sum(len(b) for b in WSPRE) + sum(len(b) for b in MSGS[:n])) / 1048576
         pb, addr = spawn(dbb, "--listen", "127.0.0.1:0")
         pa, _ = spawn(dba, "--peer", addr)
         t0 = time.time()
@@ -218,7 +225,7 @@ def bench_newest():                       # the number a user feels: a FRESH mes
     with tempfile.TemporaryDirectory() as d:
         dba, dbb = os.path.join(d, "a.facts"), os.path.join(d, "b.facts")
         st = Store(dba)
-        st.add(encode(WS))
+        for b in WSPRE: st.add(b)
         for b in MSGS[:n]: st.add(b)
         st.commit(); st.db.close()
         pb, addr = spawn(dbb, "--listen", "127.0.0.1:0")
@@ -246,17 +253,19 @@ def bench_newest():                       # the number a user feels: a FRESH mes
 # --- 6. crypto gate: verify folded into admission, zero on replay -------------
 def bench_crypto():
     section("6. signed-fact admission (Ed25519 gate)")
-    sk, pk = ed.keygen()
+    sk, pk = ed.ed25519_keygen()
     M = 25
     # a valid detached signature over each target id (the id IS the signed message)
     facts = []
     for _ in range(M):
         tid = os.urandom(32)
-        facts.append(encode(signature.signature(WID, pk, tid, ed.sign(sk, tid), 3)))
+        facts.append(encode(signature.signature(WID, pk, tid, ed.ed25519_sign(sk, tid), 3)))
     calls, orig = [0], signature.verify
     signature.verify = lambda *a: (calls.__setitem__(0, calls[0] + 1), orig(*a))[1]
     try:
-        n = Node(ROOT); n.admit(encode(WS)); n.run()
+        n = Node(ROOT)
+        for b in WSPRE: n.admit(b)
+        n.run()
         t = time.time()
         for b in facts: assert n.admit(b) is not None
         n.run(); dt = time.time() - t
@@ -275,7 +284,7 @@ def main():
     with tempfile.TemporaryDirectory() as d:
         db = os.path.join(d, "big.facts")
         st = Store(db)
-        st.add(encode(WS))
+        for b in WSPRE: st.add(b)
         for b in MSGS: st.add(b)
         st.commit(); st.db.close()
         bench_cli(db)

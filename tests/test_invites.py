@@ -9,7 +9,7 @@ both ways) lives in test_pair.py's invite-chain phase."""
 import os, random, sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import ed25519 as e
+import crypto as e
 from kernel import Node, encode, fact_id
 from facts import ROOT
 from facts.auth import user as usermod
@@ -19,18 +19,18 @@ from facts.auth.user_invite import user_invite
 from facts.auth.user import user
 from facts.auth.signature import signature
 
-FSK, FPK = e.keygen()                                 # the workspace root key
+FSK, FPK = e.ed25519_keygen()                                 # the workspace root key
 WS = workspace(b"acme", FPK, 1)                       # the root pk is embedded in the workspace
 WID = fact_id(WS)
 
 def _sig(sk, pk, target, t, scope=WID):
-    return signature(scope, pk, target, e.sign(sk, target), t)
+    return signature(scope, pk, target, e.ed25519_sign(sk, target), t)
 
 def _chain(name, member_pk, member_sk):
     """Every fact in a member's authority chain, plus the id we expect Valid.
     The workspace is valid only with a root self-signature AND a local
     invite_accepted (the acceptance gate); the founder is enrolled the same way."""
-    isk, ipk = e.keygen()                             # the invite keypair; isk is the link secret
+    isk, ipk = e.ed25519_keygen()                             # the invite keypair; isk is the link secret
     inv = user_invite(WID, ipk, 3); iid = fact_id(inv)
     acc = invite_accepted(WID, iid, isk, b"", member_pk, 4)   # local acceptance -> workspace valid
     u = user(WID, name, member_pk, iid, 4); uid = fact_id(u)
@@ -46,16 +46,16 @@ def _drain(facts):
     return n.run()
 
 def test_happy_chain_validates():
-    msk, mpk = e.keygen()
+    msk, mpk = e.ed25519_keygen()
     facts, uid, _ = _chain(b"bo", mpk, msk)
     n = _drain(facts)
     assert n.memo[uid] == "Valid"
     assert usermod.roster(n, WID) == [b"bo"]
 
 def test_random_key_is_invalid_not_parked():
-    msk, mpk = e.keygen()
+    msk, mpk = e.ed25519_keygen()
     facts, uid, (isk, ipk) = _chain(b"bo", mpk, msk)
-    rsk, rpk = e.keygen()                             # a key the invite never blessed
+    rsk, rpk = e.ed25519_keygen()                             # a key the invite never blessed
     forged = user(WID, b"mallory", rpk, fact_id(facts[3]), 5); fuid = fact_id(forged)
     facts = facts[:-2] + [forged, _sig(rsk, rpk, fuid, 5)]   # same invite, wrong signer
     n = _drain(facts)
@@ -63,7 +63,7 @@ def test_random_key_is_invalid_not_parked():
     assert usermod.roster(n, WID) == []
 
 def test_converges_under_every_order():
-    msk, mpk = e.keygen()
+    msk, mpk = e.ed25519_keygen()
     facts, uid, _ = _chain(b"bo", mpk, msk)
     baseline = _drain(facts).derived()
     for _ in range(40):                               # sample admission orders; all must agree

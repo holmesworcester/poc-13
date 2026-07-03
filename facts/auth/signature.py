@@ -11,7 +11,7 @@ inert miss, never a bad fact, and replay never re-verifies. Durable and
 shareable: a signature must travel with what it signs, and being a Require
 dep it ships automatically under dep-aware sync."""
 from kernel import Atom, EXACT, Exact, OFFER, Out, encode, fact, now, ts_atom
-from ed25519 import sign, verify
+from crypto import ed25519_sign as sign, ed25519_verify as verify
 from facts.store import hydrate
 
 TAG = b"auth.signature"

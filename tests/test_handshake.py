@@ -80,15 +80,15 @@ def test_mis_addressed_request_never_responds():
 def test_wrong_invite_signature_is_invalid():
     host, joiner = _node(), _node()
     wid, secret, iid, host_ep = _invited_workspace(host)
-    # forge: sign the request with a random key, not keygen(secret)
-    import ed25519
-    bad = ed25519.keygen()[0]
-    orig = ed25519.sign
+    # forge: sign the request with a random key, not keygen(secret). Patch the
+    # binding the authoring code actually uses (req.sign), not crypto's export.
+    import crypto
+    bad, orig = crypto.ed25519_keygen()[0], req.sign
     try:
-        ed25519.sign = lambda sk, m, _o=orig: _o(bad, m)   # every request sig is forged
+        req.sign = lambda sk, m: orig(bad, m)          # every request sig is forged
         rid = req.bootstrap(joiner, wid, secret, iid, host_ep, b"127.0.0.1:9", b"127.0.0.1:7", 3)
     finally:
-        ed25519.sign = orig
+        req.sign = orig
     host.admit(joiner.durable[rid]); host.run()
     assert host.memo[rid] == "Invalid", "a request not signed by the invite key is refused"
 
