@@ -212,6 +212,38 @@ def bench_catchup():                      # sync off: bulk bytes straight to A's
             report("catch-up volume", mb / dt, "MB/s", 0.3, hi_ok=True)
         finally: stop(pa, pb)
 
+def bench_newest():                       # the number a user feels: a FRESH message
+    n = 5000                              # authored mid catch-up must not queue behind
+    section("5c. newest message mid catch-up (%d-fact backlog)" % n)   # the backlog
+    with tempfile.TemporaryDirectory() as d:
+        dba, dbb = os.path.join(d, "a.facts"), os.path.join(d, "b.facts")
+        st = Store(dba)
+        st.add(encode(WS))
+        for b in MSGS[:n]: st.add(b)
+        st.commit(); st.db.close()
+        pb, addr = spawn(dbb, "--listen", "127.0.0.1:0")
+        pa, _ = spawn(dba, "--peer", addr)
+        try:
+            end = time.time() + 60        # catch-up underway: first backlog fact landed on B
+            while time.time() < end and not uverb(dbb + ".sock", "content.message.feed",
+                                                  WID.hex(), "c0"): time.sleep(0.01)
+            t0 = time.time()
+            uverb(dba + ".sock", "content.message.send", WID.hex(), "c0", "al", "newest", str(N + 99))
+            got, end = "", time.time() + 120
+            while time.time() < end:
+                got = uverb(dbb + ".sock", "content.message.feed", WID.hex(), "c0")
+                if got.endswith("newest"): break
+                time.sleep(0.02)
+            dt = time.time() - t0
+            assert got.endswith("newest"), "newest message never displayed on B"
+            # MEASURED ~3.6s — the fresh fact does NOT jump the queue: it rides the
+            # same (ts, FactId)-ordered reconcile as the backlog, so its visibility
+            # is the remaining catch-up time. The budget is a tripwire against this
+            # getting WORSE; making it near-instant (fresh facts first) is an open
+            # design item, and this number is where that work would show up.
+            report("newest visible on B", dt, "s", 7.5)
+        finally: stop(pa, pb)
+
 # --- 6. crypto gate: verify folded into admission, zero on replay -------------
 def bench_crypto():
     section("6. signed-fact admission (Ed25519 gate)")
@@ -252,6 +284,7 @@ def main():
     bench_sync()
     bench_daemons()
     bench_catchup()
+    bench_newest()
     bench_crypto()
     print("\n" + ("BUDGET VIOLATED: " + ", ".join(FAIL) if FAIL else "all budgets met"))
     sys.exit(1 if FAIL else 0)

@@ -13,7 +13,7 @@ from facts.connection import frame as bundles, hello
 from facts.auth.workspace import workspace
 from facts.content.message import message, feed
 from ed25519 import keygen
-from test_daemon import spawn, stop, con, until           # reuse the black-box idioms
+from harness import spawn, stop, con, until              # reuse the black-box idioms
 
 
 def port():                              # an OS-assigned port, then freed for the daemon to claim
