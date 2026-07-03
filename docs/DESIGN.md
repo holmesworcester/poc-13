@@ -128,7 +128,7 @@ a daemon that amortizes replay. It owns the db exclusively, replays once,
 then runs the three-phase host turn in a single-threaded select loop —
 client verbs over a unix socket at `<db>.sock`, peers over TCP. The wire
 carries one message type only, length-framed canonical fact bytes; what to
-push is a volatile per-peer sent-set until the sync family replaces it.
+ship is decided by the sync family (see Sync), driven from host out.
 Backpressure is the frontier's rule at the socket — overflow parks, never
 drops: bounded admits per turn, a bounded per-peer outbox whose overflow
 stays unsent until a later turn, and select-gated non-blocking writes so a
