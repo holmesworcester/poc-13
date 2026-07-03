@@ -17,10 +17,16 @@ proven.
 - `bin/cond.py` — `cond <db> [--listen HOST:PORT] [--peer HOST:PORT ...]`.
   The daemon: owns the db, amortizes replay, serves con over the unix
   socket, reconciles facts (the wire's only message) with TCP peers via the
-  sync family. Backpressure everywhere is the frontier's rule: park, never drop.
+  sync family. Peers come from `connection.request` facts (`--peer` authors
+  one each); shipments ride `connection.frame` bundles. Backpressure everywhere
+  is the frontier's rule: park, never drop.
 - `facts/sync/compare.py` — dependency-aware negentropy: range-fingerprint
   reconciliation over `(ts, FactId)` leaves, closures so tombstones travel,
   compare frames that are themselves volatile, unshareable facts.
+- `facts/connection/` — peer sessions as facts: a durable `request`/`close` to
+  dial and retire a peer, a signed volatile `hello` binding a session to an
+  identity key at the gate, a volatile `connection` record, and a `frame` bundle
+  that packs many facts into one wire frame for bulk-catch-up throughput.
 - `tests/` — skeleton tests (kernel claims), a source-contract test (fact
   file shape), and black-box tests (one process per command, plus real
   daemon subprocesses on real sockets).
@@ -49,7 +55,8 @@ real regression. Headline numbers over a 10,000-fact workspace (one laptop core)
 | same verb via the daemon (replay amortized) | ~0.03s |
 | `feed()` query over 10k messages | ~1 ms |
 | sync a 1-fact diff into a 10k set | 28 rounds, ~9 KiB, ~0.35s |
-| two daemons over TCP, sustained | ~240 authored facts/s converged, query stays sub-ms |
+| two daemons over TCP, sustained | ~400 authored facts/s converged, query stays low-ms |
+| bulk sync catch-up (5000 facts, fresh peer) | ~2100 facts/s, ~0.67 MB/s (frame bundles) |
 | signed-fact admission (Ed25519 verify) | ~14/s; replay re-verifies **0** |
 
 **The no-index caveat.** There is deliberately no on-disk index. The db is the
