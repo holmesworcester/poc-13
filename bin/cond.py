@@ -166,9 +166,9 @@ def main(db, *argv):
                 if fresh:                             # live tail: fresh leaves straight to peers
                     known.update(fresh); seen = set()
                     for fid in fresh: seen |= sync.closure(node, fid)
-                    for _ep, _addr, cid in conn.peers(node):
+                    for _ep, _addr, cid, _who in conn.peers(node):
                         sreply.tail(node, cid, sorted(seen), int(time.time())); work = True
-                for _ep, _addr, cid in conn.peers(node):   # cadence: fresh root compares
+                for _ep, _addr, cid, _who in conn.peers(node):   # cadence: fresh root compares
                     if nowm - compared.get(cid, 0) >= CADENCE:
                         sreply.open_round(node, cid, int(time.time()), sync.initiate(node, ls)[0])
                         compared[cid], work = nowm, True

@@ -148,12 +148,22 @@ def _for_request(node, request_id):
     return next((o for o, _, a in node.watched(b"answered", SC)
                  if a.target[1] == request_id), None)
 
-def peers(node):                         # (peer endpoint, addr, connection id) per live session
+def peers(node):                         # (peer endpoint, addr, connection id, who) per live session
+    binds = _bindings(node)              # endpoint -> member name | b"auth", from synced device facts
     out = []
     for o, _, a in node.watched(b"connection", SC):
         ep, addr = req._split2(a.value)
-        out.append((ep, addr, o))
-    return sorted(out)
+        out.append((ep, addr, o, binds.get(ep, b"anon")))
+    return sorted(out, key=lambda r: r[:3])
+
+def _bindings(node):                     # endpoint pk -> the member it belongs to (auth), via device facts
+    out = {}
+    for _, _, a in node.watched(b"endpoint_shared", b"auth"):
+        ep, spk, wid = req._split3(a.value)
+        uid = next((o for o, _, k in node.watched(b"key", wid) if k.value == spk), None)
+        name = next((m.value for o, _, m in node.watched(b"member", wid) if o == uid), None)
+        out[ep] = name or b"auth"
+    return out
 
 def route(node, cid):                    # (peer addr, session secret) for a live connection | None
     for o, _, a in node.watched(b"connection", SC):
@@ -170,5 +180,5 @@ def _invite_secret(node, bh):
                  if ish.bootstrap_hash(a.value) == bh), b"")
 
 # CLI — string boundary over QUERIES.
-CLI = {"peers": lambda n: "\n".join("%s %s %s" % (a.decode(), ep.hex(), c.hex())
-                                    for ep, a, c in peers(n))}
+CLI = {"peers": lambda n: "\n".join("%s %s %s %s" % (a.decode(), ep.hex(), c.hex(), w.decode())
+                                    for ep, a, c, w in peers(n))}

@@ -41,13 +41,15 @@ def project(f, ctx, sl):                 # signer must equal the pk the named in
 # COMMANDS — build a fact, admit it, stop. invite=(invite_id, invite_secret);
 # authoring the acceptance is what makes the joined workspace Valid on this node.
 def join(node, workspace_id, name, t, invite):
+    from facts.auth import device
     local = local_signer_secret.current(node)
     if not local: raise RuntimeError("no local signer key: run auth.local_signer_secret.keygen first")
     _, member_pk = local
     iid, secret = invite; sk, pk = keygen(secret)       # sign the membership with the invite key
     invite_accepted.accept(node, workspace_id, iid, secret, b"", member_pk, t); node.run()
     uid = node.admit(encode(user(workspace_id, name, member_pk, iid, t)))
-    signature.attest(node, workspace_id, sk, pk, uid, t)
+    signature.attest(node, workspace_id, sk, pk, uid, t); node.run()
+    device.bind(node, workspace_id, name, t)            # bind this node's endpoint (self-attested)
     return uid
 
 # QUERIES — observations over validated state only, ordered by (ts, owner).

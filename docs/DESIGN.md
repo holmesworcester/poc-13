@@ -398,29 +398,52 @@ reach the others.
 Peer sessions are facts too — the transport is a fact family, not an engine
 primitive — living in `facts/connection/`. There is no kernel change.
 
-**Sessions as facts.** A `connection.request` (durable, LocalOnly) names an
-address to dial; the daemon watches its valid `peer` offers and dials each, and
-recurrence is liveness — a dropped socket redials while the request stays valid.
-A `connection.close` suppresses a request through the death key the request
-carries, so a closed peer stays closed across restart; both are LocalOnly because
-a node's dial list is its own config, never a fact to sync. `--peer` flags are
-bootstrap sugar: the daemon authors one request each, through the normal gate, at
-startup. A `connection.connection` (volatile, LocalOnly) is the daemon's record
-of a live peer, authored host-out from a verified hello, and dies with the process.
+**First contact is a sealed handshake (poc-10's request/connection).** A
+`connection.request` (durable, LocalOnly) is the sealed first-contact fact: its
+bytes ARE its id, and its public envelope (seal version, initiator ephemeral
+X25519 key, addressed endpoint, nonce) wraps a ciphertext hiding both static
+endpoints, the transcript nonce, the dial/return addresses, an authority proof,
+and a branch signature. CHECK is structural only (widths parse); decryption
+happens in PROJECT, keyed by opening secrets the fact Watches (the responder
+opens with its static endpoint secret, the initiator with its own ephemeral —
+the X25519 box is symmetric). The responder authors a `connection.connection`
+(volatile, LocalOnly; its id IS the connection id, its bytes ARE the wire
+message so both sides admit identical bytes): the plaintext carries the recomputed
+`handshake_hash` and per-session `connection_secret`, and the projector refuses
+unless it re-derives them from the transcript. Key agreement is `ee = DH(init_eph,
+resp_eph)`, `es = DH(init_eph, resp_static)` → HKDF-SHA256 → the session key that
+seals every established frame with XChaCha20-Poly1305. Recurrence is edge-triggered
+on the requester: the durable request re-dials on a process-local cadence while
+unanswered; the responder answers each arrival with no cadence of its own, and the
+connection's `answered` offer retires the request's resend.
 
-**Hello binds a session to an identity key.** On connect each side ships a
-`connection.hello`: its identity public key, advertised listen address, a coarse
-time bucket, and an Ed25519 signature over `H(pk ‖ addr ‖ bucket)`, verified once
-at the admission gate (CHECK), so a tampered hello is an inert miss. It proves the
-sender holds the private key for `pk` and binds that key to the address for the
-signed epoch. The honest limits, stated plainly: stdlib has no DH or encryption,
-so confidentiality and forward secrecy are out of scope, and there is no session
-nonce — a captured hello is replayable, and the daemon does not gate on the bucket
-(a freshness window would be a one-line receiver check). Trust on first use: the
-receiver records the peer key; whether it is a workspace-authorized member/device
-key is a query-side value-compare (the `auth` column of
-`connection.connection.peers`), never a hard Require — two fresh nodes still talk,
-matching Authority's stance.
+**Two handshake modes, one shape.** *Bootstrap* signs the request with the invite
+key and proves authority with the invite's `bootstrap_hash` (the secret the
+inviter retains as `invite_accepted`). *Membership* — reconnect after both nodes
+are enrolled, with no invite — signs with the member's own key and names its
+`endpoint_shared` record; the responder verifies the signature against the
+signing key that record binds. The endpoint (X25519) is machine-wide, one per
+node and identical across every workspace (`auth.endpoint`, LocalOnly, holding
+the secret); the per-workspace binding is `auth.device` (poc-10 endpoint_shared,
+role=Device): durable + **shareable**, self-attested by the member's signing key,
+valid only if that signer is an enrolled member, publishing
+`endpoint_shared@auth = frame(endpoint, signing_pk, wid)` and an `endpoint_key`
+reverse index. So a node that joins two workspaces has two device facts carrying
+one identical endpoint, and recognizing a peer is a workspace-scoped
+endpoint→member lookup. That lookup is the `auth` column of
+`connection.connection.peers` — a query-side value-compare, never a hard Require,
+so an unrecognized endpoint still connects and simply shows `anon`, matching
+Authority's stance.
+
+**Close is a death key; purge is forward secrecy.** `connection.close` (durable,
+LocalOnly) offers `closed` at an id; the request, connection, and ephemeral
+secrets each Suppress-need `closed@SELF`, so admitting a close flips the cluster
+to Suppressed — the daemon drops the socket and stops dialing, and because the
+close is durable a restart replays it and the peer stays closed. `sever` closes a
+whole cluster (connection + request + both handshake ephemerals) from one
+connection id; `purge` is the cold-path forward-secrecy sweep that DELETEs the
+now-suppressed ephemeral private keys from disk and drops them from memory,
+leaving no residue.
 
 **Frame bundles are ephemeral transport.** A `connection.frame` bundle is
 volatile and unshareable exactly like a sync compare — never stored, never in

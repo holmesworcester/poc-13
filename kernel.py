@@ -227,6 +227,10 @@ class Store:
     def all(self):                       # full replay: the degenerate demand
         return [r[0] for r in self.db.execute("SELECT bytes FROM facts")]
 
+    def delete(self, fid):               # cold-path purge: forget a fact's bytes and match rows
+        self.db.execute("DELETE FROM facts WHERE fid=?", (fid,))
+        self.db.execute("DELETE FROM atoms WHERE fid=?", (fid,))
+
     def commit(self): self.db.commit()   # host calls it: durable before the reply
 
 # --- The engine --------------------------------------------------------------------

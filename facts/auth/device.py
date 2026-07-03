@@ -1,49 +1,69 @@
-"""facts/auth/device.py — a device (endpoint) admitted into the workspace,
-bound to authority exactly as auth.user is. It offers its label and is valid
-only if the key that SIGNED it equals the pk of the auth.device_invite it names
-(b"device") — the joining device signs with the INVITE key from the link, and
-the invite blessed that key. The device fact IS the acceptance. A distinct
-family from auth.user because a device edge is its own authority statement."""
+"""facts/auth/device.py — the per-workspace binding of this node's endpoint to a
+member (poc-10 endpoint_shared, role=Device). The endpoint (X25519 key in
+auth.endpoint) is node-level and the SAME across every workspace; this fact is
+the per-workspace statement 'that endpoint is my device here', so a node that
+joins two workspaces has two device facts carrying one identical endpoint. It is
+durable + shareable so peers learn each other's endpoints, self-attested by the
+member's own signing key (the primary device needs no separate invite), and
+valid only if that signer is an enrolled member (its key is a published member
+key). It publishes `endpoint_shared@auth` — the frame(endpoint, signing_pk, wid)
+the sealed request opens a membership handshake against — and `endpoint_key` for
+the reverse endpoint->member lookup peers() shows."""
 from kernel import (Atom, Exact, NEED, OFFER, Out, REQUIRE, SELF, by, encode,
-                    fact, now, ts_atom)
-from facts.auth import signature
-from crypto import ed25519_keygen as keygen
+                    fact, frame, now, ts_atom, _rd)
+from facts.auth import endpoint, local_signer_secret, signature
 from facts.store import hydrate
 
 TAG = b"auth.device"
 
-# SHAPE — the canonical atom set; the only place atoms are chosen.
-def device(workspace_id, label, invite_id, t):
-    return fact(TAG, ts_atom(t, workspace_id),
-                Atom(NEED, b"device_invite", workspace_id, Exact(invite_id), effect=REQUIRE),
-                Atom(NEED, b"pk", workspace_id, SELF, effect=REQUIRE),
-                Atom(OFFER, b"device", workspace_id, SELF, label))
+def _split3(v): a, i = _rd(v, 0); b, i = _rd(v, i); c, _ = _rd(v, i); return a, b, c
 
-# EXTRACT — content-pure: (durable, shareable).
+# SHAPE — the canonical atom set; the only place atoms are chosen. The endpoint
+# and signing pk are machine-wide; workspace_id scopes the binding.
+def device(workspace_id, label, endpoint_pk, signing_pk, t):
+    return fact(TAG, ts_atom(t, workspace_id),
+                Atom(NEED, b"pk", workspace_id, SELF, effect=REQUIRE),            # its own signature
+                Atom(NEED, b"key", workspace_id, Exact(workspace_id), effect=REQUIRE),  # member keys
+                Atom(OFFER, b"device", workspace_id, SELF, label),
+                Atom(OFFER, b"endpoint_shared", b"auth", SELF,
+                     frame(endpoint_pk, signing_pk, workspace_id)),
+                Atom(OFFER, b"endpoint_key", workspace_id, Exact(endpoint_pk), signing_pk))
+
+# EXTRACT — content-pure: (durable, shareable). Endpoints must travel to peers.
 def extract(f): return True, True
 
-# PROJECT — the only place this family's meaning lives.
-def project(f, ctx, sl):                 # signer must equal the pk the named device_invite blessed
-    blessed = {r[2].value for r in by(ctx, b"device_invite")}
-    if not blessed & {r[2].value for r in by(ctx, b"pk")}: return Out("Invalid")
-    return Out(offers=tuple(a for a in f.atoms if a.role == b"device"))
+# PROJECT — the signer must be an enrolled member (its key is a published key).
+def project(f, ctx, sl):
+    signer = {r[2].value for r in by(ctx, b"pk")}
+    members = {r[2].value for r in by(ctx, b"key")}
+    if not (signer & members): return Out("Invalid")
+    return Out(offers=tuple(a for a in f.atoms
+                            if a.role in (b"device", b"endpoint_shared", b"endpoint_key")))
 
-# COMMANDS — build a fact, admit it, stop. invite=(invite_id, invite_secret).
-def enroll(node, workspace_id, label, invite, t):
-    iid, secret = invite; sk, pk = keygen(secret)   # sign the device fact with the invite key
-    did = node.admit(encode(device(workspace_id, label, iid, t)))
-    signature.attest(node, workspace_id, sk, pk, did, t)
+# COMMANDS — bind this node's endpoint into the workspace, self-signed. Ensures a
+# node-level endpoint exists (one per node, shared across every workspace).
+def bind(node, workspace_id, label, t):
+    if not endpoint.current(node): endpoint.keygen(node, t); node.run()
+    _, epk = endpoint.current(node)
+    sk, signing_pk = local_signer_secret.current(node)
+    did = node.admit(encode(device(workspace_id, label, epk, signing_pk, t)))
+    signature.attest(node, workspace_id, sk, signing_pk, did, t)
     return did
 
-# QUERIES — observations over validated state only, ordered by (ts, owner).
+# QUERIES — observations over validated state only.
+def own(node, workspace_id):             # this node's own device (endpoint_shared) id in a workspace
+    e = endpoint.current(node)
+    if not e: return None
+    _, epk = e
+    return next((o for o, _, a in node.watched(b"endpoint_shared", b"auth")
+                 if _split3(a.value)[0] == epk and _split3(a.value)[2] == workspace_id), None)
+
 def devices(node, workspace_id):
     hydrate.demand(node, b"device", workspace_id); node.run()
     return [a.value for o, t, a in sorted(node.watched(b"device", workspace_id),
                                           key=lambda r: (r[1], r[0]))]
 
-# CLI — string boundary over COMMANDS/QUERIES. link is "invite_id:secret".
-CLI = {"enroll": lambda n, wid, label, link, t=None:
-           enroll(n, bytes.fromhex(wid), label.encode(),
-                  (lambda i, s: (bytes.fromhex(i), bytes.fromhex(s)))(*link.split(":")),
-                  int(t or now())).hex(),
+# CLI — string boundary over COMMANDS/QUERIES.
+CLI = {"bind": lambda n, wid, label, t=None:
+           bind(n, bytes.fromhex(wid), label.encode(), int(t or now())).hex(),
        "list": lambda n, wid: b"\n".join(devices(n, bytes.fromhex(wid))).decode()}

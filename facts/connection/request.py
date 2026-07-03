@@ -103,7 +103,7 @@ def project(f, ctx, sl):
     elif F["mode"] == MEMBERSHIP:
         share = {r[2].target[1]: r[2].value for r in by(ctx, b"endpoint_shared")}.get(F["esid"])
         if share is None: return Out("Parked")
-        ep, spk, _wid = (lambda v: (_rd(v, 0)[0],) + _split2(_rd(v, 0)[1]))(share)
+        ep, spk, _wid = _split3(share)   # device's endpoint_shared: frame(endpoint, signing_pk, wid)
         if ep != F["from_ep"] or not verify(spk, sig_bytes(F), F["sig"]): return Out("Invalid")
     else: return Out("Invalid")
     offers = [Atom(OFFER, b"req_open", SC, SELF, pt)]
@@ -143,6 +143,15 @@ def bootstrap(node, workspace_id, secret, invite_id, to_ep, dialed_addr, init_ad
                  dict(invite_id=invite_id, bootstrap_hash=ish.bootstrap_hash(secret)),
                  lambda m: sign(isk, m), t)
 
+def membership(node, workspace_id, to_ep, dialed_addr, init_addr, t):
+    from facts.auth import local_signer_secret, device
+    esk, epk = endpoint.current(node)
+    sk, _pk = local_signer_secret.current(node)   # the member's own key signs the request
+    did = device.own(node, workspace_id)          # our endpoint_shared id, the responder verifies us by
+    if did is None: return None                   # no device binding yet: cannot prove membership
+    return _seal(node, MEMBERSHIP, epk, to_ep, dialed_addr, init_addr,
+                 dict(esid=did), lambda m: sign(sk, m), t)
+
 # QUERIES — the dials the daemon still owes (addr -> bare handshake bytes).
 def dials(node):
     node.run()
@@ -154,4 +163,7 @@ def dials(node):
 CLI = {"connect": lambda n, wid, iid, secret, to_ep, addr, init_addr="", t=None:
            bootstrap(n, bytes.fromhex(wid), bytes.fromhex(secret), bytes.fromhex(iid),
                      bytes.fromhex(to_ep), addr.encode(), init_addr.encode(),
-                     int(t or now())).hex()}
+                     int(t or now())).hex(),
+       "reconnect": lambda n, wid, to_ep, addr, init_addr="", t=None:      # membership, no invite
+           (membership(n, bytes.fromhex(wid), bytes.fromhex(to_ep), addr.encode(),
+                       init_addr.encode(), int(t or now())) or b"").hex()}
