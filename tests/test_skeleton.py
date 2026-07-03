@@ -2,7 +2,8 @@
 import os, random, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from kernel import Node, decode, encode, fact, fact_id, ts_atom, Atom, Exact, OFFER
+from kernel import (Node, Out, Router, decode, encode, fact, fact_id, ts_atom,
+                    ts_of, Atom, Exact, OFFER)
 from facts import ROOT
 from facts.chat.note import note
 from facts.chat.tombstone import tombstone
@@ -38,6 +39,17 @@ def test_suppression_and_wakes():
     assert n.memo[fact_id(n2)] == "Suppressed"                # cross-time match held
     assert [a.value for _, _, a in n.watched(b"msg", CH)] == [b"keep"]
 
+def test_admission_check_hook():
+    class SigLike:                       # throwaway family: a self-check at the gate
+        extract = staticmethod(lambda f: (True, True))
+        project = staticmethod(lambda f, ctx, sl: Out())
+        check = staticmethod(lambda f: ts_of(f) != 13)
+    n = Node(Router({b"sig": Router({b"x": SigLike}, depth=1)}))
+    ok, bad = encode(fact(b"sig.x", ts_atom(7))), encode(fact(b"sig.x", ts_atom(13)))
+    assert n.admit(ok) is not None
+    assert n.admit(bad) is None                       # falsy check: inert miss
+    assert n.admit(bad, checked=True) is not None     # replay path never re-runs the check
+
 def test_outbox_and_replay():
     n, i1 = Node(ROOT), intent(b"peer1", b"hello", 1)
     n.admit(encode(i1)); n.run()
@@ -52,6 +64,7 @@ def test_outbox_and_replay():
     assert states[0] == states[1] == states[2] == n.derived() # replay is bit-identical
 
 if __name__ == "__main__":
-    for t in (test_identity_and_admission, test_suppression_and_wakes, test_outbox_and_replay):
+    for t in (test_identity_and_admission, test_suppression_and_wakes,
+              test_admission_check_hook, test_outbox_and_replay):
         t(); print(f"ok  {t.__name__}")
     print("\nall tests passed")
