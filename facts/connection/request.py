@@ -66,7 +66,6 @@ def request(env, to_ep, init_eph_pk, t):
                 Atom(NEED, b"invite_secret", b"local", LOCAL_FULL, effect=WATCH),
                 Atom(NEED, b"endpoint_shared", b"auth", AUTH_FULL, effect=WATCH),
                 Atom(NEED, b"endpoint", b"local", LOCAL_FULL, effect=WATCH),     # am I addressee?
-                Atom(NEED, b"receipt", SC, SELF, effect=WATCH),                  # arrival + origin
                 Atom(NEED, b"answered", SC, SELF, effect=WATCH),                 # retire resend
                 Atom(NEED, b"closed", SC, SELF, effect=SUPPRESS))
 
@@ -109,13 +108,10 @@ def project(f, ctx, sl):
     else: return Out("Invalid")
     offers = [Atom(OFFER, b"req_open", SC, SELF, pt)]
     mine = {r[2].target[1] for r in by(ctx, b"endpoint")}
-    if to_ep in mine:                    # responder: reply once the request has arrived
-        rc = by(ctx, b"receipt")
-        if rc:
-            _p, origin, _h = _split3(rc[0][2].value)
-            offers.append(Atom(OFFER, b"respond", SC, SELF, origin))
-    elif not by(ctx, b"answered") and F["dialed_addr"]:   # initiator: resend until answered
-        offers.append(Atom(OFFER, b"send", b"outbox", Exact(F["dialed_addr"]), env))
+    if to_ep in mine:                    # responder (only the addressee can open it): reply
+        offers.append(Atom(OFFER, b"respond", SC, SELF, F["init_addr"]))   # to the initiator's listen addr
+    elif not by(ctx, b"answered") and F["dialed_addr"]:   # initiator: (re)dial until answered
+        offers.append(Atom(OFFER, b"dial", SC, Exact(F["dialed_addr"]), encode(f)))
     return Out(offers=tuple(offers))
 
 def _split2(v): a, i = _rd(v, 0); b, _ = _rd(v, i); return a, b
@@ -147,10 +143,15 @@ def bootstrap(node, workspace_id, secret, invite_id, to_ep, dialed_addr, init_ad
                  dict(invite_id=invite_id, bootstrap_hash=ish.bootstrap_hash(secret)),
                  lambda m: __import__("ed25519").sign(isk, m), t)
 
-# QUERIES — the requests still awaiting a connection (the resend set).
-def unanswered(node):
-    hydrate.demand(node, b"send", b"outbox"); node.run()
-    return [o for o, _, a in node.watched(b"send", b"outbox")]
+# QUERIES — the dials the daemon still owes (addr -> bare handshake bytes).
+def dials(node):
+    node.run()
+    return [(a.target[1], a.value) for o, _, a in node.watched(b"dial", SC)]
 
-# CLI — no verbs: requests are authored by the connect flow, not by hand.
-CLI = {}
+# CLI — the joiner's bootstrap: `connect wid iid secret to_ep addr [init_addr]`.
+# The invite link carries the workspace, invite id, secret, inviter endpoint,
+# and inviter address; init_addr is this node's own listen address (for the reply).
+CLI = {"connect": lambda n, wid, iid, secret, to_ep, addr, init_addr="", t=None:
+           bootstrap(n, bytes.fromhex(wid), bytes.fromhex(secret), bytes.fromhex(iid),
+                     bytes.fromhex(to_ep), addr.encode(), init_addr.encode(),
+                     int(t or now())).hex()}

@@ -155,6 +155,13 @@ def peers(node):                         # (peer endpoint, addr, connection id) 
         out.append((ep, addr, o))
     return sorted(out)
 
+def route(node, cid):                    # (peer addr, session secret) for a live connection | None
+    for o, _, a in node.watched(b"connection", SC):
+        if o == cid:
+            _ep, addr = req._split2(a.value); s = secret(node, cid)
+            return (addr, s) if s else None
+    return None
+
 def _valid(node, role, target):          # clean rows matching an exact/target need
     return [r for r in node.clean.get((role, SC), ()) if r[2].target == target]
 

@@ -1,131 +1,95 @@
 #!/usr/bin/env python3
-"""cond — the poc-13 daemon.  Usage: cond <db> [--listen HOST:PORT] [--peer HOST:PORT ...]
+"""cond — the poc-13 daemon.  Usage: cond <db> [--listen HOST:PORT]
 
-Owns the db exclusively and amortizes replay: load once, then serve verbs over
-a unix socket at <db>.sock (con.py proxies to it) and reconcile facts with peers
-over TCP. One single-threaded select loop; each iteration is the three-phase
-host turn (HOST IN / ENGINE DRAIN / HOST OUT). The wire carries ONE message
-type — 4-byte big-endian length + one fact's canonical bytes. Most fact frames
-are connection.frame BUNDLES: many facts packed into one wire frame, so a peer
-absorbs a whole batch per turn instead of one fact — that closes the bulk
-catch-up gap where per-turn gating, not the pipe, set the pace. Peers come from
-connection.request facts (--peer flags author one each at startup); on connect
-each side sends a signed connection.hello binding the session to its identity
-key. Backpressure mirrors the frontier: overflow parks, never drops — bounded
-admits per turn, bounded per-peer outboxes, select-gated non-blocking writes."""
+Owns the db exclusively and amortizes replay: load once, then serve verbs over a
+unix socket at <db>.sock (con.py proxies to it) and reconcile facts with peers
+over TCP. One single-threaded select loop; each iteration is the three-phase host
+turn (HOST IN admit / ENGINE DRAIN / HOST OUT perform). The daemon decides no
+authority — every inbound fact enters through the admission gate, the pump reads
+only validated offers, and time is the OS clock handed to the turn.
+
+Transport is ADDRESS-KEYED, like poc-10's network queue: facts name a destination
+ADDRESS and the daemon connects there; nothing binds a fact to a socket. A wire
+message is 4-byte BE length + 1 discriminator byte + body: 0x00 a bare handshake
+fact (the sealed request / connection, which carry their own X25519 envelopes),
+0x01 a sealed frame (frame(version, connection_id, nonce, ciphertext)). A frame
+is self-describing — its connection id selects the session secret from the fact
+store — so which socket delivered it is irrelevant. Retries (redial an unanswered
+request, re-open a sync compare) are process-local cadence, as poc-10 keeps
+them. Backpressure parks, never drops: bounded admits per turn, per-address
+outbox cap, select-gated writes."""
 import errno, os, select, signal, socket, sys, time
 BIN = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [BIN, os.path.dirname(BIN)]
 from kernel import Node, Store, _rd, decode, fact_id, frame
 from facts import ROOT
-from facts.clock import tick as clock
 from facts.outbox import sent
 from facts.sync import compare as sync, reply as sreply
-from facts.auth import local_signer_secret
-from facts.connection import request, hello, connection as conn, frame as bundles
+from facts.auth import local_signer_secret, endpoint
+from facts.connection import request, connection as conn, frame as frames
 from con import flush, load
 
-BOUND = 64                               # admits per peer per turn; engine drain bound
-OUTCAP = 1 << 20                         # per-peer outbox byte cap: overflow stays unsent
-CADENCE = 0.5                            # s between root compares per peer (poc-10 maintain_sync)
+BOUND = 64                               # admits per turn; engine drain bound
+OUTCAP = 1 << 20                         # per-address outbox byte cap: overflow parks
+CADENCE = 0.5                            # s between redials / root compares per peer
+BARE, SEALED = 0, 1                      # wire discriminators
+now_ms = lambda: int(time.time() * 1000)
 
-def serve(node, s, store, flushed):      # one framed verb request per connection
+def serve(node, s, store, flushed):      # one framed verb request per unix connection
     try:
         s.settimeout(1); b = b""
-        while (c := s.recv(65536)): b += c           # client shut down its write side
+        while (c := s.recv(65536)): b += c
         path, i = _rd(b, 0); args = []
         while i < len(b): a, i = _rd(b, i); args.append(a.decode())
         *segs, verb = path.decode().split(".")
         out = getattr(ROOT.resolve([x.encode() for x in segs]), "CLI", {})[verb](node, *args)
-        node.run(); flush(node, store, flushed)      # durable before the reply
+        node.run(); flush(node, store, flushed)
         s.sendall(frame(b"+" + (out or "").encode()))
     except Exception as e:
         try: s.sendall(frame(b"-" + f"{type(e).__name__}: {e}".encode()))
         except OSError: pass
     s.close()
 
-def peer(s, addr, key):                  # a full-duplex link; addr set only for outbound peers
-    return {"s": s, "addr": addr, "key": key,          # key: this link's outbox dest
-            "out": b"", "inb": b"", "pend": [], "down": 0.0,
-            "due": 0.0, "heard": 0.0}    # due: next root compare; heard: last peer compare
+# --- outbound: a persistent socket per destination address ----------------------
+def link(links, addr):                   # get-or-make the outbound link for an address
+    p = links.get(addr)
+    if p is None: p = links[addr] = {"s": None, "out": b"", "down": 0.0}
+    return p
 
-def connect(p):                          # outbound (re)connect: recurrence = liveness
+def enqueue(p, kind, body):              # frame one wire message (park on overflow)
+    if len(p["out"]) <= OUTCAP:
+        w = bytes([kind]) + body
+        p["out"] += len(w).to_bytes(4, "big") + w
+
+def dial(p):                             # non-blocking (re)connect to the address
     h, pt = p["addr"].rsplit(":", 1)
     s = socket.socket(); s.setblocking(False)
     if s.connect_ex((h, int(pt))) not in (0, errno.EINPROGRESS):
         s.close(); p["down"] = time.monotonic() + 0.05
-    else: p["s"], p["due"] = s, 0.0
+    else: p["s"] = s
 
-def drop(p, peers):                      # dead link: outbound damps + reconnects, inbound is forgotten
-    if p["s"]: p["s"].close()
-    p["s"], p["inb"], p["pend"] = None, b"", []
-    if p["addr"]: p["out"], p["due"], p["down"] = b"", 0.0, time.monotonic() + 0.05
-    else: peers.remove(p)
-
-def enqueue(p, fb):                      # frame one wire message into the outbox; overflow parks
-    if len(p["out"]) <= OUTCAP: p["out"] += len(fb).to_bytes(4, "big") + fb
-
-def ship(p, frames):                     # pack fact frames into bundles, then onto the wire
-    for w in bundles.pack(frames): enqueue(p, w)
-
-def unpack(fb):                          # one wire fact -> the fact frames it delivers
-    try: f = decode(fb)
-    except Exception: return [fb]        # a bad wire frame: admit it, miss it, count it as one
-    return bundles.items(f) if f.type_tag == bundles.TAG else [fb]   # a bundle -> its inners
+# --- inbound: accepted sockets are anonymous byte sources -----------------------
+def messages(src):                       # yield (kind, body) for each complete wire message
+    while True:
+        b = src["inb"]
+        if len(b) < 4 or (ln := int.from_bytes(b[:4], "big")) + 4 > len(b): return
+        w = b[4:4 + ln]; src["inb"] = b[4 + ln:]
+        if w: yield w[0], w[1:]
 
 def _ids(v):                             # a ship offer's value: length-framed fact ids
     out, i = [], 0
-    while i < len(v):
-        x, i = _rd(v, i); out.append(x)
+    while i < len(v): x, i = _rd(v, i); out.append(x)
     return out
 
-def pump(node, peers, shipped):          # stage validated send/ship offers onto live links
-    rows = {}
-    for role in (b"send", b"ship"):
-        for o, _, a in node.watched(role, b"outbox"):
-            if o not in shipped: rows.setdefault(o, []).append(a)
-    moved = False
-    for o, atoms in sorted(rows.items()):            # one sender: one dest, all or nothing
-        p = next((q for q in peers if q["s"] and q["key"] == atoms[0].target[1]), None)
-        if not p or len(p["out"]) > OUTCAP: continue # offer stands: park, never drop
-        for a in sorted(atoms, key=lambda a: (a.role, a.value)):
-            if a.role == b"send": enqueue(p, a.value)
-            else:                                    # by reference: resolve ids at send time
-                ship(p, [node.durable[x] for x in _ids(a.value) if x in node.durable])
-        shipped.add(o); sent.report(node, o, int(time.time())); moved = True
-    return moved
-
-def admit_one(node, fb, fresh):          # admit one inner fact through the normal gate
-    try: new = fact_id(decode(fb)) not in node.facts
-    except Exception: return              # strict decode: a bad inner is inert, siblings unaffected
-    fid = node.admit(fb)
-    if fid and new: fresh.append((fid, node.facts[fid].type_tag))
-
-def intake(node, p):                     # admit up to BOUND inner facts; a half-drained bundle parks
-    n, fresh, q = 0, [], p["pend"]
-    while n < BOUND:
-        if not q:                        # refill from the next whole wire frame (bundle or bare fact)
-            b = p["inb"]
-            if len(b) < 4 or (ln := int.from_bytes(b[:4], "big")) + 4 > len(b): break
-            q, p["inb"] = unpack(b[4:4 + ln]), b[4 + ln:]
-        admit_one(node, q.pop(0), fresh); n += 1
-    p["pend"] = q
-    return fresh
-
 def main(db, *argv):
-    listen, addrs, it = None, [], iter(argv)
+    listen, it = None, iter(argv)
     for a in it:
         if a == "--listen": listen = next(it)
-        elif a == "--peer": addrs.append(next(it))
         else: sys.exit(f"unknown arg: {a}")
-    store = Store(db)                    # daemon full-loads: residency is its job
-    node = Node(ROOT); load(node, store); flushed = set(node.durable)
-    if not local_signer_secret.current(node):        # a stable identity to sign hellos with
-        local_signer_secret.keygen(node, int(time.time()))
-    for a in addrs:                                  # --peer flags: author a dial request each
-        if a.encode() not in request.dials(node): request.connect(node, a.encode(), int(time.time()))
+    store = Store(db); node = Node(ROOT); load(node, store); flushed = set(node.durable)
+    if not local_signer_secret.current(node): local_signer_secret.keygen(node, int(time.time()))
+    if not endpoint.current(node): endpoint.keygen(node, int(time.time()))
     node.run(); flush(node, store, flushed)
-    sk, pk = local_signer_secret.current(node)
     sp = db + ".sock"
     if os.path.exists(sp): os.unlink(sp)
     usock = socket.socket(socket.AF_UNIX); usock.bind(sp); usock.listen(8)
@@ -133,95 +97,127 @@ def main(db, *argv):
     if listen:
         h, pt = listen.rsplit(":", 1)
         tsock = socket.create_server((h, int(pt))); tsock.setblocking(False)
-    my_addr = ("%s:%s" % tsock.getsockname()[:2]).encode() if tsock else b""
-    hi = hello.greeting(sk, pk, my_addr, int(time.time()))   # our signed handshake, sent on every connect
-    peers, struck, shipped = [], -1, set()           # struck: last tick bucket; shipped: pumped senders
-    srcs = {}                                        # fid -> arrival key: tails never echo home
-    known = {fid for _, fid in sync.leaves(node)}    # the loaded leaf set is not "fresh": no startup flood
+    links, inbound = {}, []              # links: addr -> outbound socket; inbound: read sources
+    responded, redial, compared = set(), {}, {}      # process-local cadence markers
+    shipped, known = set(), {fid for _, fid in sync.leaves(node)}
     for sg in (signal.SIGINT, signal.SIGTERM): signal.signal(sg, lambda *a: sys.exit(0))
     print("listening:", "%s:%s" % tsock.getsockname()[:2] if tsock else sp, flush=True)
     work = True
     try:
         while True:
-            want = {a.decode() for a in request.dials(node)}   # dial set from valid request facts
-            for a in want - {p["addr"] for p in peers if p["addr"]}:
-                peers.append(peer(None, a, a.encode()))
-            for p in list(peers):                    # a closed request: forget the link, stop dialing
-                if p["addr"] and p["addr"] not in want:
-                    if p["s"]: p["s"].close()
-                    peers.remove(p)
-            for p in peers:                          # bring up outbound links; greet the moment one is up
-                if p["addr"] and not p["s"] and time.monotonic() >= p["down"]:
-                    connect(p)
-                    if p["s"]: ship(p, [hi])
-            live = [p for p in peers if p["s"]]
-            rd = [usock] + ([tsock] if tsock else []) + [p["s"] for p in live]
-            wr = [p["s"] for p in live if p["out"]]
-            nxt = clock.next_alarm(node)             # standing alarms bound the idle sleep
-            idle = 0.05 if nxt is None else min(0.05, max(0.0, nxt / 1000 - time.time()))
-            r, w, _ = select.select(rd, wr, [], 0 if work else idle)
+            for a, p in list(links.items()):         # bring up outbound links that owe bytes
+                if not p["s"] and p["out"] and time.monotonic() >= p["down"]:
+                    p["addr"] = a; dial(p)
+            reads = [usock] + ([tsock] if tsock else []) + \
+                    [p["s"] for p in links.values() if p["s"]] + [i["s"] for i in inbound]
+            writes = [p["s"] for p in links.values() if p["s"] and p["out"]]
+            r, w, _ = select.select(reads, writes, [], 0 if work else 0.05)
             work = False
-            ms = int(time.time() * 1000)
-            if nxt is not None and nxt <= ms and ms // clock.BUCKET != struck:
-                clock.strike(node, ms); struck = ms // clock.BUCKET; work = True  # ≤1 tick per bucket
             # HOST IN — clients, new inbound peers, peer bytes.
             for s in r:
                 if s is usock: serve(node, s.accept()[0], store, flushed); work = True
                 elif s is tsock:
                     try:
                         c = s.accept()[0]; c.setblocking(False)
-                        np = peer(c, None, b"fd:%d" % c.fileno()); ship(np, [hi]); peers.append(np)
+                        inbound.append({"s": c, "inb": b""})
                     except OSError: pass
                 else:
-                    p = next(p for p in live if p["s"] is s)
+                    src = next((i for i in inbound if i["s"] is s), None) or \
+                          next((p for p in links.values() if p["s"] is s), None)
                     try: c = s.recv(65536)
                     except OSError: c = b""
-                    if c: p["inb"] += c; work = True
-                    else: drop(p, peers)
-            hellos = []
-            for p in list(peers):                    # admit peer frames; answer compares, note hellos
-                if not p["s"]: continue
-                for fid, tag in intake(node, p):
-                    srcs[fid] = p["key"]             # remember arrivals: tails never echo home
-                    if tag == sync.TAG:              # the answer rides the pump, not this socket
-                        p["heard"] = time.monotonic()
-                        sreply.answer(node, fid, p["key"], int(time.time())); work = True
-                    elif tag == hello.TAG: hellos.append(fid)
-                if p["pend"]: work = True            # a bundle still draining: don't idle-sleep on it
-            for hid in hellos:                       # record each verified peer as a live connection
-                conn.observe(node, *hello.claim(node, hid), int(time.time())); work = True
-            if not node.frontier and any(p["s"] for p in peers):
-                ls = sync.leaves(node)               # quiescent: only now is our leaf set settled
-                new = [fid for _, fid in ls if fid not in known]
-                if new:                              # live tail: fresh leaves go straight to peers
-                    known.update(new); t = int(time.time())
-                    seen = set()
-                    for fid in new: seen |= sync.closure(node, fid)
-                    for p in peers:
-                        if p["s"]:
-                            ids = [x for x in sorted(seen) if srcs.get(x) != p["key"]]
-                            if ids: sreply.tail(node, p["key"], ids, t); work = True
-                root, nowm = None, time.monotonic()  # cadence repair: fresh root compares
-                for p in peers:                      # (deferring while draining kills the catch-up storm)
-                    if p["s"] and nowm >= p["due"]:
-                        if nowm - p["heard"] >= CADENCE:   # damp: their compares are mid-flight
-                            root = root or sync.initiate(node, ls)[0]
-                            sreply.open_round(node, p["key"], int(time.time()), root)
-                            work = True
-                        p["due"] = nowm + CADENCE
+                    if c: src["inb"] = src.get("inb", b"") + c; work = True
+                    elif src in inbound: s.close(); inbound.remove(src)
+            n = 0                                     # admit inbound, bounded per turn
+            for src in inbound + [p for p in links.values() if p["s"]]:
+                if "inb" not in src: continue
+                for kind, body in messages(src):
+                    if kind == BARE: _admit_bare(node, body)
+                    else: _admit_frame(node, body, sreply)
+                    n += 1; work = True
+                    if n >= BOUND: break
+                if n >= BOUND: break
+            # respond seam: only the addressee offers `respond`; author + ship the connection.
+            for o, _, a in node.watched(b"respond", conn.SC):
+                rid, reply = a.target[1], a.value
+                if rid in responded or not reply: continue
+                cid = conn.respond(node, rid, reply, int(time.time()))
+                if cid:
+                    responded.add(rid)
+                    enqueue(link(links, reply.decode()), BARE, node.durable.get(cid) or _enc(node, cid))
+                    work = True
             # ENGINE DRAIN — bounded; leftover frontier is next turn's work.
-            node.turn(BOUND); work |= bool(node.frontier)
-            # HOST OUT — flush new durables, pump send offers, drain outboxes (select-gated).
+            node.turn(now_ms(), BOUND); work |= bool(node.frontier)
+            # HOST OUT — flush, redial, pump data, sync cadence + live tail, drain writes.
             flush(node, store, flushed)
-            work |= pump(node, peers, shipped)
-            for p in list(peers):
+            nowm = time.monotonic()
+            for addr, env in request.dials(node):     # (re)dial unanswered requests
+                a = addr.decode()
+                if nowm - redial.get(a, 0) >= CADENCE:
+                    enqueue(link(links, a), BARE, env); redial[a] = nowm; work = True
+            work |= _pump_data(node, links, shipped)
+            if not node.frontier:
+                ls = sync.leaves(node)
+                fresh = [fid for _, fid in ls if fid not in known]
+                if fresh:                             # live tail: fresh leaves straight to peers
+                    known.update(fresh); seen = set()
+                    for fid in fresh: seen |= sync.closure(node, fid)
+                    for _ep, _addr, cid in conn.peers(node):
+                        sreply.tail(node, cid, sorted(seen), int(time.time())); work = True
+                for _ep, _addr, cid in conn.peers(node):   # cadence: fresh root compares
+                    if nowm - compared.get(cid, 0) >= CADENCE:
+                        sreply.open_round(node, cid, int(time.time()), sync.initiate(node, ls)[0])
+                        compared[cid], work = nowm, True
+            for p in links.values():
                 if p["s"] and p["out"] and p["s"] in w:
                     try: k = p["s"].send(p["out"]); p["out"] = p["out"][k:]; work |= k > 0
-                    except OSError: drop(p, peers)
+                    except OSError: p["s"].close(); p["s"], p["out"], p["down"] = None, b"", nowm + 0.05
     finally:
         usock.close(); os.unlink(sp)
-        for p in peers:
+        for p in links.values():
             if p["s"]: p["s"].close()
+        for i in inbound: i["s"].close()
+
+def _enc(node, fid):
+    from kernel import encode
+    return encode(node.facts[fid])
+
+def _admit_bare(node, body):             # a handshake fact (sealed request / connection)
+    try: node.admit(body)
+    except Exception: pass
+
+def _admit_frame(node, body, sreply):    # a sealed data frame: open by its own connection id
+    cid = frames.frame_cid(body)
+    r = conn.route(node, cid) if cid else None
+    if not r: return                     # no session secret yet: drop (sync will resend)
+    blob = frames.open_frame(body, r[1])
+    if blob is None: return              # tamper / wrong key: whole-frame miss
+    for inner in frames.unframe(blob):
+        try: fid = node.admit(inner)
+        except Exception: fid = None
+        if fid and node.facts[fid].type_tag == sync.TAG:
+            sreply.answer(node, fid, cid, int(time.time()))
+
+def _pump_data(node, links, shipped):    # stage validated send/ship offers as sealed frames
+    rows = {}
+    for role in (b"send", b"ship"):
+        for o, _, a in node.watched(role, b"outbox"):
+            if o not in shipped: rows.setdefault(o, []).append(a)
+    moved = False
+    for o, atoms in sorted(rows.items()):
+        cid = atoms[0].target[1]
+        r = conn.route(node, cid)
+        if not r: continue               # no route yet: the offer stands (park)
+        addr, secret = r; p = link(links, addr.decode())
+        if len(p["out"]) > OUTCAP: continue
+        inners = []
+        for a in sorted(atoms, key=lambda a: (a.role, a.value)):
+            if a.role == b"send": inners.append(a.value)
+            else: inners += [node.durable[x] for x in _ids(a.value) if x in node.durable]
+        for blob in frames.pack(inners):
+            enqueue(p, SEALED, frames.seal(blob, cid, secret, os.urandom(24)))
+        shipped.add(o); sent.report(node, o, int(time.time())); moved = True
+    return moved
 
 if __name__ == "__main__":
     main(*sys.argv[1:])

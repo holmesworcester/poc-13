@@ -43,9 +43,7 @@ def _handshake(host, joiner):
     assert joiner.memo[rid] == "Valid", "joiner's own request must validate"
     # wire: request -> host; host authors the connection; connection -> joiner
     host.admit(joiner.durable[rid]); host.run()
-    # host records the arrival receipt, then responds
-    from facts.connection import fact_receipt
-    fact_receipt.observe(host, rid, b"127.0.0.1:7", 0, 4); host.run()
+    # only the addressee can open the request, so it responds (no receipt needed)
     cid = conn.respond(host, rid, b"127.0.0.1:7", 4); host.run()
     assert cid and host.memo[cid] == "Valid", "responder connection must validate"
     joiner.admit(encode(host.facts[cid])); joiner.run()
@@ -64,9 +62,7 @@ def test_responder_authoring_is_deterministic():
     _, cid1 = _handshake(host, joiner)
     # re-run respond on a fresh replay of the host: identical connection id
     host2 = host.replay()
-    from facts.connection import fact_receipt
     rid = next(fid for fid, f in host.facts.items() if f.type_tag == req.TAG)
-    fact_receipt.observe(host2, rid, b"127.0.0.1:7", 0, 4); host2.run()
     cid2 = conn.respond(host2, rid, b"127.0.0.1:7", 4); host2.run()
     assert cid2 == cid1, "deterministic responder output: same connection id on replay"
 
@@ -77,8 +73,6 @@ def test_mis_addressed_request_never_responds():
     rid = req.bootstrap(joiner, wid, secret, iid, wrong_ep, b"127.0.0.1:9", b"127.0.0.1:7", 3)
     joiner.run()
     host.admit(joiner.durable[rid]); host.run()
-    from facts.connection import fact_receipt
-    fact_receipt.observe(host, rid, b"127.0.0.1:7", 0, 4); host.run()
     # host cannot open a request sealed to another endpoint: no respond, no connection
     assert conn.respond(host, rid, b"127.0.0.1:7", 4) is None
     assert host.memo.get(rid) in ("Parked", None)

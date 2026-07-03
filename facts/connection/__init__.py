@@ -5,8 +5,7 @@ handshake's X25519 keypair; `close` retires a session by suppression; and a
 `frame` bundle packs many facts into one wire frame. Only request/ephemeral
 persist locally — the rest are ephemeral transport, never synced."""
 from kernel import Router
-from . import close, connection, ephemeral_secret, fact_receipt, frame, request
+from . import close, connection, ephemeral_secret, frame, request
 
 SCOPE = Router({b"request": request, b"close": close, b"connection": connection,
-                b"ephemeral_secret": ephemeral_secret, b"fact_receipt": fact_receipt,
-                b"frame": frame}, depth=1)
+                b"ephemeral_secret": ephemeral_secret, b"frame": frame}, depth=1)

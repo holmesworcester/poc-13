@@ -36,12 +36,16 @@ def project(f, ctx, sl):                 # the inviter's signer key must be root
 # COMMANDS — build a fact, admit it, stop. Returns (invite_id, invite_secret):
 # print both as the link; the joiner passes them to auth.user.join.
 def invite(node, workspace_id, t):
+    from facts.auth import endpoint, invite_accepted
     local = local_signer_secret.current(node)
     if not local: raise RuntimeError("no local signer key: run auth.local_signer_secret.keygen first")
     sk, pk = local                                   # the inviter signs with their own authority key
     secret, invite_pk = keygen()                     # the fresh invite keypair; secret is the link
     iid = node.admit(encode(user_invite(workspace_id, invite_pk, t)))
     signature.attest(node, workspace_id, sk, pk, iid, t)
+    ep = endpoint.current(node)                      # the inviter retains the bootstrap secret so it
+    if ep:                                           # can authorize the joiner's sealed request
+        invite_accepted.accept(node, workspace_id, iid, secret, b"", ep[1], t)
     return iid, secret
 
 # QUERIES — observations over validated state only.
