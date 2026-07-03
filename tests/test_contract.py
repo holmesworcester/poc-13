@@ -14,6 +14,8 @@ def test_fact_contract():
         assert f'TAG = b"{".".join(rel.parts)}"' in src, p        # tag = path = namespace
         idx = [src.find(s) for s in SECTIONS]
         assert min(idx) >= 0 and idx == sorted(idx), p            # all six, in order
+        c = src.find("# CHECK")                                   # optional seventh part
+        if c >= 0: assert idx[1] < c < idx[2], p                  # self-check: EXTRACT..PROJECT
         bounds = idx + [len(src)]
         part = {s: src[bounds[i]:bounds[i + 1]] for i, s in enumerate(SECTIONS)}
         for s in SECTIONS:
