@@ -127,7 +127,9 @@ def closure(node, fid):                  # Require ancestors + suppressors, tran
         todo |= node.validated_deps(x) - out
     return out
 
-def myfp(node, lo_ts=0): ls = leaves(node, lo_ts); return _fp(ls, list(ls))   # windowed-set fingerprint
+def myfp(node, lo_ts=0):                 # whole-set change fingerprint (used only to detect "did my set change")
+    if lo_ts <= 0: return node.leaf_xor.to_bytes(32, "big")   # O(1): the engine's incremental leaf XOR
+    ls = leaves(node, lo_ts); return _fp(ls, list(ls))
 
 # CLI — no verbs: sync has no human authoring surface, only drivers.
 CLI = {}

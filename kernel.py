@@ -253,6 +253,7 @@ class Node:
         self.slices = {}                     # key -> (owner, ts, value), LWW by (ts, owner)
         self.deps = {}                       # id -> direct Require/suppress edges (poc-12 validated_deps memo)
         self.leafset = {}                    # (ts,FactId) -> content leaf hash: the sync reconciliation set
+        self.leaf_xor = 0                    # XOR of every leaf hash: an O(1) whole-set change fingerprint
         self.frontier = deque()
 
     # Host in — admission gates; a failed gate is inert. checked=True (replay
@@ -347,13 +348,16 @@ class Node:
             out = self.root.project(f, ctx, dict(self.slices)) or Out("Parked")
         self._promote(fid, f, out)
 
-    def _leafset_update(self, fid, f):   # keep the (ts,FactId)->hash sync set current on validity change.
+    def _leafset_update(self, fid, f):   # keep the (ts,FactId)->hash set + XOR fingerprint current.
         key = (ts_of(f), fid)            # a leaf iff durable, shareable, and Valid|Suppressed (tombstones stay)
+        new = None
         if (fid in self.durable and self.memo.get(fid) in ("Valid", "Suppressed")
                 and self.root.extract(f)[1]):
-            self.leafset[key] = H(frame(fid, key[0].to_bytes(8, "little"), H(self.durable[fid])))
-        else:
-            self.leafset.pop(key, None)
+            new = H(frame(fid, key[0].to_bytes(8, "little"), H(self.durable[fid])))
+        old = self.leafset.get(key)
+        if old == new: return            # no delta: leave the set and its XOR untouched
+        if old is not None: self.leaf_xor ^= int.from_bytes(old, "big"); del self.leafset[key]
+        if new is not None: self.leaf_xor ^= int.from_bytes(new, "big"); self.leafset[key] = new
 
     def _promote(self, fid, f, out):
         self.memo[fid] = out.verdict
