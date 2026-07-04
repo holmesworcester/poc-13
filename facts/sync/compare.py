@@ -25,7 +25,7 @@ state, never replayed, never in anyone's leaves — excluded from reconciliation
 `lo_ts` defaults to 0 (whole history), so the in-process algorithm harnesses see
 the full set; the daemon passes `now - HORIZON` to window."""
 from kernel import (Atom, Exact, H, OFFER, Out, REQUIRE, SUPPRESS, Range,
-                    encode, fact, frame, needs_of, ts_of)
+                    encode, fact, frame, ts_of)
 
 TAG = b"sync.compare"
 SC = b"sync"                             # scope carried by every sync atom
@@ -116,16 +116,15 @@ def sync_set(node, lo_ts=0):             # the closure-closed reconciliation set
     return {x for x in out if _shareable(node, x)}
 
 def leaves(node, lo_ts=0):               # reconciliation set -> (ts, FactId) leaf hash
+    if lo_ts <= 0:                       # floor 0: the whole set is the engine's incrementally-kept leafset
+        return dict(node.leafset)        # no O(n) rebuild — poc-12 skeleton, maintained on validity delta
     return dict(_leaf(node, x, node.durable[x]) for x in sync_set(node, lo_ts))
 
-def closure(node, fid):                  # Require ancestors + suppressors, transitively
-    out, todo = set(), {fid}
+def closure(node, fid):                  # Require ancestors + suppressors, transitively (poc-12 D(W))
+    out, todo = set(), {fid}              # walks the engine's validated_deps memo, not a fresh graph scan
     while todo:
         x = todo.pop(); out.add(x)
-        f = node.facts.get(x)
-        if f is None: continue
-        todo |= {o for n in needs_of(f, x) if n.effect in (REQUIRE, SUPPRESS)
-                 for o, _ in node.offers_for(n)} - out
+        todo |= node.validated_deps(x) - out
     return out
 
 def myfp(node, lo_ts=0): ls = leaves(node, lo_ts); return _fp(ls, list(ls))   # windowed-set fingerprint

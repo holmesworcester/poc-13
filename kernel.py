@@ -251,6 +251,8 @@ class Node:
         self.memo, self.clean = {}, {}       # id -> verdict ; (role,scope) -> [(owner, ts, atom)]
         self.owned = {}                      # id -> its clean rows, for owner-scoped replacement
         self.slices = {}                     # key -> (owner, ts, value), LWW by (ts, owner)
+        self.deps = {}                       # id -> direct Require/suppress edges (poc-12 validated_deps memo)
+        self.leafset = {}                    # (ts,FactId) -> content leaf hash: the sync reconciliation set
         self.frontier = deque()
 
     # Host in — admission gates; a failed gate is inert. checked=True (replay
@@ -269,6 +271,7 @@ class Node:
         for a in f.atoms:
             self.intake.setdefault((a.kind, a.role, a.scope), []).append((fid, mat(a, fid)))
         self.frontier.append(fid)
+        self.deps.clear()                    # the graph changed: rebuild the validated-edge memo lazily
         return fid
 
     # Both match directions run over index ∪ intake; the overlay is transparent.
@@ -284,6 +287,15 @@ class Node:
     def valid_offers(self, need):        # the clean twin: the only justifier
         return [r for r in self.clean.get((need.role, need.scope), ())
                 if covers(r[2].target, need.target)]
+
+    def validated_deps(self, fid):       # fid's direct Require/suppress edge owners (poc-12 validated_deps).
+        d = self.deps.get(fid)           # rebuildable derived state: memoized, cleared whenever a fact admits.
+        if d is None:
+            f = self.facts.get(fid)
+            d = self.deps[fid] = frozenset() if f is None else frozenset(
+                o for n in needs_of(f, fid) if n.effect in (REQUIRE, SUPPRESS)
+                for o, _ in self.offers_for(n))
+        return d
 
     # Present the host's clock as one transient offer at the NOW key, waking any
     # time-waiting need whose deadline it now covers. Not a fact: one clean-twin
@@ -335,8 +347,17 @@ class Node:
             out = self.root.project(f, ctx, dict(self.slices)) or Out("Parked")
         self._promote(fid, f, out)
 
+    def _leafset_update(self, fid, f):   # keep the (ts,FactId)->hash sync set current on validity change.
+        key = (ts_of(f), fid)            # a leaf iff durable, shareable, and Valid|Suppressed (tombstones stay)
+        if (fid in self.durable and self.memo.get(fid) in ("Valid", "Suppressed")
+                and self.root.extract(f)[1]):
+            self.leafset[key] = H(frame(fid, key[0].to_bytes(8, "little"), H(self.durable[fid])))
+        else:
+            self.leafset.pop(key, None)
+
     def _promote(self, fid, f, out):
         self.memo[fid] = out.verdict
+        self._leafset_update(fid, f)
         # Owner-scoped replacement: pull this fact's current rows from their
         # buckets, add the new ones — old and new output are never both visible.
         old = self.owned.pop(fid, [])
