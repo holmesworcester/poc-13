@@ -1,12 +1,13 @@
 """facts/sync/reply.py — one sync answer as a send intent. A reply carries the
-compare frame and the closure shipments that answering a peer's compare (or
+compare frame and the missing-leaf shipments that answering a peer's compare (or
 opening a fresh root compare) calls for, offered at the host-watched outbox
 keys until the daemon reports the flush (shipped@SELF), on which it reaps.
 Shipments ride by reference — fact ids, resolved against the durable set at
-send time, so a queued shipment is never stale bytes. Volatile session state: a
-reply dies with the session and is never resent on restart; the next cadence
-compare regenerates whatever still matters (poc-10: network_outgoing is a TEMP
-table)."""
+send time, so a queued shipment is never stale bytes. Deps are not bundled here:
+the reconciled set is closure-closed (see compare.py), so a shipped leaf's deps
+reconcile as their own leaves. Volatile session state: a reply dies with the
+session and is never resent on restart; the next cadence compare regenerates
+whatever still matters (poc-10: network_outgoing is a TEMP table)."""
 from kernel import (Atom, Exact, OFFER, Out, by, encode, fact, frame,
                     shipped_need, ts_atom)
 from facts.sync import compare
@@ -33,16 +34,13 @@ def project(f, ctx, sl):
     return Out(offers=tuple(a for a in f.atoms if a.role in (b"send", b"ship")))
 
 # COMMANDS — build a fact, admit it, stop.
-def answer(node, cid, dest, t):          # answer an admitted peer compare
-    cmp_frame, ship = compare.answer_of(node, cid)
+def answer(node, cid, dest, t, lo_ts=0):     # answer an admitted peer compare (windowed set)
+    cmp_frame, ship = compare.answer_of(node, cid, lo_ts)
     if not cmp_frame and not ship: return None
     return node.admit(encode(reply(dest, cmp_frame, ship, t)))
 
-def open_round(node, dest, t, root=None):    # a fresh root compare toward dest
+def open_round(node, dest, t, root=None):    # a fresh root compare toward dest (root pre-windowed)
     return node.admit(encode(reply(dest, root or compare.initiate(node)[0], [], t)))
-
-def tail(node, dest, ship_ids, t):       # freshly shareable facts, straight to a peer
-    return node.admit(encode(reply(dest, None, sorted(ship_ids), t)))
 
 # QUERIES — none: the daemon's pump reads the outbox keys directly.
 

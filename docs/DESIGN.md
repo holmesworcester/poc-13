@@ -348,50 +348,62 @@ amortizes it.
 ## Sync
 
 Sync reconciles facts, never atoms, and lives entirely in `facts/sync/` — no
-kernel change. A leaf is `(ts, FactId) -> H(FactId ‖ ts ‖ H(bytes))` for every
-fact that is durable, shareable, and `Valid|Suppressed`; suppressed facts stay
-in the set, which is how deletions reconcile. A range fingerprint is the hash
-of its leaf-hashes plus a count, so rebuilding it from the durable set is
-order-independent. Reconciliation is a compare over half-open `[lo, hi)` ranges
-of the composite key `ts‖FactId`: a range whose fingerprints match emits
-nothing; a small range (≤4 keys on the sender's side) is sent as a complete
-leaf list; any larger mismatch splits at the item-count median and recurses. A
-one-fact difference over a hundred facts settles in a logarithmic number of
-compare frames, not a push-all scan.
+kernel change. The reconciled leaf set is `sync_set` (poc-12's dep-aware model):
+every fact that is durable, shareable, and `Valid|Suppressed` at or above a
+recent floor `[floor, ∞)` over `(ts, FactId)`, PLUS the Require/suppress
+`closure` of each such seed — so a bounded recent window still carries every
+dependency it needs, even deps whose `ts` sits far below the floor. The union of
+per-seed closures is closure-closed by construction. The floor IS the retention
+horizon; poc-13 has no retention/purge yet (Further Work), so it is 0 and the
+set is the whole durable-shareable frontier — but the machinery windows the
+moment a purge horizon and a coherent fact clock exist (`sync.window_lo`).
 
-Shipping is dependency-aware: when an id must travel it goes with its
-`closure` — the backward Require ancestors plus the suppressors of everything
-in the closure (and theirs), transitively. So a tombstone rides along with the
-fact it kills and the fact arrives already Suppressed: no resurrection window.
-The receiver admits every shipped frame through the normal gate (the
+A leaf is `(ts, FactId) -> H(FactId ‖ ts ‖ H(bytes))`; suppressed facts stay in,
+which is how deletions reconcile. A range fingerprint is the hash of its
+leaf-hashes plus a count, so rebuilding it from the set is order-independent.
+Reconciliation is a compare over half-open `[lo, hi)` ranges of the composite
+key `ts‖FactId`: a range whose fingerprints match emits nothing; a small range
+(≤4 keys on the sender's side) is sent as a complete leaf list; any larger
+mismatch splits at the item-count median and recurses. A one-fact difference
+over a hundred facts settles in a logarithmic number of compare frames.
+
+Dependency-awareness is a property of the SET, not of the send: because
+`sync_set` is closure-closed, a mismatched leaf ships BARE — its deps are
+already leaves in the same set and reconcile in their own ranges. Shared deps
+fingerprint-equal on both sides and cancel (never re-shipped); a suppressor
+rides in as its victim's closure member, so a tombstone reconciles alongside the
+fact it kills and that fact arrives already Suppressed — no resurrection window,
+and no send-time closure walk. Transitivity of deeper chains emerges over
+rounds: a shipped fact whose own dep is still in flight parks and wakes when the
+dep lands. The receiver admits every shipped frame through the normal gate (the
 replay-only `checked` path is never used for peer input).
 
-The split of labor is crisp. `leaves`, the range fingerprint, `closure`, and
+The split of labor is crisp. `sync_set`, the range fingerprint, `closure`, and
 `answer_of` (an admitted peer compare's answer: sub-range compares, `want`
-pulls, and the closure ship list) are QUERIES — pure reads of the engine,
-authority for nothing. The send side is the `sync.reply` family: a reply fact
-carries the answer's compare frame as a `send` offer and its shipments as
-by-reference `ship` offers (fact ids, resolved against the durable set at
-send time) at the host-watched outbox keys; when the daemon reports the flush
+pulls, and the bare missing-leaf ship list) are QUERIES — pure reads of the
+engine, authority for nothing. The send side is the `sync.reply` family: a reply
+fact carries the answer's compare frame as a `send` offer and its shipments as
+by-reference `ship` offers (fact ids, resolved against the durable set at send
+time) at the host-watched outbox keys; when the daemon reports the flush
 (`shipped@SELF`, see The Clock) the reply reaps, leaving no residue — even
-sync's own frames ride the one send path. A compare
-frame crossing the wire IS a fact — the transport keeps its single message
-type. Compare and reply facts extract to `(False, False)`: volatile, so replay
-never resurrects session state, and unshareable, so they are excluded from the
-very leaves they reconcile.
+sync's own frames ride the one send path. A compare frame crossing the wire IS a
+fact — the transport keeps its single message type. Compare and reply facts
+extract to `(False, False)`: volatile, so replay never resurrects session state,
+and unshareable, so they are excluded from the very leaves they reconcile.
 
-Sync is roundless (poc-10's `maintain_sync` model): there is no round or
-session state anywhere. The daemon sends a fresh root compare to each live
-peer on a process-local cadence — damped while that peer's own compares are
-mid-flight, and deferred while the frontier is still draining, so a receiver
-mid-catch-up stops churning the sender with a new compare every turn. A lost
-frame needs no retry bookkeeping; the next cadence compare repairs it.
-Freshness does not wait for the cadence: at quiescence, leaves that newly
-entered the set ride a live-tail reply straight to every peer except the one
-they arrived from (measured on bench 5c, a fresh message against a 5000-fact
-backlog: ~3.6s riding the reconcile, ~0.7s tailed). Every peer link is
-full-duplex, and reconciliation is what a fact authored on one side rides to
-reach the others.
+Sync is one root compare per peer at a time (poc-12's `maintain_sync` + settle
+discipline). The daemon opens a fresh root compare to a live peer only once the
+previous round with it has settled — the peer has been quiet of sync frames for
+`QUIET` — and then only when the periodic cadence is due or the daemon's own
+leaf fingerprint has changed since it last synced that peer. In-flight frames
+keep the peer's settle marker fresh, so overlapping rounds — from either
+direction — never start; the fingerprint-change trigger gives fresh facts
+sub-cadence latency with no separate live-tail path (the closure already travels
+in the one reconciliation set). A lost frame needs no retry bookkeeping; the
+next cadence compare repairs it. All of this — cadence, settle, and last-synced
+fingerprint — is process-local daemon state: operational repetition, never
+durable time wakes or projector state. Every peer link is full-duplex, and
+reconciliation is what a fact authored on one side rides to reach the others.
 
 ## Connections
 

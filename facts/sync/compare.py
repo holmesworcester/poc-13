@@ -1,18 +1,29 @@
 """facts/sync/compare.py — dependency-aware negentropy reconciliation, housed
 as a fact family. A compare fact is one wire frame of session state: it carries
 [lo, hi) ranges each labelled with either a fingerprint (split on mismatch) or a
-complete leaf list (small ranges), plus `want` markers that pull a missing id's
-closure. Sync reconciles FACTS over (ts, FactId) leaves that are durable,
-shareable, and Valid|Suppressed — suppressed leaves stay in, so deletions
-reconcile. A shipped id travels with its closure (Require ancestors plus
-suppressors), so tombstones ride along and nothing resurrects.
+complete leaf list (small ranges), plus `want` markers that pull a missing id.
 
-The pure algorithm — leaves / fingerprint / closure — is QUERIES over the
+The reconciled leaf set is `sync_set`: every shareable fact at or after a recent
+horizon `lo_ts`, PLUS the Require/suppress closure of each — so a bounded recent
+window still carries every dependency (and tombstone) it needs, even deps whose
+ts is far below the window (poc-12's `validated_deps` / the reserved `closure`
+need). The union of per-seed closures is closure-closed by construction, so a
+mismatch ships the BARE leaf: its deps are already leaves in the same set and
+reconcile in their own ranges — shared deps cancel in the fingerprint, and a
+suppressor rides in as its victim's closure member, so tombstones travel and
+nothing resurrects. No send-time closure walk; closure is a property of the set,
+computed once per round and amortizable. Leaves are (ts, FactId) over facts
+durable, shareable, and Valid|Suppressed — suppressed leaves stay in, so
+deletions reconcile.
+
+The pure algorithm — sync_set / fingerprint / closure — is QUERIES over the
 engine; the round-trip driver is COMMANDS the daemon calls: `initiate` on
-connect or leaf-fingerprint change, `respond` to an admitted peer compare with
-sub-range compares, wants, and the fact shipments themselves. Compare facts are
-volatile and unshareable (extract -> False, False): session state, never
-replayed, never in anyone's leaves — excluded from their own reconciliation."""
+connect, cadence, or leaf-fingerprint change, `respond` to an admitted peer
+compare with sub-range compares, wants, and the fact shipments themselves.
+Compare facts are volatile and unshareable (extract -> False, False): session
+state, never replayed, never in anyone's leaves — excluded from reconciliation.
+`lo_ts` defaults to 0 (whole history), so the in-process algorithm harnesses see
+the full set; the daemon passes `now - HORIZON` to window."""
 from kernel import (Atom, Exact, H, OFFER, Out, REQUIRE, SUPPRESS, Range,
                     encode, fact, frame, needs_of, ts_of)
 
@@ -49,13 +60,13 @@ def extract(f): return False, False
 def project(f, ctx, sl): return Out()
 
 # COMMANDS — driver functions the daemon calls; they build wire frames, not verbs.
-def initiate(node, ls=None):             # a root compare: one fingerprint over the whole space
-    return [encode(compare(_emit(leaves(node) if ls is None else ls, LO, HI)))]
+def initiate(node, ls=None, lo_ts=0):    # a root compare: one fingerprint over the whole space
+    return [encode(compare(_emit(leaves(node, lo_ts) if ls is None else ls, LO, HI)))]
 
-def answer_of(node, cid):                # -> (compare frame | None, closure-expanded ship ids)
+def answer_of(node, cid, lo_ts=0):       # -> (compare frame | None, missing-leaf ship ids)
     if node.memo.get(cid, "Invalid") in ("Invalid", "Suppressed"):
         return None, []                  # answer nothing the engine refused
-    C, ls, atoms, ship = node.facts[cid], leaves(node), [], []
+    C, ls, atoms, ship = node.facts[cid], leaves(node, lo_ts), [], []
     for a in C.atoms:
         if a.role == b"fp":              # fingerprint claim: split on mismatch
             lo, hi = a.target[1], a.target[2]
@@ -69,14 +80,13 @@ def answer_of(node, cid):                # -> (compare frame | None, closure-exp
             ship += [k[1] for k in mine - peer]                   # peer lacks -> ship
             atoms += [want_atom(fid) for _, fid in peer - mine]   # I lack -> want
         elif a.role == b"want": ship.append(a.target[1])          # explicit pull
-    out, seen = [], set()
-    for fid in ship:                     # each shipped id travels with its whole closure
-        for x in closure(node, fid):
-            if x in node.durable and x not in seen: seen.add(x); out.append(x)
+    # The set is closure-closed, so a missing leaf's deps are already leaves that
+    # reconcile in their own ranges — ship the bare leaf, no send-time closure walk.
+    out = list(dict.fromkeys(fid for fid in ship if fid in node.durable))
     return (encode(compare(atoms)) if atoms else None), out
 
-def respond(node, cid):                  # the answer as wire frames (in-process harnesses)
-    cmp_frame, ship = answer_of(node, cid)
+def respond(node, cid, lo_ts=0):         # the answer as wire frames (in-process harnesses)
+    cmp_frame, ship = answer_of(node, cid, lo_ts)
     return ([cmp_frame] if cmp_frame else []) + [node.durable[x] for x in ship]
 
 # QUERIES — the pure algorithm; reads the engine, authority for nothing.
@@ -88,12 +98,25 @@ def _leaf(node, fid, b):                 # write-once and node-independent — n
         e = _LEAF[fid] = ((ts, fid), H(frame(fid, ts.to_bytes(8, "little"), H(b))))
     return e
 
-def leaves(node):                        # durable, shareable, Valid|Suppressed -> leaf hash
-    out = {}                             # only membership (the memo verdict) varies per call
-    for fid, b in node.durable.items():
-        if node.memo.get(fid) in ("Valid", "Suppressed") and node.root.extract(node.facts[fid])[1]:
-            k, h = _leaf(node, fid, b); out[k] = h
-    return out
+def _shareable(node, fid):               # a reconcilable leaf: durable, shareable, Valid|Suppressed
+    return (fid in node.durable and node.memo.get(fid) in ("Valid", "Suppressed")
+            and node.root.extract(node.facts[fid])[1])
+
+def frontier_ts(node):                   # newest reconcilable fact's ts: the window anchor
+    return max((ts_of(node.facts[x]) for x in node.durable if _shareable(node, x)), default=0)
+
+def window_lo(node, span):               # window floor anchored to the frontier, not the wall clock —
+    return frontier_ts(node) - span      # keeps the leaf set a pure function of the fact set (determinism)
+
+def sync_set(node, lo_ts=0):             # the closure-closed reconciliation set (see module doc)
+    out = set()                          # seeds: shareable leaves inside the recent window
+    for fid in node.durable:             # closure pulls each seed's deps + suppressors, even old ones
+        if _shareable(node, fid) and ts_of(node.facts[fid]) >= lo_ts:
+            out |= closure(node, fid)
+    return {x for x in out if _shareable(node, x)}
+
+def leaves(node, lo_ts=0):               # reconciliation set -> (ts, FactId) leaf hash
+    return dict(_leaf(node, x, node.durable[x]) for x in sync_set(node, lo_ts))
 
 def closure(node, fid):                  # Require ancestors + suppressors, transitively
     out, todo = set(), {fid}
@@ -105,7 +128,7 @@ def closure(node, fid):                  # Require ancestors + suppressors, tran
                  for o, _ in node.offers_for(n)} - out
     return out
 
-def myfp(node): ls = leaves(node); return _fp(ls, list(ls))   # our whole-set fingerprint
+def myfp(node, lo_ts=0): ls = leaves(node, lo_ts); return _fp(ls, list(ls))   # windowed-set fingerprint
 
 # CLI — no verbs: sync has no human authoring surface, only drivers.
 CLI = {}
