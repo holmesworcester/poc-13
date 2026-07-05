@@ -5,6 +5,6 @@ by one batched `need`, which ships those facts. Both are unshareable session sta
 excluded from the leaves they reconcile, and target responses at the connection's
 outbox key — so sync has no daemon reaction, only projectors on the one send path."""
 from kernel import Router
-from . import compare, need
+from . import compare, need, cadence
 
-SCOPE = Router({b"compare": compare, b"need": need}, depth=1)
+SCOPE = Router({b"compare": compare, b"need": need, b"cadence": cadence}, depth=1)

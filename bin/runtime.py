@@ -24,6 +24,10 @@ def cycle(node, inbox, now_ms, shipped, bound=BOUND):
 def outbox(node):                        # the one out door: validated send/ship rows at the outbox keys
     return node.watched(b"send", b"outbox") + node.watched(b"ship", b"outbox")
 
+def next_wake(node, now_ms, cap):        # seconds until the earliest wake@clock alarm, capped at `cap`
+    ds = [int.from_bytes(a.target[1], "big") for _, _, a in node.watched(b"wake", b"clock")]
+    return max(0.0, min(cap, min((d - now_ms for d in ds), default=cap * 1000) / 1000.0))
+
 def _ids(v):                             # a ship offer's value: length-framed fact ids
     out, i = [], 0
     while i < len(v): x, i = _rd(v, i); out.append(x)

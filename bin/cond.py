@@ -23,11 +23,11 @@ BIN = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [BIN, os.path.dirname(BIN)]
 from kernel import Node, Store, _rd, decode, fact_id, frame
 from facts import ROOT
-from facts.sync import compare as sync
+from facts.sync import compare as sync, cadence
 from facts.auth import local_signer_secret, endpoint
 from facts.connection import request, connection as conn, frame as frames
 from con import flush, load
-from runtime import cycle, pump, BOUND
+from runtime import cycle, pump, next_wake, BOUND
 
 OUTCAP = 1 << 20                         # per-address outbox byte cap: overflow parks
 CADENCE = 0.5                            # s between redials / periodic root compares per peer
@@ -100,7 +100,7 @@ def main(db, *argv):
         h, pt = listen.rsplit(":", 1)
         tsock = socket.create_server((h, int(pt))); tsock.setblocking(False)
     links, inbound = {}, []              # links: addr -> outbound socket; inbound: read sources
-    redial, compared, synced = {}, {}, {}             # cadence markers: addr/cid -> last open ; cid -> last leaf_xor
+    redial, synced, armed = {}, {}, set()             # redial: addr -> last dial ; synced: cid -> last leaf_xor ; armed cids
     to_ship = set()                                   # flushed senders awaiting their reap
     for sg in (signal.SIGINT, signal.SIGTERM): signal.signal(sg, lambda *a: sys.exit(0))
     print("listening:", "%s:%s" % tsock.getsockname()[:2] if tsock else sp, flush=True)
@@ -113,7 +113,7 @@ def main(db, *argv):
             reads = [usock] + ([tsock] if tsock else []) + \
                     [p["s"] for p in links.values() if p["s"]] + [i["s"] for i in inbound]
             writes = [p["s"] for p in links.values() if p["s"] and p["out"]]
-            r, w, _ = select.select(reads, writes, [], 0 if work else 0.05)
+            r, w, _ = select.select(reads, writes, [], 0 if work else next_wake(node, now_ms(), CADENCE))
             work = False
             # HOST IN — clients, new inbound peers, peer bytes.
             for s in r:
@@ -175,13 +175,10 @@ def main(db, *argv):
             if not node.frontier:
                 lo = _floor_key(RETAIN_FLOOR)        # reconcile [floor, inf); closure ids pull deps below it
                 for _ep, _addr, cid, _who in conn.peers(node):
-                    # Open a fresh bare-root compare when our leaf set moved since we last synced this
-                    # peer, or on the periodic cadence. No round state: content-addressing self-dedupes
-                    # overlapping descents, and the admitted compare/have/need projectors — not the
-                    # daemon — emit every response, so a dropped frame just re-descends next cadence.
-                    if node.leaf_xor != synced.get(cid) or nowm - compared.get(cid, 0) >= CADENCE:
-                        sync.open_round(node, cid, lo)
-                        compared[cid] = nowm; synced[cid] = node.leaf_xor; work = True
+                    if cid not in armed:             # a new connection: arm its cadence tiers (periodic pulls)
+                        cadence.arm(node, cid, now_ms()); armed.add(cid); work = True
+                    if node.leaf_xor != synced.get(cid):    # my set moved: open a round now, don't wait a period
+                        sync.open_round(node, cid, lo); synced[cid] = node.leaf_xor; work = True
             for p in links.values():
                 if p["s"] and p["out"] and p["s"] in w:
                     try: k = p["s"].send(p["out"]); p["out"] = p["out"][k:]; work |= k > 0

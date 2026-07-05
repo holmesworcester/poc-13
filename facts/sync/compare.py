@@ -31,6 +31,9 @@ def _unframe(v):
     out, i = [], 0
     while i < len(v): x, i = _rd(v, i); out.append(x)
     return out
+def claims_within(S, lo, hi):            # my summary's claim rows inside [lo,hi) -> wire (fp | ids) claims
+    return [(b"fp" if a.role == b"cfp" else b"ids", a.target[1], a.target[2], a.value)
+            for _, _, a in S if a.role in (b"cfp", b"cids") and lo <= a.target[1] and a.target[2] <= hi]
 
 # SHAPE — a compare bundles claims (fp | ids) over key ranges, each paired with the
 # reserved summary need so the admitter's engine answers with its own view.
@@ -51,10 +54,7 @@ def project(f, ctx, sl):
     S = by(ctx, SUM_ROLE)                                            # my view of each claimed range
     myfp   = {(a.target[1], a.target[2]): a.value for _, _, a in S if a.role == b"fp"}
     mycids = {(a.target[1], a.target[2]): a.value for _, _, a in S if a.role == b"cids"}
-    mine   = [(a.role, a.target[1], a.target[2], a.value) for _, _, a in S if a.role in (b"cfp", b"cids")]
-    def within(R):                       # my claim rows inside R, as wire (fp | ids) claims
-        return [(b"fp" if k == b"cfp" else b"ids", lo, hi, v)
-                for k, lo, hi, v in mine if R[0] <= lo and hi <= R[1]]
+    within = lambda R: claims_within(S, R[0], R[1])                  # my claims inside a range, as wire claims
     out, offers = [], []
     for a in f.atoms:
         if a.role not in (b"fp", b"ids"): continue                  # a peer claim
