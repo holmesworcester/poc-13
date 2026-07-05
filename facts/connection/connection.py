@@ -22,6 +22,7 @@ from crypto import dh, hkdf_sha256, keyed_hash, open_x25519, seal_x25519, x25519
 from facts.auth import endpoint, invite_accepted as ish
 from facts.connection import ephemeral_secret as eph
 from facts.connection import request as req
+from facts.outbox.send import send
 
 TAG = b"connection.connection"
 SC = b"conn"
@@ -118,7 +119,10 @@ def project(f, ctx, sl):
 def respond(node, request_id, origin, t):
     ro = next((r[2].value for r in _valid(node, b"req_open", Exact(request_id))), None)
     if ro is None: return None
-    if _valid(node, b"answered", Exact(request_id)): return _for_request(node, request_id)
+    if _valid(node, b"answered", Exact(request_id)):     # already answered: re-ship the response (re-dial)
+        cid = _for_request(node, request_id)
+        if cid: node.admit(encode(send(origin, encode(node.facts[cid]), t)))
+        return cid
     F = req.decode_pt(ro)
     esk, epk = endpoint.current(node)
     if epk != F["to_ep"]: return None    # not addressed to this endpoint
@@ -137,8 +141,10 @@ def respond(node, request_id, origin, t):
     nonce = keyed_hash(esk, NONCE_LABEL, request_id + H(cpt))[:24]
     hdr = _cheader(resp_eph_pk, F["from_ep"], request_id, nonce)
     ct = seal_x25519(resp_eph_sk, F["from_ep"], CONNECTION_PURPOSE, hdr, nonce, cpt)
-    return node.admit(encode(connection(_cenv(ct, resp_eph_pk, F["from_ep"], request_id, nonce),
-                                        request_id)))
+    cbytes = encode(connection(_cenv(ct, resp_eph_pk, F["from_ep"], request_id, nonce), request_id))
+    cid = node.admit(cbytes)
+    if cid: node.admit(encode(send(init_addr, cbytes, t)))   # ship the response to the initiator via the pump
+    return cid
 
 # QUERIES — observations over validated state only.
 def secret(node, cid):                   # the session key for an established connection

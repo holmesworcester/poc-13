@@ -154,9 +154,7 @@ def main(db, *argv):
             for rid in arrived:
                 reply = next((a.value for o, _, a in node.watched(b"respond", conn.SC)
                               if o == rid and a.value), None)
-                if reply:
-                    cid = conn.respond(node, rid, reply, int(time.time()))
-                    if cid: enqueue(link(links, reply.decode()), BARE, _enc(node, cid)); work = True
+                if reply: conn.respond(node, rid, reply, now_s()); work = True   # response ships via the pump
             # HOST OUT — flush, redial, pump data, open sync rounds (one per peer), drain writes.
             flush(node, store, flushed)
             nowm = time.monotonic()
@@ -164,13 +162,15 @@ def main(db, *argv):
                 a = addr.decode()
                 if nowm - redial.get(a, 0) >= CADENCE:
                     enqueue(link(links, a), BARE, env); redial[a] = nowm; work = True
-            def deliver(cid, addr, secret, inners):        # pack + seal + enqueue toward the link
+            def deliver(cid, addr, secret, inners):        # one out door: seal iff a session secret, else bare
                 p = link(links, addr.decode())
-                if len(p["out"]) > OUTCAP: return False    # backpressure: park, do not fire
-                for blob in frames.pack(inners):
-                    enqueue(p, SEALED, frames.seal(blob, cid, secret, os.urandom(24)))
-                return True
-            fired = pump(node, lambda cid: conn.route(node, cid), deliver, to_ship)
+                if secret:
+                    for blob in frames.pack(inners):
+                        enqueue(p, SEALED, frames.seal(blob, cid, secret, os.urandom(24)))
+                else:
+                    for inner in inners: enqueue(p, BARE, inner)     # pre-session handshake fact(s), unsealed
+                return True                                # fire best-effort; enqueue drops on overflow (§7.4)
+            fired = pump(node, lambda cid: conn.route(node, cid) or (cid, None), deliver, to_ship)
             to_ship |= fired; work |= bool(fired)          # flushed: next turn presents shipped@o and it reaps
             if not node.frontier:
                 lo = _floor_key(RETAIN_FLOOR)        # reconcile [floor, inf); closure ids pull deps below it
@@ -191,10 +191,6 @@ def main(db, *argv):
         for p in links.values():
             if p["s"]: p["s"].close()
         for i in inbound: i["s"].close()
-
-def _enc(node, fid):
-    from kernel import encode
-    return encode(node.facts[fid])
 
 def _peek_request(body):                 # a bare handshake fact's fid iff it is a sealed request (no admit)
     try: f = decode(body)
