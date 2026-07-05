@@ -60,8 +60,19 @@ independently) should pass immediately.
 
 Done (2026-07-03): fresh-facts-first landed as live-tail sends (poc-10
 `advertise_indexed_fact_to_connections` ported into the daemon's quiescence
-block) — bench 5c collapsed from ~3.6s to ~0.7s against the 5k backlog; the
-budget is now 2.5s.
+block) — a fresh leaf reaches a caught-up peer in ~37 ms (bench 5c, retargeted
+2026-07-05 to measure exactly that steady-state live-tail latency).
+
+Known perf (measured 2026-07-05): **bulk sync catch-up from empty is ~O(n²)**
+with a sharp throughput cliff at ~1 MiB of shipped bytes (~2000 messages): fast
+below it (thousands/s), a few hundred/s above. Two compounding causes — the
+outbox `OUTCAP` (1 MiB) parks overflow, healed only on the next re-descend; and
+the RBSR descent restarts from the root per bounded batch, re-fingerprinting the
+growing tree (raising OUTCAP gave 2–4×; lowering CADENCE did nothing, so it is
+not pacing-bound). Live-tail is unaffected. Fold the fix (resume/stream the
+descent; re-ship parked frames when the outbox drains) into the residency/sync
+split — the daemon-transition work. bench §5 budgets are loose tripwires until
+then.
 
 ## Done (2026-07-03): consolidation + ports
 
