@@ -233,6 +233,102 @@ class Store:
 
     def commit(self): self.db.commit()   # host calls it: durable before the reply
 
+# --- The sync skeleton -------------------------------------------------------------
+class Skeleton:
+    """poc-12's reconciliation skeleton: a canonical radix trie over the 40-byte
+    (ts‖FactId) leaf key. A node holds a single leaf, or branches on the key byte
+    at its depth; leaves live at the shortest depth that makes them unique, and a
+    removal that leaves one leaf collapses the chain back — so the shape is a pure
+    function of the leaf SET, not the insert order. A node's label = its leaf hash
+    (leaf) or H(child labels in byte order ‖ count) (internal); being determined
+    by the leaves under a prefix, two peers agree on a prefix's label exactly when
+    they share the leaves there. Reconciliation reads labels and never scans:
+    insert/remove touch one root→leaf path (O(depth)), a range fingerprint folds
+    O(depth) node labels, and a mismatch descends by prefix."""
+    EMPTY = H((0).to_bytes(6, "little"))     # the label of a prefix with no leaves
+
+    def __init__(self): self.root = None
+    def _relabel(self, nd):
+        nd["count"] = sum(c["count"] for c in nd["kids"].values())
+        nd["label"] = H(b"".join(nd["kids"][b]["label"] for b in sorted(nd["kids"]))
+                        + nd["count"].to_bytes(6, "little"))
+
+    def insert(self, kb, h): self.root = self._ins(self.root, kb, h, 0)
+    def _ins(self, nd, kb, h, d):
+        if nd is None: return {"k": kb, "h": h, "label": h, "count": 1}
+        if "kids" not in nd:                 # a leaf: replace, or split into a branch
+            if nd["k"] == kb: return {"k": kb, "h": h, "label": h, "count": 1}
+            nd = {"kids": {nd["k"][d]: nd}, "label": None, "count": 0}
+        b = kb[d]
+        nd["kids"][b] = self._ins(nd["kids"].get(b), kb, h, d + 1)
+        self._relabel(nd); return nd
+
+    def remove(self, kb): self.root = self._rm(self.root, kb, 0)
+    def _rm(self, nd, kb, d):
+        if nd is None: return None
+        if "kids" not in nd: return None if nd["k"] == kb else nd
+        b = kb[d]
+        if b in nd["kids"]:
+            nd["kids"][b] = self._rm(nd["kids"][b], kb, d + 1)
+            if nd["kids"][b] is None: del nd["kids"][b]
+        if not nd["kids"]: return None
+        if sum(c["count"] for c in nd["kids"].values()) == 1:   # collapse chain to its lone leaf
+            while "kids" in nd: nd = next(iter(nd["kids"].values()))
+            return nd
+        self._relabel(nd); return nd
+
+    def _walk(self, prefix):                 # deepest node on the prefix path, with bytes consumed
+        nd, d = self.root, 0
+        while nd is not None and "kids" in nd and d < len(prefix):
+            nd = nd["kids"].get(prefix[d]); d += 1
+        return nd, d
+    def _collect(self, nd, out):
+        if "kids" in nd:
+            for c in nd["kids"].values(): self._collect(c, out)
+        else: out[nd["k"]] = nd["h"]
+
+    def label(self, prefix):                 # fingerprint of my leaves under `prefix`
+        nd, d = self._walk(prefix)
+        if nd is None: return self.EMPTY
+        if "kids" not in nd: return nd["label"] if nd["k"].startswith(prefix) else self.EMPTY
+        return nd["label"] if d == len(prefix) else self.EMPTY
+
+    def gather(self, prefix):                # {kb: leaf hash} of my leaves under `prefix`
+        nd, d = self._walk(prefix)
+        if nd is None: return {}
+        if "kids" not in nd:
+            return {nd["k"]: nd["h"]} if nd["k"].startswith(prefix) else {}
+        out = {}; self._collect(nd, out); return out
+
+    def emit(self, prefix, floor=b""):       # claims describing my in-window subtree at `prefix`
+        lo = prefix + b"\x00" * (40 - len(prefix))   # a prefix wholly in the window is summarised by
+        hi = prefix + b"\xff" * (40 - len(prefix))   # one node label; a straddling one is descended;
+        if hi < floor: return []                     # a wholly-below one contributes nothing.
+        if lo < floor:                               # straddle: split into children, clip each
+            nd, d = self._walk(prefix)
+            if nd is None: return []
+            if "kids" not in nd:                     # a lone leaf on the boundary path: a point claim
+                return ([("lst", nd["k"]), ("has", nd["k"])]
+                        if nd["k"].startswith(prefix) and nd["k"] >= floor else [])
+            out = []
+            for b in sorted(nd["kids"]):
+                cp = prefix + bytes([b]); clo = cp + b"\x00" * (40 - len(cp))
+                out += ([("fp", cp, nd["kids"][b]["label"])] if clo >= floor
+                        else self.emit(cp, floor))    # child wholly-in -> one fp; else recurse
+            return out
+        return self._emit_in(prefix)                 # wholly inside the window
+
+    def _emit_in(self, prefix):              # claims describing my whole subtree at `prefix`
+        nd, d = self._walk(prefix)
+        if nd is None or ("kids" not in nd and not nd["k"].startswith(prefix)):
+            return [("lst", prefix)]         # nothing here: peer ships me its leaves under prefix
+        if "kids" not in nd: return [("lst", prefix), ("has", nd["k"])]
+        p = prefix                           # internal: skip single-child chains, then fan out
+        while len(nd["kids"]) == 1:
+            b = next(iter(nd["kids"])); nd = nd["kids"][b]; p += bytes([b])
+            if "kids" not in nd: return [("lst", p), ("has", nd["k"])]
+        return [("fp", p + bytes([b]), nd["kids"][b]["label"]) for b in sorted(nd["kids"])]
+
 # --- The engine --------------------------------------------------------------------
 class Node:
     """One engine over one root projector. Durable authority = self.durable
@@ -254,6 +350,7 @@ class Node:
         self.deps = {}                       # id -> direct Require/suppress edges (poc-12 validated_deps memo)
         self.leafset = {}                    # (ts,FactId) -> content leaf hash: the sync reconciliation set
         self.leaf_xor = 0                    # XOR of every leaf hash: an O(1) whole-set change fingerprint
+        self.tree = Skeleton()               # the same set as a radix Merkle trie: O(depth) reconciliation
         self.frontier = deque()
 
     # Host in — admission gates; a failed gate is inert. checked=True (replay
@@ -297,6 +394,15 @@ class Node:
                 o for n in needs_of(f, fid) if n.effect in (REQUIRE, SUPPRESS)
                 for o, _ in self.offers_for(n))
         return d
+
+    def missing_needs(self):             # the reserved closure/hydrate need (poc-12 §Hydration):
+        out = {}                         # a parked fact's still-unmet REQUIRE keys — the deps it lacks.
+        for fid, f in self.facts.items():
+            if self.memo.get(fid) != "Parked": continue     # only a parked fact lacks a Require
+            for n in needs_of(f, fid):
+                if n.effect == REQUIRE and not self.valid_offers(n):
+                    out[(n.role, n.scope, n.target)] = n
+        return list(out.values())
 
     # Present the host's clock as one transient offer at the NOW key, waking any
     # time-waiting need whose deadline it now covers. Not a fact: one clean-twin
@@ -358,6 +464,8 @@ class Node:
         if old == new: return            # no delta: leave the set and its XOR untouched
         if old is not None: self.leaf_xor ^= int.from_bytes(old, "big"); del self.leafset[key]
         if new is not None: self.leaf_xor ^= int.from_bytes(new, "big"); self.leafset[key] = new
+        kb = key[0].to_bytes(8, "big") + fid   # keep the radix trie in step with the set
+        self.tree.remove(kb) if new is None else self.tree.insert(kb, new)
 
     def _promote(self, fid, f, out):
         self.memo[fid] = out.verdict

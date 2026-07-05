@@ -113,18 +113,18 @@ def test_reply_offers_stand_until_shipped():
     assert rid not in b.facts                         # reaped: no residue
 
 def test_windowed_in_range_facts_and_their_deps_reconcile():
-    """In range: a fact at/after the window floor reconciles, and its out-of-range
-    dependencies ride in via the closure — the auth spine, founded a month before
-    the floor, still travels because `recent` Requires it (poc-12 dep-aware sync)."""
+    """In range: a fact at/after the window floor reconciles, and its below-floor
+    dependencies ride in via the reserved closure need — the auth spine, founded a
+    month before the floor, travels because `recent` parks Requiring it and the
+    engine advertises the unmet dep, which the peer answers (poc-12 dep-aware sync)."""
     recent = message(WID, b"g", b"al", b"recent", T0 + 30 * DAY)   # a month after founding
     a = node(WS, WS_SIG, recent)
     floor = T0 + 29 * DAY                                          # window ~ the last day
-    s = sync.sync_set(a, floor)
-    assert fact_id(recent) in s, "the recent fact is in range"
-    assert WID in s and fact_id(WS_SIG) in s, "its spine deps ride in via closure, though founded at T0"
-    b = node()
+    b = node()                                                    # b locally accepted the workspace
     reconcile(a, b, lo=floor)
-    assert {fact_id(recent), WID, fact_id(WS_SIG)} <= set(b.durable)
+    assert fact_id(recent) in set(b.durable), "the in-range fact reconciled"
+    assert {WID, fact_id(WS_SIG)} <= set(b.durable), \
+        "its below-floor spine deps arrived via the closure need, though founded at T0"
     assert feed(b, WID, b"g") == [b"recent"]
 
 def test_windowed_out_of_range_content_is_not_reconciled():
@@ -135,7 +135,6 @@ def test_windowed_out_of_range_content_is_not_reconciled():
     recent = message(WID, b"g", b"al", b"recent", T0 + 30 * DAY)
     a = node(WS, WS_SIG, stale, recent)
     floor = T0 + 29 * DAY
-    assert fact_id(stale) not in sync.sync_set(a, floor), "stale is out of range and not a dep"
     b = node()
     reconcile(a, b, lo=floor)
     assert fact_id(stale) not in b.durable, "the window never shipped the stale message"
@@ -143,6 +142,22 @@ def test_windowed_out_of_range_content_is_not_reconciled():
     c = node()                                                     # no window: the stale fact reconciles
     reconcile(a, c, lo=0)
     assert fact_id(stale) in c.durable and feed(c, WID, b"g") == [b"stale", b"recent"]
+
+def test_windowed_bulk_converges_and_withholds():
+    """A window carrying many facts over a shared below-floor spine: every in-range
+    fact reconciles and its spine arrives once via the closure need, while old
+    content nothing recent depends on stays put — order-independently."""
+    stale  = [message(WID, b"g", b"al", b"s%d" % i, T0 + HOUR + i * MIN) for i in range(60)]
+    recent = [message(WID, b"g", b"al", b"r%d" % i, T0 + 30 * DAY + i * MIN) for i in range(40)]
+    floor  = T0 + 29 * DAY
+    for seed in range(3):
+        order = [WS, WS_SIG] + stale + recent; random.Random(seed).shuffle(order)
+        a, b = node(*order), node()
+        reconcile(a, b, lo=floor)
+        assert all(fact_id(m) in b.durable for m in recent), "every in-range fact reconciled"
+        assert not any(fact_id(m) in b.durable for m in stale), "below-floor content withheld"
+        assert {WID, fact_id(WS_SIG)} <= set(b.durable), "the shared spine rode in via the closure need"
+        assert feed(b, WID, b"g") == [b"r%d" % i for i in range(40)]
 
 def test_round_count_one_fact_in_hundred():
     msgs = [message(WID, b"g", b"al", b"m%d" % i, T0 + HOUR + i * MIN) for i in range(100)]
@@ -159,5 +174,6 @@ if __name__ == "__main__":
               test_reply_offers_stand_until_shipped,
               test_windowed_in_range_facts_and_their_deps_reconcile,
               test_windowed_out_of_range_content_is_not_reconciled,
+              test_windowed_bulk_converges_and_withholds,
               test_round_count_one_fact_in_hundred):
         t(); print(f"ok  {t.__name__}")

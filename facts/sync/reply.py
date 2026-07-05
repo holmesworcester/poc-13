@@ -4,8 +4,8 @@ opening a fresh root compare) calls for, offered at the host-watched outbox
 keys until the daemon reports the flush (shipped@SELF), on which it reaps.
 Shipments ride by reference — fact ids, resolved against the durable set at
 send time, so a queued shipment is never stale bytes. Deps are not bundled here:
-the reconciled set is closure-closed (see compare.py), so a shipped leaf's deps
-reconcile as their own leaves. Volatile session state: a reply dies with the
+a below-floor dep rides in only when the receiver's reserved closure need pulls
+it (see compare.py), never a send-time walk. Volatile session state: a reply dies with the
 session and is never resent on restart; the next cadence compare regenerates
 whatever still matters (poc-10: network_outgoing is a TEMP table)."""
 from kernel import (Atom, Exact, OFFER, Out, by, encode, fact, frame,

@@ -32,11 +32,12 @@ BOUND = 64                               # admits per turn; engine drain bound
 OUTCAP = 1 << 20                         # per-address outbox byte cap: overflow parks
 CADENCE = 0.5                            # s between redials / periodic root compares per peer
 QUIET = 0.1                              # s of sync silence that marks a peer's round settled
-RETAIN_FLOOR = 0                         # sync reconciles [RETAIN_FLOOR, inf) of (ts, FactId); closure pulls
-                                         # deps below it. The floor IS the retention horizon — poc-13 has no
-                                         # retention/purge yet (Further Work), so it is 0 (reconcile all).
-                                         # sync.window_lo(node, span) is the armed form once a coherent fact
-                                         # clock + purge land; test_sync proves closure still carries old deps.
+RETAIN_FLOOR = 0                         # sync reconciles [RETAIN_FLOOR, inf) of (ts, FactId); the reserved
+                                         # closure need pulls deps below it. The floor IS the retention horizon
+                                         # — poc-13 has no retention/purge yet (Further Work), so it is 0
+                                         # (reconcile all). A recent frontier-anchored floor is the armed form
+                                         # once a coherent fact clock + purge land; test_sync proves the closure
+                                         # need still carries below-floor deps into a windowed peer.
 BARE, SEALED = 0, 1                      # wire discriminators
 now_ms = lambda: int(time.time() * 1000)
 now_s = lambda: int(time.time())         # fact-ts unit (kernel now()); reply timestamps
