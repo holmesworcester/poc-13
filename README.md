@@ -4,8 +4,8 @@ The atom model played for conciseness: a single-file kernel, a `facts/` tree
 where every fact family is one file with one fixed contract, and a CLI whose
 db is sqlite holding one dumb table of canonical fact bytes (plus a derived
 match index the kernel's Store owns). The design of record
-is `docs/DESIGN.md`; protocol semantics descend from poc-12, where they were
-proven.
+is [`DESIGN.md`](DESIGN.md); protocol semantics descend from poc-12, where they
+were proven.
 
 - `kernel.py` — identity, admission, matching, the turn loop. Nothing else:
   sync, queues, effects, clocks, content, and retention are fact families.
@@ -22,18 +22,21 @@ proven.
   sync family. Peers come from `connection.request` facts (`--peer` authors
   one each); shipments ride `connection.frame` bundles. Backpressure everywhere
   is the frontier's rule: park, never drop.
-- `facts/sync/compare.py` — dependency-aware negentropy: range-fingerprint
-  reconciliation over `(ts, FactId)` leaves, closures so tombstones travel,
-  compare frames that are themselves volatile, unshareable facts.
-- `facts/connection/` — peer sessions as facts: a durable `request`/`close` to
-  dial and retire a peer, a signed volatile `hello` binding a session to an
-  identity key at the gate, a volatile `connection` record, and a `frame` bundle
-  that packs many facts into one wire frame for bulk-catch-up throughput.
+- `facts/sync/compare.py` — dependency-aware reconciliation over the kernel's
+  radix Merkle skeleton: prefix-fingerprint descent over `(ts, FactId)` leaves,
+  reserved closure needs so deps travel on demand, compare frames that are
+  themselves volatile, unshareable facts.
+- `facts/connection/` — peer sessions as facts: a durable sealed `request` to
+  dial a peer and a `close` to retire it, a volatile `connection` record
+  binding the session to a key, per-handshake `ephemeral_secret`s purged for
+  forward secrecy, and a `frame` bundle that packs many facts into one wire
+  frame for bulk-catch-up throughput.
 - `tests/` — skeleton tests (kernel claims), a source-contract test (fact
   file shape), and black-box tests (one process per command, plus real
   daemon subprocesses on real sockets).
 
-Run: `pytest` or `python3 tests/test_<name>.py`. No dependencies.
+Run: `pytest` or `python3 tests/test_<name>.py`. One dependency: PyNaCl
+(`pip install pynacl`).
 
 ```
 $ bin/con.py w.facts auth.workspace.create acme        # prints <wid>
