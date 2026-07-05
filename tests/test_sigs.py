@@ -5,7 +5,7 @@ import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import crypto as e
-from kernel import Node, encode, fact, fact_id, ts_atom
+from kernel import Node, Atom, encode, fact, fact_id, ts_atom
 from facts import ROOT
 from facts.auth import signature as sigmod, user as usermod, workspace as wsmod
 from facts.auth import user_invite as uimod
@@ -68,8 +68,11 @@ def _member(node, name, t):                          # drain the rooting chain; 
 
 def test_tampered_signature_is_inert_at_gate():
     n = Node(ROOT); _, uid, s = _member(n, b"al", 4)
-    bad = bytearray(encode(s)); bad[-1] ^= 1          # flip one byte of the signature
-    assert Node(ROOT).admit(bytes(bad)) is None       # falsy check -> inert miss
+    atoms = [a if a.role != b"sig" else                   # corrupt the signature value itself,
+             Atom(a.kind, a.role, a.scope, a.target,       # not a byte at some position in the encoding
+                  a.value[:-1] + bytes([a.value[-1] ^ 1]), a.effect)
+             for a in s.atoms]
+    assert Node(ROOT).admit(encode(fact(s.type_tag, *atoms))) is None   # bad signature -> inert miss
     assert n.admit(encode(s)) is not None             # the honest one admits
 
 def test_malformed_signature_never_crashes_the_gate():

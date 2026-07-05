@@ -52,27 +52,20 @@ class Atom:
     kind: int; role: bytes; scope: bytes; target: tuple
     value: bytes = None; effect: int = NONE   # effect: needs only
 
-def enc_atom(a):                         # one fixed self-delimiting byte form
-    v = b"\x00" if a.value is None else b"\x01" + frame(a.value)
-    return (bytes([a.kind, a.effect]) + frame(a.role, a.scope)
-            + bytes([a.target[0]]) + frame(*a.target[1:]) + v)
+def enc_atom(a):                         # the atom as one frame sequence: header ‖ role ‖ scope ‖ target-tail ‖ value?
+    return frame(bytes([a.kind, a.effect, a.target[0]]), a.role, a.scope,
+                 *a.target[1:], *(() if a.value is None else (a.value,)))
 
-def dec_atom(b):                         # strict: must re-encode identically
-    kind, eff = b[0], b[1]
-    role, i = _rd(b, 2); scope, i = _rd(b, i)
-    tt = b[i]; i += 1
-    if tt == EXACT: k, i = _rd(b, i); tgt = (EXACT, k)
-    elif tt == SELF_T: tgt = SELF
-    else: lo, i = _rd(b, i); hi, i = _rd(b, i); tgt = (RANGE, lo, hi)
-    val = None
-    if b[i] == 1: val, i = _rd(b, i + 1)
-    else: i += 1
-    a = Atom(kind, role, scope, tgt, val, eff)
-    if i != len(b) or enc_atom(a) != b: raise ValueError("non-canonical atom")
-    if kind not in (NEED, OFFER) or eff > SUPPRESS: raise ValueError("bad tag")
+def dec_atom(b):                         # strict: parse leniently, then the re-encode must match byte-for-byte
+    hdr, role, scope, *rest = unframe(b)
+    kind, eff, tt = hdr                   # header is exactly (kind, effect, target-tag)
+    if kind not in (NEED, OFFER) or eff > SUPPRESS or tt > RANGE: raise ValueError("bad tag")
     if kind == OFFER and eff != NONE: raise ValueError("effect on offer")
     if role[:1] == b"\x00" and (kind, eff) != (NEED, WATCH): raise ValueError("reserved role")
-    return a                             # a leading-NUL role is engine-reserved: WATCH need only, never a gate
+    n = (1, 0, 2)[tt]                     # target parts after the tag: EXACT 1, SELF 0, RANGE 2
+    a = Atom(kind, role, scope, (tt, *rest[:n]), rest[n] if len(rest) > n else None, eff)
+    if enc_atom(a) != b: raise ValueError("non-canonical atom")   # extra/misplaced frames re-encode differently
+    return a
 
 @dataclass(frozen=True)
 class Fact:
