@@ -1,5 +1,29 @@
 # Kernel cleanup findings
 
+## Applied (2026-07-05)
+
+Landed as four commits after this survey (kernel.py 525 → 506 lines; two whole
+parallel structures — the intake overlay and the leafset — deleted):
+
+- **Items 1, 2, 3, 6, 8, 9** — one id-stable refactor commit: intake overlay
+  gone (admit appends straight to `rows`), `leafset` folded into the Skeleton,
+  `_present_now`/`_present_shipped` merged onto `_present`, `decode` via
+  `unframe`, `pull` N+1 folded into a JOIN, window packing via `struct`.
+- **Item 4** — reserved-role invariant enforced at `dec_atom`; the two `_step`
+  gating guards dropped; focused test added.
+- **Item 7** — atom codec rewritten as one frame sequence (flips every fact id,
+  done alone pre-freeze). `test_sigs`' layout-coupled tamper made
+  layout-independent.
+
+Deferred, with reasons: **item 5** is subsumed by item 7. **Item 10** kept —
+the `test_sql_pull_mirrors_covers` mirror documents the coverage relation well.
+**Items 11, 12** deferred to the residency/sync split, which reshapes that
+kernel↔runtime↔cond boundary anyway. **Items 13, 14** are boundary rules
+(sync policy stays out of runtime; frame crypto stays a daemon callback) —
+respected, nothing to change.
+
+---
+
 Read-only survey of `kernel.py` (524 lines), 2026-07-05. Ranked by payoff.
 poc-13 is pre-freeze, so format-changing items are in scope (fact ids may
 change; DESIGN.md's "version-free forever" line applies from freeze, not now).
