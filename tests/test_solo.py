@@ -1,22 +1,23 @@
-"""One node, black box: every CLI semantic in one story. The cold phases run
-one con.py process per verb, so each step also exercises crash-and-demand
-hydration from the file; the daemon phase proves the proxy path answers with
-the same state and that a restart replays it. Collapses the old
-test_blackbox.py (content/outbox/workspace roundtrips) and test_daemon.py's
-proxy-and-restart test."""
+"""One daemon, black box: every solo CLI semantic in one story. con.py only
+proxies now, so a real cond.py owns the db for the whole run and every verb goes
+down the socket; the restart phase proves the daemon flushes durable facts and a
+fresh daemon replays them from the file. Collapses the old test_blackbox.py
+(content/outbox/workspace roundtrips) and test_daemon.py's proxy-and-restart
+test."""
 import os, tempfile
 from harness import con, converge, fleet
 
 def test_solo_story():
-    with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory() as d, fleet() as f:
         db = os.path.join(d, "w.facts")
-        # cold CLI: idempotent authorship, feed across processes
+        f.spawn(db)
+        # idempotent authorship, feed through the proxy
         wid = con(db, "auth.workspace.create", "acme", "1")
         m_hi = con(db, "content.message.send", wid, "general", "al", "hi", "2")
         assert con(db, "content.message.send", wid, "general", "al", "hi", "2") == m_hi, \
             "resending the same fact must return the same id"
         con(db, "content.message.send", wid, "general", "bo", "there", "3")
-        converge(db, "hi\nthere", "content.message.feed", wid, "general", secs=0, phase="cold feed")
+        converge(db, "hi\nthere", "content.message.feed", wid, "general", secs=0, phase="feed")
         # membership + authority: create ran the whole bootstrap DAG with an
         # ephemeral root key (then dropped), enrolling the founder as member+admin
         assert len(con(db, "auth.local_signer_secret.whoami")) == 64, "whoami must print the 32-byte pk hex"
@@ -34,17 +35,16 @@ def test_solo_story():
         # retention roundtrip (outbox sends are volatile: exercised in the daemon pair/trio tests)
         con(db, "content.retention_policy.set", wid, "1440", "9")
         converge(db, "1440", "content.retention_policy.window", wid, secs=0, phase="retention window")
-        # daemon proxy parity, clean shutdown, restart replay
-        with fleet() as f:
-            f.spawn(db)
-            converge(db, "there", "content.message.feed", wid, "general", secs=0, phase="proxy feed parity")
-            m_warm = con(db, "content.message.send", wid, "general", "al", "warm", "12")
-            assert con(db, "content.message.send", wid, "general", "al", "warm", "12") == m_warm, \
-                "resend must be idempotent through the proxy too"
-            f.stop(db)
-            assert not os.path.exists(db + ".sock"), "clean shutdown must remove the socket"
-            f.spawn(db)
-            converge(db, "there\nwarm", "content.message.feed", wid, "general", secs=0, phase="restart replay")
+        # a fresh send lands and is idempotent through the proxy too
+        m_warm = con(db, "content.message.send", wid, "general", "al", "warm", "12")
+        assert con(db, "content.message.send", wid, "general", "al", "warm", "12") == m_warm, \
+            "resend must be idempotent through the proxy too"
+        converge(db, "there\nwarm", "content.message.feed", wid, "general", secs=0, phase="live feed before restart")
+        # clean shutdown removes the socket; a fresh daemon replays the flushed file
+        f.stop(db)
+        assert not os.path.exists(db + ".sock"), "clean shutdown must remove the socket"
+        f.spawn(db)
+        converge(db, "there\nwarm", "content.message.feed", wid, "general", secs=0, phase="restart replay")
 
 if __name__ == "__main__":
     test_solo_story(); print("ok  test_solo_story")
