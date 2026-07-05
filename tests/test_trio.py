@@ -48,9 +48,10 @@ def test_trio_story():
         for db, who in trio:
             converge(db, 5, "content.message.feed", wid, "general", secs=25,
                      phase="probes relayed to " + who)
-        # carol offline: her file freezes at the pre-offline count (cold read)
+        # carol offline: pin her at the pre-offline count while still up (con.py no
+        # longer cold-reads a stopped daemon's file), then freeze her by stopping
+        converge(dbc, 5, "content.message.feed", wid, "general", secs=0, phase="carol pinned pre-offline")
         f.stop(dbc)
-        converge(dbc, 5, "content.message.feed", wid, "general", secs=0, phase="offline carol frozen")
         # the delta she misses: ~1k messages plus a tail marker from each author
         for i in range(DELTA):
             sock(dba, "content.message.send", wid, "general", "al", "d%d" % i, str(1000 + i))

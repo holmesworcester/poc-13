@@ -2,16 +2,14 @@
 """con — the poc-13 CLI.  Usage: con <db> <scope.fact.verb> [args...]
 
 The db is sqlite holding one dumb table — facts(fid, bytes), canonical fact
-bytes and nothing else — plus a derived atom index the kernel Store owns. If
-a daemon owns the db (<db>.sock connects), the verb is proxied to it: one
-framed request out, one framed +ok/-err reply back. Otherwise every
-invocation is a crash-and-demand — open the db cold, run one verb, and let
-hydration pull only what the verb's facts and queries ask about; flush
-whatever new durable facts appeared."""
+bytes and nothing else — plus a derived atom index the kernel Store owns. A
+daemon owns the db exclusively (<db>.sock); con's only job is to proxy the
+verb to it: one framed request out, one framed +ok/-err reply back. With no
+daemon reachable there is nobody to answer, so con refuses and names the
+daemon to start — it never opens the db itself."""
 import os, socket, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from kernel import Node, Store, _rd, frame
-from facts import ROOT
+from kernel import _rd, frame
 
 def load(node, store):                   # full replay: own db passed the gate once
     for fb in store.all(): node.admit(fb, checked=True)
@@ -35,18 +33,8 @@ def proxy(s, path, args):                # the daemon owns the db; just ask it
 def main(db, path, *args):
     s = socket.socket(socket.AF_UNIX)
     try: s.connect(db + ".sock")
-    except OSError: s = None             # no daemon: crash-and-demand below
-    if s: return proxy(s, path, args)
-    store = Store(db)
-    node = Node(ROOT, store)
-    *segs, verb = path.split(".")
-    mod = ROOT.resolve([x.encode() for x in segs])
-    if mod is None or verb not in getattr(mod, "CLI", {}):
-        sys.exit(f"unknown verb: {path}")
-    out = mod.CLI[verb](node, *args)
-    node.run()
-    flush(node, store, set())            # add is idempotent: hydrated ≠ new
-    if out: print(out)
+    except OSError: sys.exit("no daemon for %s (start: cond %s)" % (db, db))
+    return proxy(s, path, args)
 
 if __name__ == "__main__":
     main(*sys.argv[1:])
