@@ -11,7 +11,7 @@ admission gate, and there is ONE out door: `pump` reads the `send`/`ship` offers
 and `deliver` seals iff the route yields a session secret, else sends bare, so the
 handshake response and a sync frame leave the same way.
 
-Transport is ADDRESS-KEYED, like poc-10's network queue: facts name a destination
+Transport is ADDRESS-KEYED: facts name a destination
 (a connection id, or a raw address pre-session) and the daemon connects there;
 nothing binds a fact to a socket. A wire message is 4-byte BE length + 1
 discriminator byte + body: 0x00 a bare handshake fact (the sealed request /
@@ -20,7 +20,7 @@ is self-describing — its connection id selects the session secret — so which
 socket delivered it is irrelevant; the daemon opens it via a frame-family query,
 holding no sync policy. The sync re-descend cadence is a fact (sync.cadence, whose
 wake@clock alarm sets the select timeout via runtime.next_wake); only the
-socket-level request re-dial stays a process-local cadence, as poc-10 keeps it.
+socket-level request re-dial stays a process-local cadence.
 The outbound path tolerates loss up until admit: a frame fires best-effort on
 enqueue and a drop is healed by the next cadence re-descend."""
 import errno, os, select, signal, socket, sys, time
@@ -31,8 +31,7 @@ from facts import ROOT
 from facts.sync import compare as sync, cadence
 from facts.auth import local_signer_secret, endpoint
 from facts.connection import request, connection as conn, frame as frames
-from con import flush, load
-from runtime import cycle, pump, next_wake, BOUND
+from runtime import cycle, outbox, pump, next_wake, load, flush, BOUND
 
 OUTCAP = 1 << 20                         # per-address outbox byte cap: overflow parks
 CADENCE = 0.5                            # s between redials / periodic root compares per peer
@@ -152,7 +151,7 @@ def main(db, *argv):
             # flush reports: a flushed sender that Watches shipped reaps this turn; keep
             # re-presenting until it does, then prune the acted-on. Leftover frontier is next turn.
             cycle(node, inbox, now_ms(), to_ship, BOUND); work |= bool(node.frontier)
-            to_ship &= {o for role in (b"send", b"ship") for o, _, _ in node.watched(role, b"outbox")}
+            to_ship &= {o for o, _, _ in outbox(node)}     # keep only owners still offering send/ship
             # respond seam: the onus is on the requester — its durable request re-dials on
             # a cadence; the responder just answers each ARRIVAL (no cadence of its own), so
             # a peer that lost its volatile session simply re-asks until it re-handshakes.

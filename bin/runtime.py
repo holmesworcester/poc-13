@@ -7,13 +7,25 @@ Watches shipped reaps); `outbox` is the validated send/ship rows a pump ships;
 durable bytes, hands the inners to a `deliver` callback, and returns the owners that
 fired — the next cycle's `shipped`. No sockets and no sync/handshake logic live
 here: the daemon supplies `route` (connection -> addr+secret) and `deliver` (pack,
-seal, enqueue), so this stays testable with plain callbacks."""
+seal, enqueue), so this stays testable with plain callbacks. `load`/`flush` bookend
+the turn with the durable store: `load` replays it on startup, `flush` persists each
+turn's new durable facts (a flushed set keeps the repeat scan cheap)."""
 import os, sys
 BIN = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [BIN, os.path.dirname(BIN)]
-from kernel import _rd
+from kernel import unframe
 
 BOUND = 64                               # admits/steps per turn; the engine drain bound
+
+def load(node, store):                   # full replay: own db passed the gate once
+    for fb in store.all(): node.admit(fb, checked=True)
+    node.run()
+
+def flush(node, store, flushed):         # one transaction per host turn; the flushed
+    if len(flushed) == len(node.durable): return   # set keeps the repeat scan cheap
+    for fid, fb in node.durable.items():
+        if fid not in flushed: store.add(fb, hot=True); flushed.add(fid)
+    store.commit()
 
 def cycle(node, inbox, now_ms, shipped, bound=BOUND):
     """Admit each fact in `inbox`, then drain one bounded turn presenting `shipped`."""
@@ -27,11 +39,6 @@ def outbox(node):                        # the one out door: validated send/ship
 def next_wake(node, now_ms, cap):        # seconds until the earliest wake@clock alarm, capped at `cap`
     ds = [int.from_bytes(a.target[1], "big") for _, _, a in node.watched(b"wake", b"clock")]
     return max(0.0, min(cap, min((d - now_ms for d in ds), default=cap * 1000) / 1000.0))
-
-def _ids(v):                             # a ship offer's value: length-framed fact ids
-    out, i = [], 0
-    while i < len(v): x, i = _rd(v, i); out.append(x)
-    return out
 
 def pump(node, route, deliver, shipped):
     """Ship each not-yet-flushed owner's send/ship rows. route(cid)->(addr,secret)|None;
@@ -48,6 +55,6 @@ def pump(node, route, deliver, shipped):
         inners = []
         for a in sorted(atoms, key=lambda a: (a.role, a.value)):
             if a.role == b"send": inners.append(a.value)          # inline control frame
-            else: inners += [node.durable[x] for x in _ids(a.value) if x in node.durable]  # by-reference bulk
+            else: inners += [node.durable[x] for x in unframe(a.value) if x in node.durable]  # by-reference bulk
         if deliver(cid, addr, secret, inners): fired.add(o)
     return fired

@@ -11,16 +11,6 @@ import os, socket, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from kernel import _rd, frame
 
-def load(node, store):                   # full replay: own db passed the gate once
-    for fb in store.all(): node.admit(fb, checked=True)
-    node.run()
-
-def flush(node, store, flushed):         # one transaction per host turn; the
-    if len(flushed) == len(node.durable): return      # flushed set keeps repeats cheap
-    for fid, fb in node.durable.items():
-        if fid not in flushed: store.add(fb, hot=True); flushed.add(fid)
-    store.commit()
-
 def proxy(s, path, args):                # the daemon owns the db; just ask it
     s.sendall(frame(path.encode(), *(a.encode() for a in args)))
     s.shutdown(socket.SHUT_WR)

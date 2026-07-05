@@ -39,10 +39,9 @@ def test_closure_includes_self_and_spine():
     c = node(WS, WS_SIG, m).closure(mid)
     assert mid in c and WID in c and fact_id(WS_SIG) in c  # self + its Require/suppress spine, transitively
 
-def test_deps_structural_and_compat_alias():
+def test_deps_structural():
     m = message(WID, b"g", b"al", b"hi", T0 + HOUR); n = node(WS, WS_SIG, m)
     assert WID in n.deps(fact_id(m))                       # a direct edge owner (asserted, not validity-gated)
-    assert n.validated_deps(fact_id(m)) == n.deps(fact_id(m))   # the compat alias the daemon path may call
 
 def test_summary_small_range_is_one_id_list_with_closure():
     m = message(WID, b"g", b"al", b"hi", T0 + HOUR); mid = fact_id(m)
@@ -70,7 +69,7 @@ def test_resident_present_and_absent():
     assert SUM_ROLE in RESERVED and RES_ROLE in RESERVED   # reserved: WATCH-only, never a gate
 
 if __name__ == "__main__":
-    for t in (test_closure_includes_self_and_spine, test_deps_structural_and_compat_alias,
+    for t in (test_closure_includes_self_and_spine, test_deps_structural,
               test_summary_small_range_is_one_id_list_with_closure,
               test_summary_large_range_splits_by_equal_count, test_resident_present_and_absent):
         t(); print("ok ", t.__name__)

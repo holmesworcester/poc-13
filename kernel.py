@@ -1,4 +1,4 @@
-"""poc-13 kernel: the atom model engine, one file (design: poc-12 docs/DESIGN.md).
+"""poc-13 kernel: the atom model engine, one file (design: DESIGN.md).
 
 Facts are the unit of identity, atoms the unit of matching, and needs/offers
 are the whole fact language. The kernel owns exactly four things: canonical
@@ -34,6 +34,11 @@ def _rd(b, i):                           # read one frame, strict
     n = int.from_bytes(b[i:i + 4], "little"); j = i + 4 + n
     if j > len(b): raise ValueError("truncated")
     return b[i + 4:j], j
+
+def unframe(b):                          # the dual of frame: every length-framed part in order
+    out, i = [], 0
+    while i < len(b): x, i = _rd(b, i); out.append(x)
+    return out
 
 # --- Canonical data -----------------------------------------------------------
 NEED, OFFER = 0, 1
@@ -115,19 +120,19 @@ class Out:                               # project() -> verdict + all it may emi
 
 by = lambda ctx, role: [r for n, rs in ctx.items() if n.role == role for r in rs]
 
-# The clock is not a fact family: time is the one input the host reads from the
-# OS and hands to the turn (`turn(now)`), which presents it as a single transient
-# offer at the NOW key. A time-waiting fact carries a Watch need over
-# [deadline, ∞); when now reaches the deadline the offer falls in range and wakes
-# it. No tick facts, so nothing accumulates, and durable derived state never
-# depends on now — replay (any now) rebuilds it identically.
+# Time is a turn primitive: the host reads the clock from the OS and hands it to
+# `turn(now)`, which presents it as a single transient offer at the NOW key. A
+# time-waiting fact carries a Watch need over [deadline, ∞); when now reaches the
+# deadline the offer falls in range and wakes it. Time is never stored, so nothing
+# accumulates, and durable derived state never depends on now — replay at any now
+# rebuilds it identically.
 NOW_ROLE, NOW_SCOPE, _NOW = b"now", b"clock", b"\x00now"   # sentinel owner, not a fid
 now_need = lambda deadline_ms: Atom(NEED, NOW_ROLE, NOW_SCOPE,
                                     Range(deadline_ms.to_bytes(8, "big"), b"\xff" * 8), effect=WATCH)
 now_of = lambda ctx: next((int.from_bytes(r[2].target[1], "big") for r in by(ctx, NOW_ROLE)), None)
 
-# The wire's flush report is the other host signal, and like `now` it is not a
-# fact: the daemon presents shipped@Exact(fid) for each host-watched offer it
+# The wire's flush report is the host's other transient signal, presented like
+# `now`: the daemon presents shipped@Exact(fid) for each host-watched offer it
 # flushed, and a sender Watching shipped@SELF wakes and decides its own
 # retirement — Reap (a one-shot vanishes with no receipt) or re-arm a retry.
 # Re-presented until the sender acts, so a bounded drain never drops it.
@@ -135,15 +140,15 @@ SHIPPED_ROLE, SHIPPED_SCOPE, _SHIP = b"shipped", b"wire", b"\x00ship"
 shipped_need = Atom(NEED, SHIPPED_ROLE, SHIPPED_SCOPE, SELF, effect=WATCH)
 
 # Two further needs are answered the same transient way, but from the engine's
-# own indexes rather than the OS clock: a `summary` need over a key PREFIX is
-# answered with my radix-trie label for that range, plus — at a prefix that
-# resolves to a leaf — that leaf and its deduped dependency closure ids; a
-# `resident` need over a fact id is answered iff I already hold it. Both are the
-# seam the decomposed sync families read to descend (summary) and to pull by id
-# (resident); the closure ids are how a below-window dependency travels (poc-12
-# §Sync/§Hydration). Reserved roles: the leading NUL cannot occur in a family
-# role, so no family can author or collide with them; both are always WATCH and
-# never gate. _answer (in _step) injects their rows into ctx exactly as
+# own indexes rather than the OS clock: a `summary` need over a key RANGE is
+# answered with my fingerprint for that range, plus my reconciliation claims (a
+# B-way equal-count split, or the range's id list and its deduped dependency
+# closure ids when the range is small); a `resident` need over a fact id is
+# answered iff I already hold it. Both are the seam the decomposed sync families
+# read to descend (summary) and to pull by id (resident); the closure ids are how
+# a below-window dependency travels. Reserved roles: the leading NUL cannot occur
+# in a family role, so no family can author or collide with them; both are always
+# WATCH and never gate. _answer (in _step) injects their rows into ctx exactly as
 # valid_offers would, so `by(ctx, role)` reads them uniformly.
 SUM_ROLE, RES_ROLE, _SUM, _RES = b"\x00summary", b"\x00resident", b"\x00sum", b"\x00res"
 RESERVED = frozenset((SUM_ROLE, RES_ROLE))
@@ -181,6 +186,7 @@ class Router:
 # Hydration window, riding in a Watch need's value: engine-owned bytes, never
 # read by matching. Gating needs (Require/Suppress) ignore it — their pulls
 # are exhaustive, because a missed offer could change a verdict.
+WINDOW_LEN = 21                          # a window blob is lo(u64) + hi(u64) + budget(u32) + order(u8)
 def window(lo=0, hi=2**64 - 1, budget=2**32 - 1, order=0):
     return (lo.to_bytes(8, "little") + hi.to_bytes(8, "little")
             + budget.to_bytes(4, "little") + bytes([order]))
@@ -202,9 +208,9 @@ class Store:
 
     def __init__(self, path=":memory:"):
         self.db = sqlite3.connect(path)
-        self.db.execute("PRAGMA busy_timeout=5000")  # daemonless cons may briefly overlap
-        self.db.execute("PRAGMA journal_mode=WAL")   # commit-per-turn without an fsync
-        self.db.execute("PRAGMA synchronous=NORMAL") # per turn; still beats the old file append
+        self.db.execute("PRAGMA busy_timeout=5000")  # tolerate brief lock contention
+        self.db.execute("PRAGMA journal_mode=WAL")   # commit per turn without a full fsync
+        self.db.execute("PRAGMA synchronous=NORMAL") # fsync at checkpoints, not every commit
         self.db.executescript("""
           CREATE TABLE IF NOT EXISTS facts(fid BLOB PRIMARY KEY, bytes BLOB) WITHOUT ROWID;
           CREATE TABLE IF NOT EXISTS atoms(fid BLOB, ts BLOB, role BLOB, scope BLOB,
@@ -230,7 +236,7 @@ class Store:
                  AND ((ex AND lo BETWEEN ? AND ?) OR (NOT ex AND ? AND ? BETWEEN lo AND hi))
                  AND fid NOT IN (SELECT fid FROM hot)"""
         args = [need.role, need.scope, nlo, nhi, need.target[0] == EXACT, nlo]
-        if need.effect == WATCH and need.value and len(need.value) == 21:
+        if need.effect == WATCH and need.value and len(need.value) == WINDOW_LEN:
             lo, hi, budget, order = _window(need.value)
             d = "DESC" if order else "ASC"
             sql += f" AND ts BETWEEN ? AND ? ORDER BY ts {d}, fid {d} LIMIT ?"
@@ -297,17 +303,6 @@ class Skeleton:
         bounds = [lo] + [self.keys[i + (p * n) // self.B] for p in range(1, self.B)] + [hi]
         return [(a, b) for a, b in zip(bounds, bounds[1:]) if a != b]
 
-    def _emit_in(self, prefix):              # claims describing my whole subtree at `prefix`
-        nd, d = self._walk(prefix)
-        if nd is None or ("kids" not in nd and not nd["k"].startswith(prefix)):
-            return [("lst", prefix)]         # nothing here: peer ships me its leaves under prefix
-        if "kids" not in nd: return [("lst", prefix), ("has", nd["k"])]
-        p = prefix                           # internal: skip single-child chains, then fan out
-        while len(nd["kids"]) == 1:
-            b = next(iter(nd["kids"])); nd = nd["kids"][b]; p += bytes([b])
-            if "kids" not in nd: return [("lst", p), ("has", nd["k"])]
-        return [("fp", p + bytes([b]), nd["kids"][b]["label"]) for b in sorted(nd["kids"])]
-
 # --- The engine --------------------------------------------------------------------
 class Node:
     """One engine over one root projector. Durable authority = self.durable
@@ -326,10 +321,10 @@ class Node:
         self.memo, self.clean = {}, {}       # id -> verdict ; (role,scope) -> [(owner, ts, atom)]
         self.owned = {}                      # id -> its clean rows, for owner-scoped replacement
         self.slices = {}                     # key -> (owner, ts, value), LWW by (ts, owner)
-        self._deps = {}                      # id -> direct Require/suppress edges (poc-12 validated_deps memo)
+        self._deps = {}                      # id -> direct Require/suppress edge owners: the dependency memo
         self.leafset = {}                    # (ts,FactId) -> content leaf hash: the sync reconciliation set
         self.leaf_xor = 0                    # XOR of every leaf hash: an O(1) whole-set change fingerprint
-        self.tree = Skeleton()               # the same set as a radix Merkle trie: O(depth) reconciliation
+        self.tree = Skeleton()               # the same set as an RBSR skeleton: range fp + count-split descent
         self.frontier = deque()
 
     # Host in — admission gates; a failed gate is inert. checked=True (replay
@@ -365,7 +360,11 @@ class Node:
         return [r for r in self.clean.get((need.role, need.scope), ())
                 if covers(r[2].target, need.target)]
 
-    def deps(self, fid):                 # fid's direct Require/suppress edge owners (poc-12 validated_deps):
+    def _wake(self, offer, skip=None):   # re-enqueue every need this offer covers (never its own owner)
+        for o, _ in self.needs_for(offer):
+            if o != skip and o not in self.frontier: self.frontier.append(o)
+
+    def deps(self, fid):                 # fid's direct Require/suppress edge owners: its dependency spine.
         d = self._deps.get(fid)          # STRUCTURAL/asserted (from offers_for), NOT validity-gated — validity is
         if d is None:                    # decided in _step. Rebuildable derived state, cleared when a fact admits.
             f = self.facts.get(fid)
@@ -373,7 +372,6 @@ class Node:
                 o for n in needs_of(f, fid) if n.effect in (REQUIRE, SUPPRESS)
                 for o, _ in self.offers_for(n))
         return d
-    validated_deps = deps                # compat alias for the old bundled compare; dropped when sync decomposes
 
     def closure(self, fid, out=None):    # transitive deps (requires + suppressors), incl fid — the sync spine.
         out = set() if out is None else out          # a shared visited-set across leaves dedups the union closure
@@ -420,23 +418,20 @@ class Node:
         return [(_RES, 0, Atom(OFFER, b"resident", b"sync", Exact(fid)))] if fid in self.durable else []
 
     # Present the host's clock as one transient offer at the NOW key, waking any
-    # time-waiting need whose deadline it now covers. Not a fact: one clean-twin
-    # slot, replaced each turn, so nothing accumulates.
+    # time-waiting need whose deadline it now covers. One clean-twin slot,
+    # replaced each turn — transient, so nothing accumulates.
     def _present_now(self, now):
         off = Atom(OFFER, NOW_ROLE, NOW_SCOPE, Exact(now.to_bytes(8, "big")))
         self.clean[(NOW_ROLE, NOW_SCOPE)] = [(_NOW, now, off)]
-        for o, _ in self.needs_for(off):
-            if o not in self.frontier: self.frontier.append(o)
+        self._wake(off)
 
     # Present the daemon's flush reports as transient offers at the SHIPPED key,
     # one per host-watched offer that left the socket, waking the senders that
-    # Watch shipped@SELF. Not facts: one clean-twin slot, replaced each turn.
+    # Watch shipped@SELF. One clean-twin slot, replaced each turn — transient.
     def _present_shipped(self, fids):
         rows = [(_SHIP, 0, Atom(OFFER, SHIPPED_ROLE, SHIPPED_SCOPE, Exact(fid))) for fid in fids]
         self.clean[(SHIPPED_ROLE, SHIPPED_SCOPE)] = rows
-        for _, _, off in rows:
-            for o, _ in self.needs_for(off):
-                if o not in self.frontier: self.frontier.append(o)
+        for _, _, off in rows: self._wake(off)
 
     # Engine drain — bounded; overflow parks on the frontier, never drops.
     def turn(self, now=None, shipped=(), bound=64):
@@ -479,7 +474,7 @@ class Node:
         if old == new: return            # no delta: leave the set and its XOR untouched
         if old is not None: self.leaf_xor ^= int.from_bytes(old, "big"); del self.leafset[key]
         if new is not None: self.leaf_xor ^= int.from_bytes(new, "big"); self.leafset[key] = new
-        kb = key[0].to_bytes(8, "big") + fid   # keep the radix trie in step with the set
+        kb = key[0].to_bytes(8, "big") + fid   # keep the RBSR skeleton in step with the set
         self.tree.remove(kb) if new is None else self.tree.insert(kb, new)
 
     def _promote(self, fid, f, out):
@@ -499,9 +494,8 @@ class Node:
                 cur = self.slices.get(k)
                 if not cur or (cur[2], cur[0]) <= (ts_of(f), fid):
                     self.slices[k] = (fid, v, ts_of(f))
-        for _, _, a in set(old) ^ set(new):   # wake fanout on every changed offer
-            for o, _ in self.needs_for(a):
-                if o != fid and o not in self.frontier: self.frontier.append(o)
+        for _, _, a in set(old) ^ set(new):   # wake fanout on every changed offer (never re-wake self)
+            self._wake(a, fid)
         if out.verdict == "Reap":            # terminal: evict the body, leaving no residue
             for r in old:                    # guard: never reap an offer another fact gates on
                 for o, na in self.needs_for(r[2]):
