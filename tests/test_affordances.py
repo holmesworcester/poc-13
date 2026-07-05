@@ -8,7 +8,8 @@ import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import crypto as _c
 from kernel import (Node, SUM_ROLE, RES_ROLE, RESERVED, summary_need,
-                    resident_need, encode, fact_id, _rd)
+                    resident_need, encode, fact_id, _rd, Atom, Exact,
+                    dec_atom, enc_atom, NEED, OFFER, WATCH, REQUIRE)
 from facts import ROOT
 from facts.auth.workspace import workspace
 from facts.auth.invite_accepted import invite_accepted
@@ -68,8 +69,17 @@ def test_resident_present_and_absent():
     assert not n._answer(resident_need(bytes(32)))         # I do not hold this one
     assert SUM_ROLE in RESERVED and RES_ROLE in RESERVED   # reserved: WATCH-only, never a gate
 
+def test_reserved_role_must_be_a_watch_need():
+    ok = Atom(NEED, SUM_ROLE, b"sync", Exact(b"x"), effect=WATCH)
+    assert dec_atom(enc_atom(ok)).effect == WATCH          # a reserved WATCH need round-trips
+    for bad in (Atom(NEED, SUM_ROLE, b"sync", Exact(b"x"), effect=REQUIRE),  # reserved role that would gate
+                Atom(OFFER, RES_ROLE, b"sync", Exact(b"x"))):                # a NUL-role offer
+        try: dec_atom(enc_atom(bad)); assert False, "reserved role accepted"
+        except ValueError: pass
+
 if __name__ == "__main__":
     for t in (test_closure_includes_self_and_spine, test_deps_structural,
               test_summary_small_range_is_one_id_list_with_closure,
-              test_summary_large_range_splits_by_equal_count, test_resident_present_and_absent):
+              test_summary_large_range_splits_by_equal_count, test_resident_present_and_absent,
+              test_reserved_role_must_be_a_watch_need):
         t(); print("ok ", t.__name__)

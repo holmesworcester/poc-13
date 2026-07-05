@@ -71,7 +71,8 @@ def dec_atom(b):                         # strict: must re-encode identically
     if i != len(b) or enc_atom(a) != b: raise ValueError("non-canonical atom")
     if kind not in (NEED, OFFER) or eff > SUPPRESS: raise ValueError("bad tag")
     if kind == OFFER and eff != NONE: raise ValueError("effect on offer")
-    return a
+    if role[:1] == b"\x00" and (kind, eff) != (NEED, WATCH): raise ValueError("reserved role")
+    return a                             # a leading-NUL role is engine-reserved: WATCH need only, never a gate
 
 @dataclass(frozen=True)
 class Fact:
@@ -443,10 +444,11 @@ class Node:
         if self.store:                   # demand: needs pull their cold matches
             for n in ns:                 # resident first; offers never wake cold
                 for b in self.store.pull(n): self.admit(b, checked=True)
-        # Precedence (ratified): Suppress > Require(Park) > Resolve.
-        if any(self.valid_offers(n) for n in ns if n.effect == SUPPRESS and n.role not in RESERVED):
+        # Precedence (ratified): Suppress > Require(Park) > Resolve. Reserved
+        # index needs never reach here — decode pins a NUL role to a WATCH need.
+        if any(self.valid_offers(n) for n in ns if n.effect == SUPPRESS):
             out = Out("Suppressed")
-        elif any(not self.valid_offers(n) for n in ns if n.effect == REQUIRE and n.role not in RESERVED):
+        elif any(not self.valid_offers(n) for n in ns if n.effect == REQUIRE):
             out = Out("Parked")
         else:                            # Context<Validated>; Watch never gates. Reserved index needs are
             ctx = {n: self._answer(n) for n in ns if n.effect in (REQUIRE, WATCH)}   # answered from the engine
