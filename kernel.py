@@ -20,8 +20,7 @@ Stand-in: BLAKE2b-256 for BLAKE3-256 (stdlib has no BLAKE3).
 from bisect import bisect_left
 from collections import deque
 from dataclasses import dataclass, field, replace
-from itertools import chain
-import hashlib, sqlite3, time
+import hashlib, sqlite3, struct, time
 
 H = lambda b: hashlib.blake2b(b, digest_size=32).digest()
 now = lambda: int(time.time())           # host convenience; never engine input
@@ -87,9 +86,7 @@ fact_id = lambda f: H(frame(DOMAIN, f.type_tag, _blob(f)))
 encode = lambda f: frame(f.type_tag) + _blob(f)
 
 def decode(b):                           # strict: reject anything non-canonical
-    tag, i = _rd(b, 0); encs = []
-    while i < len(b):
-        e, i = _rd(b, i); encs.append(e)
+    tag, *encs = unframe(b)              # ValueError on empty/truncated, as the hand-rolled loop did
     if any(x >= y for x, y in zip(encs, encs[1:])): raise ValueError("unsorted/dup")
     return Fact(tag, tuple(dec_atom(e) for e in encs))
 
@@ -186,13 +183,10 @@ class Router:
 # Hydration window, riding in a Watch need's value: engine-owned bytes, never
 # read by matching. Gating needs (Require/Suppress) ignore it — their pulls
 # are exhaustive, because a missed offer could change a verdict.
-WINDOW_LEN = 21                          # a window blob is lo(u64) + hi(u64) + budget(u32) + order(u8)
-def window(lo=0, hi=2**64 - 1, budget=2**32 - 1, order=0):
-    return (lo.to_bytes(8, "little") + hi.to_bytes(8, "little")
-            + budget.to_bytes(4, "little") + bytes([order]))
-
-_window = lambda v: (int.from_bytes(v[:8], "little"), int.from_bytes(v[8:16], "little"),
-                     int.from_bytes(v[16:20], "little"), v[20])
+_WIN = "<QQIB"                           # a window blob: lo(u64) hi(u64) budget(u32) order(u8), little-endian
+WINDOW_LEN = struct.calcsize(_WIN)       # 21
+window = lambda lo=0, hi=2**64 - 1, budget=2**32 - 1, order=0: struct.pack(_WIN, lo, hi, budget, order)
+_window = lambda v: struct.unpack(_WIN, v)
 
 _t8 = lambda t: t.to_bytes(8, "big")     # u64 ts as blob: memcmp order, no i64 overflow
 
@@ -232,7 +226,8 @@ class Store:
 
     def pull(self, need):                # matches not yet delivered, (ts, fid) order,
         nlo, nhi = need.target[1], need.target[-1]     # budget counts primary hits
-        sql = """SELECT DISTINCT ts, fid FROM atoms WHERE role=? AND scope=?
+        sql = """SELECT DISTINCT ts, fid, bytes FROM atoms JOIN facts USING(fid)
+                 WHERE role=? AND scope=?
                  AND ((ex AND lo BETWEEN ? AND ?) OR (NOT ex AND ? AND ? BETWEEN lo AND hi))
                  AND fid NOT IN (SELECT fid FROM hot)"""
         args = [need.role, need.scope, nlo, nhi, need.target[0] == EXACT, nlo]
@@ -243,11 +238,9 @@ class Store:
             args += [_t8(lo), _t8(hi), budget]
         else:
             sql += " ORDER BY ts, fid"   # gating: exhaustive, a miss could flip a verdict
-        out = []
-        for _, fid in self.db.execute(sql, args).fetchall():
-            self.db.execute("INSERT OR IGNORE INTO hot VALUES(?)", (fid,))
-            out.append(self.db.execute("SELECT bytes FROM facts WHERE fid=?", (fid,)).fetchone()[0])
-        return out
+        rows = self.db.execute(sql, args).fetchall()
+        self.db.executemany("INSERT OR IGNORE INTO hot VALUES(?)", [(r[1],) for r in rows])
+        return [r[2] for r in rows]
 
     def all(self):                       # full replay: the degenerate demand
         return [r[0] for r in self.db.execute("SELECT bytes FROM facts")]
@@ -314,17 +307,16 @@ class Node:
     def __init__(self, root, store=None):
         self.root, self.store = root, store
         self.facts, self.durable = {}, {}    # id -> Fact ; id -> canonical bytes
-        # Match indexes bucketed by (kind, role, scope) / (role, scope): a need
-        # only ever matches offers sharing its role+scope, so one bucket is the
-        # whole candidate set — no linear scan of the asserted set per query.
-        self.rows, self.intake = {}, {}      # (kind,role,scope) -> [(owner, atom)]: asserted + overlay
+        # Match index bucketed by (kind, role, scope): a need only ever matches
+        # offers sharing its role+scope, so one bucket is the whole candidate
+        # set — no linear scan of the asserted set per query.
+        self.rows = {}                       # (kind,role,scope) -> [(owner, atom)]: the asserted match index
         self.memo, self.clean = {}, {}       # id -> verdict ; (role,scope) -> [(owner, ts, atom)]
         self.owned = {}                      # id -> its clean rows, for owner-scoped replacement
         self.slices = {}                     # key -> (owner, ts, value), LWW by (ts, owner)
         self._deps = {}                      # id -> direct Require/suppress edge owners: the dependency memo
-        self.leafset = {}                    # (ts,FactId) -> content leaf hash: the sync reconciliation set
         self.leaf_xor = 0                    # XOR of every leaf hash: an O(1) whole-set change fingerprint
-        self.tree = Skeleton()               # the same set as an RBSR skeleton: range fp + count-split descent
+        self.tree = Skeleton()               # the reconciliation set: key -> leaf hash, range fp + count-split
         self.frontier = deque()
 
     # Host in — admission gates; a failed gate is inert. checked=True (replay
@@ -341,20 +333,18 @@ class Node:
         self.facts[fid], self.memo[fid] = f, "Unknown"
         if durable: self.durable[fid] = b    # atomic flush
         for a in f.atoms:
-            self.intake.setdefault((a.kind, a.role, a.scope), []).append((fid, mat(a, fid)))
+            self.rows.setdefault((a.kind, a.role, a.scope), []).append((fid, mat(a, fid)))
         self.frontier.append(fid)
         self._deps.clear()                   # the graph changed: rebuild the validated-edge memo lazily
         return fid
 
-    # Both match directions run over index ∪ intake; the overlay is transparent.
     # A shared role+scope is the whole precondition for a match, so it keys the
     # bucket; covers() decides the rest over just those candidates.
-    def _bucket(self, k): return chain(self.rows.get(k, ()), self.intake.get(k, ()))
     def offers_for(self, need):          # asserted, dirty: discovery only
-        return [(o, a) for o, a in self._bucket((OFFER, need.role, need.scope))
+        return [(o, a) for o, a in self.rows.get((OFFER, need.role, need.scope), ())
                 if covers(a.target, need.target)]
     def needs_for(self, offer):          # wake fanout direction
-        return [(o, a) for o, a in self._bucket((NEED, offer.role, offer.scope))
+        return [(o, a) for o, a in self.rows.get((NEED, offer.role, offer.scope), ())
                 if covers(offer.target, a.target)]
     def valid_offers(self, need):        # the clean twin: the only justifier
         return [r for r in self.clean.get((need.role, need.scope), ())
@@ -417,21 +407,22 @@ class Node:
         fid = n.target[1]
         return [(_RES, 0, Atom(OFFER, b"resident", b"sync", Exact(fid)))] if fid in self.durable else []
 
-    # Present the host's clock as one transient offer at the NOW key, waking any
-    # time-waiting need whose deadline it now covers. One clean-twin slot,
-    # replaced each turn — transient, so nothing accumulates.
+    # A host signal is one transient clean-twin slot, replaced each turn (nothing
+    # accumulates), waking every need the offers now cover: `now` is the OS clock
+    # at the NOW key, waking a time-waiting need whose deadline it reaches;
+    # `shipped` is the daemon's flush reports at the SHIPPED key, waking a sender
+    # Watching shipped@SELF to decide its own retirement.
+    def _present(self, role, scope, rows):
+        self.clean[(role, scope)] = rows
+        for _, _, off in rows: self._wake(off)
+
     def _present_now(self, now):
         off = Atom(OFFER, NOW_ROLE, NOW_SCOPE, Exact(now.to_bytes(8, "big")))
-        self.clean[(NOW_ROLE, NOW_SCOPE)] = [(_NOW, now, off)]
-        self._wake(off)
+        self._present(NOW_ROLE, NOW_SCOPE, [(_NOW, now, off)])
 
-    # Present the daemon's flush reports as transient offers at the SHIPPED key,
-    # one per host-watched offer that left the socket, waking the senders that
-    # Watch shipped@SELF. One clean-twin slot, replaced each turn — transient.
     def _present_shipped(self, fids):
-        rows = [(_SHIP, 0, Atom(OFFER, SHIPPED_ROLE, SHIPPED_SCOPE, Exact(fid))) for fid in fids]
-        self.clean[(SHIPPED_ROLE, SHIPPED_SCOPE)] = rows
-        for _, _, off in rows: self._wake(off)
+        self._present(SHIPPED_ROLE, SHIPPED_SCOPE,
+                      [(_SHIP, 0, Atom(OFFER, SHIPPED_ROLE, SHIPPED_SCOPE, Exact(fid))) for fid in fids])
 
     # Engine drain — bounded; overflow parks on the frontier, never drops.
     def turn(self, now=None, shipped=(), bound=64):
@@ -439,8 +430,6 @@ class Node:
         self._present_shipped(shipped)               # and the wire hands back its flush reports
         for _ in range(min(bound, len(self.frontier))):
             self._step(self.frontier.popleft())
-        for k, v in self.intake.items(): self.rows.setdefault(k, []).extend(v)
-        self.intake = {}                             # flush: moves rows, changes no result
 
     def run(self):
         for _ in range(100_000):
@@ -464,17 +453,16 @@ class Node:
             out = self.root.project(f, ctx, dict(self.slices)) or Out("Parked")
         self._promote(fid, f, out)
 
-    def _leafset_update(self, fid, f):   # keep the (ts,FactId)->hash set + XOR fingerprint current.
-        key = (ts_of(f), fid)            # a leaf iff durable, shareable, and Valid|Suppressed (tombstones stay)
+    def _leafset_update(self, fid, f):   # keep the skeleton's leaf-hash set + the XOR fingerprint current.
+        ts = ts_of(f); kb = _kb(ts, fid)   # a leaf iff durable, shareable, and Valid|Suppressed (tombstones stay)
         new = None
         if (fid in self.durable and self.memo.get(fid) in ("Valid", "Suppressed")
                 and self.root.extract(f)[1]):
-            new = H(frame(fid, key[0].to_bytes(8, "little"), H(self.durable[fid])))
-        old = self.leafset.get(key)
+            new = H(frame(fid, ts.to_bytes(8, "little"), H(self.durable[fid])))
+        old = self.tree.h.get(kb)        # the skeleton IS the set; its leaf hash is the prior value
         if old == new: return            # no delta: leave the set and its XOR untouched
-        if old is not None: self.leaf_xor ^= int.from_bytes(old, "big"); del self.leafset[key]
-        if new is not None: self.leaf_xor ^= int.from_bytes(new, "big"); self.leafset[key] = new
-        kb = key[0].to_bytes(8, "big") + fid   # keep the RBSR skeleton in step with the set
+        if old is not None: self.leaf_xor ^= int.from_bytes(old, "big")
+        if new is not None: self.leaf_xor ^= int.from_bytes(new, "big")
         self.tree.remove(kb) if new is None else self.tree.insert(kb, new)
 
     def _promote(self, fid, f, out):
@@ -501,10 +489,9 @@ class Node:
                 for o, na in self.needs_for(r[2]):
                     assert o == fid or na.effect not in (REQUIRE, SUPPRESS), "reap of a gating offer"
             self.facts.pop(fid, None); self.memo.pop(fid, None)
-            for a in f.atoms:                # drop its asserted/overlay rows so nothing re-wakes it
+            for a in f.atoms:                # drop its asserted rows so nothing re-wakes it
                 k, m = (a.kind, a.role, a.scope), mat(a, fid)
-                for tbl in (self.rows, self.intake):
-                    if (bk := tbl.get(k)) and (fid, m) in bk: bk.remove((fid, m))
+                if (bk := self.rows.get(k)) and (fid, m) in bk: bk.remove((fid, m))
 
     # Host out — the host drains validated offers at keys it watches, performs
     # external work, and admits facts reporting what happened. It never writes.

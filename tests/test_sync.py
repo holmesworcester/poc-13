@@ -65,7 +65,7 @@ def reconcile(a, b, maxr=6000, lo=0):
     for n in (a, b): n.turn(shipped=tuple(fired[n])); n.run()   # final flush so the last couriers reap
     return frames[0]
 
-def leaves(n): return set(n.leafset)
+def leaves(n): return {(int.from_bytes(k[:8], "big"), k[8:]) for k in n.tree.keys}  # (ts, fid) per leaf
 
 # --- The algorithm, in-process --------------------------------------------------
 def test_equal_sets_zero_ships():
