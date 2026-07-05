@@ -3,21 +3,26 @@
 
 Owns the db exclusively and amortizes replay: load once, then serve verbs over a
 unix socket at <db>.sock (con.py proxies to it) and reconcile facts with peers
-over TCP. One single-threaded select loop; each iteration is the three-phase host
-turn (HOST IN admit / ENGINE DRAIN / HOST OUT perform). The daemon decides no
-authority — every inbound fact enters through the admission gate, the pump reads
-only validated offers, and time is the OS clock handed to the turn.
+over TCP. One single-threaded select loop over the runtime seam (bin/runtime.py):
+each iteration collects an inbox, `cycle`s it (HOST IN admit + ENGINE DRAIN one
+turn), then `pump`s the validated outbox offers (HOST OUT). The daemon decides no
+authority and authors nothing outbound — every inbound fact enters through the
+admission gate, and there is ONE out door: `pump` reads the `send`/`ship` offers
+and `deliver` seals iff the route yields a session secret, else sends bare, so the
+handshake response and a sync frame leave the same way.
 
 Transport is ADDRESS-KEYED, like poc-10's network queue: facts name a destination
-ADDRESS and the daemon connects there; nothing binds a fact to a socket. A wire
-message is 4-byte BE length + 1 discriminator byte + body: 0x00 a bare handshake
-fact (the sealed request / connection, which carry their own X25519 envelopes),
-0x01 a sealed frame (frame(version, connection_id, nonce, ciphertext)). A frame
-is self-describing — its connection id selects the session secret from the fact
-store — so which socket delivered it is irrelevant. Retries (redial an unanswered
-request, re-open a sync compare) are process-local cadence, as poc-10 keeps
-them. Backpressure parks, never drops: bounded admits per turn, per-address
-outbox cap, select-gated writes."""
+(a connection id, or a raw address pre-session) and the daemon connects there;
+nothing binds a fact to a socket. A wire message is 4-byte BE length + 1
+discriminator byte + body: 0x00 a bare handshake fact (the sealed request /
+connection, which carry their own X25519 envelopes), 0x01 a sealed frame. A frame
+is self-describing — its connection id selects the session secret — so which
+socket delivered it is irrelevant; the daemon opens it via a frame-family query,
+holding no sync policy. The sync re-descend cadence is a fact (sync.cadence, whose
+wake@clock alarm sets the select timeout via runtime.next_wake); only the
+socket-level request re-dial stays a process-local cadence, as poc-10 keeps it.
+The outbound path tolerates loss up until admit: a frame fires best-effort on
+enqueue and a drop is healed by the next cadence re-descend."""
 import errno, os, select, signal, socket, sys, time
 BIN = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [BIN, os.path.dirname(BIN)]

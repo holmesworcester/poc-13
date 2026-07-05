@@ -136,19 +136,24 @@ facts and queries ask about. Full replay is the degenerate case.
 When one process at a time stops being enough, `bin/cond.py` is a daemon
 that owns the db exclusively and amortizes replay: it loads once, then runs
 the three-phase host turn in a single-threaded select loop — client verbs
-over a unix socket at `<db>.sock`, peers over TCP. The wire's only payload
-is length-framed canonical fact bytes, under a one-byte discriminator: a
-bare handshake fact before a session key exists, a sealed frame after —
-mostly `connection.frame` bundles. What to ship is decided by the sync
-family (see Sync), driven from host out. Backpressure is the frontier's
-rule at the socket — overflow parks, never drops: bounded admits per turn,
-a bounded per-address outbox whose overflow stays unsent until a later
-turn, and select-gated non-blocking writes so a slow or absent peer never
-blocks the loop. The daemon full-loads, deliberately: sync's fingerprints
-must cover the whole durable set, so a partially-hydrated node must never
-initiate compare rounds; a demand-driven daemon waits on the sync family
-knowing how to ship from the store rather than from residency. Still
-deferrable: compaction (purge is `DELETE`; `VACUUM` reclaims the bytes).
+over a unix socket at `<db>.sock`, peers over TCP. Its reusable core is
+`bin/runtime.py`, a socket-free seam: `cycle` admits an inbox of fact bytes
+and drains one bounded turn presenting the wire's flush reports; `pump`
+groups the validated `send`/`ship` offers by owner, resolves each route and
+its ship-ids, and hands the frames to a `deliver` callback. The wire's only
+payload is length-framed canonical fact bytes under a one-byte discriminator:
+a bare handshake fact before a session key exists, a sealed `connection.frame`
+after. There is **one out door** — the daemon reads the outbox offers and
+`deliver` seals iff the route yields a session secret, else sends bare — so
+the handshake response and a sync frame leave the same way. It authors nothing
+outbound. The outbound path tolerates loss up until the receiver admits: a
+frame is fired best-effort when handed to the socket buffer (bounded admits
+per turn, select-gated non-blocking writes), and a dropped or truncated frame
+is healed by the next cadence re-descend, never mis-admitted (it fails
+`aead_open`). The daemon full-loads, deliberately: RBSR fingerprints must
+cover the whole durable set, so a partially-hydrated node must never open a
+round; shipping reads from the store, not from residency. Still deferrable:
+compaction (purge is `DELETE`; `VACUUM` reclaims the bytes).
 
 ## Turn Semantics
 
@@ -246,9 +251,9 @@ one matcher for hot and cold — is open.
 
 **In flight: hydration is becoming just a fact.** The direction is to retire
 the kernel's step-time pull and route all demand through `store.hydrate`
-facts (Part II) — the reserved closure need (a parked fact's still-unmet
-Require keys, which sync already advertises to peers) is the same idea
-pointed at the store. This section describes the hook as built today.
+facts (Part II) — the reserved `summary@range`/`resident@id` needs sync
+already answers from the engine's indexes are the same idea pointed at the
+store. This section describes the hook as built today.
 
 ## Routing: Projectors Are the Routers
 
@@ -270,15 +275,16 @@ offer at the NOW key; a time-waiting fact carries a Watch need over
 in range and wakes it. There are no tick facts, so nothing accumulates;
 matching stays ordinary (a plain Range need over a plain offer); and durable
 derived state never depends on `now`, so replay with any `now` rebuilds it
-identically. The daemon just reads the clock each loop and passes it to the
-turn — it never sleeps *for* a deadline, because a time-need that comes due
-while it is blocked in `select()` is simply serviced on the next wake.
+identically. The daemon reads the clock each loop and passes it to the turn;
+a `wake@clock` alarm — a cadence fact's next boundary — sets its `select`
+timeout via `runtime.next_wake`, so it sleeps exactly until the earliest
+deadline and services a due time-need on that wake.
 
 The flush report is the clock's sibling — the other host signal handed to the
 turn. Just as the host hands in `now`, it hands back the ids of the
 host-watched offers it flushed to the socket: `kernel.turn(now, shipped)`
 presents each as a transient offer at the SHIPPED key, waking any sender that
-Watches `shipped@SELF`. A one-shot sender (an `outbox.send`, a `sync.reply`)
+Watches `shipped@SELF`. A one-shot sender (an `outbox.send`, a `sync.need`)
 answers by returning the terminal **Reap** verdict, on which the engine evicts
 the fact whole — offers, memo, and match rows — so a busy session leaves no
 drained-send residue. Reap is the only verdict that *removes* a fact (Suppress
@@ -293,26 +299,24 @@ facts have reached the db, but a durable fact must *survive*, so it is written
 by `con.flush` and never reaped.
 
 Recurrence is central but the onus is on one party: everything that must
-happen repeats, and the repeating side drives it. The initiator's durable
-request re-dials on a process-local cadence; the responder answers each
-arrival with no cadence of its own. Sync compares repeat the same way. This
-operational repetition — which peer to talk to, and how often — stays
-process-local in the daemon (as poc-10 keeps it); the facts carry only policy
-(what to offer, when to stop), never socket schedules.
+happen repeats, and the repeating side drives it. Sync's periodic re-descend
+is a `sync.cadence` fact (see Sync) — its `wake@clock` alarm drives the
+schedule, not a daemon marker. The initiator's durable request still re-dials
+on a process-local cadence, and the responder answers each arrival with no
+cadence of its own; that socket-level redial backoff — which address to dial,
+and how often — stays process-local in the daemon (as poc-10 keeps it), the
+one operational repetition the facts do not carry.
 
 ## The CLI
 
-`bin/con.py`: `con <db> <scope.fact.verb> [args...]`. Resolve the verb path
-through the root router, open the db cold, run the verb, flush new durable
-facts in one transaction. Every invocation is a crash-and-demand — hydration
-pulls only what the verb's facts and queries ask about — so black-box tests
-exercise the demand-driven replay story constantly and for free.
-
-If a daemon owns the db, con proxies instead of replaying: `<db>.sock`
+`bin/con.py`: `con <db> <scope.fact.verb> [args...]`. It is a thin client:
+resolve nothing locally, just proxy to the daemon that owns the db. `<db>.sock`
 accepts, the verb path and args go out as one framed request, one framed
 `+ok`/`-err` reply comes back (new durable facts hit the file before the
-reply). Otherwise the crash-and-replay path is unchanged — the daemon only
-amortizes it.
+reply). With no daemon reachable it exits with a message — the daemon is the
+only writer, which keeps the single-owner story simple (the earlier cold
+crash-and-demand path is gone). The daemon still hydrates on demand internally:
+a verb's facts and queries pull only what they ask about from the store.
 
 # Part II — Fact Families
 
@@ -416,8 +420,8 @@ a real refusal, distinct from parking on a not-yet-arrived signature.
 
 Because each fact Requires its blesser, any fact's authority chain is
 reachable through its Require edges, and a peer re-derives every verdict
-itself — sync ships a dep only when the receiver's closure need asks for it
-(see Sync).
+itself — a dep rides sync as one of its dependents' closure ids, advertised
+in the range's id list and pulled by id (see Sync).
 
 ## Bulk Demand: store.hydrate
 
@@ -435,70 +439,76 @@ Sync reconciles facts, never atoms. The protocol lives in `facts/sync/`; the
 kernel's contribution is engine state, not policy: every validity delta
 incrementally maintains the leaf set — `(ts, FactId) -> leaf hash` over every
 fact that is durable, shareable, and `Valid|Suppressed` — plus an XOR
-whole-set fingerprint and `kernel.Skeleton`, a canonical radix Merkle trie
-over the 40-byte `ts‖FactId` key. Suppressed facts stay in the leaf set,
-which is how deletions reconcile. A leaf hash is `H(FactId ‖ ts ‖ H(bytes))`.
+whole-set fingerprint (idle change-detection) and `kernel.Skeleton`, the
+reconciler over the sorted 40-byte `ts‖FactId` keys. Suppressed facts stay in
+the leaf set, which is how deletions reconcile. A leaf hash is
+`H(FactId ‖ ts ‖ H(bytes))` — bytes-only, so the skeleton stores only
+`key -> leaf hash`, never fact bodies. That body-independence is the seam for a
+later residency/sync split (sync the full leaf set, hydrate a recent subset).
 
-The skeleton's shape is a pure function of the leaf set: leaves sit at the
-shortest unique-prefix depth, a removal that leaves one leaf collapses the
-chain back, and a node's label is its leaf hash — or `H(child labels ‖
-count)` — so two peers agree on a prefix's label exactly when they share the
-leaves under it. Insert and remove touch one root→leaf path; a prefix's
-fingerprint is a one-node read, never a scan.
+**Range-based set reconciliation (RBSR; Meyer, rbsr_nonhomomorphic).** A key
+range `[lo, hi)` is summarised by a NON-homomorphic fingerprint — `H` of its
+leaf hashes in key order (‖ count), collision-resistant unlike an XOR/sum
+fold. A range whose fingerprints differ is split into `B` sub-ranges of EQUAL
+COUNT (an order-statistic split), NOT by key prefix — so fanout is the chosen
+`B` and depth is `log_B(n)` regardless of key distribution. (A radix/Merkle
+trie splits by tree shape, whose fanout is whatever key bytes happen to occur;
+that is the sub-optimal partitioning the paper rejects, and it made a fresh
+peer cost thousands of frames.) A range of `<= T` leaves is listed by id
+rather than fingerprinted, which ends the recursion — and lets an empty peer
+pull, since it lists its (empty) set and the peer then advertises what to send.
 
-Reconciliation descends by prefix. A compare frame's claims are `fp` (a
-prefix's label — matching labels end that branch; a mismatch answers with
-the prefix's children), `lst` + `has` (a resolved prefix's complete leaf
-list — the set diff ships what the peer lacks and `want`s what I lack),
-`want` (an explicit leaf pull by id), and `need` (the reserved closure need,
-below). A one-fact difference over any set settles in a logarithmic number
-of compare frames, with no leaf rescanning.
+**One bundled family, `compare`.** A compare fact carries a set of claims over
+ranges — `fp` (a range fingerprint) or `ids` (a small range's complete id
+list) — and, paired with each claim, a reserved `summary@range` need. Whoever
+admits the compare has the engine answer each summary with its OWN view of that
+range: its fingerprint, and its claims (the `B`-way split, or the id list
+expanded to the range's dependency closure). The projector reconciles each
+claim — a matching fingerprint prunes; a mismatch emits my claims for the range
+(descend by count, or my id list if small on my side); a peer id list naming
+ids I lack emits one batched `need` that ships them. Bundled: one compare is a
+whole message, so matched sub-ranges prune wholesale and a one-fact diff over
+100k facts settles in ~9 messages. No rounds and no daemon reaction: every
+response is a projector offer at the connection's outbox key, and a dropped
+frame just re-descends next cadence.
 
-Windowing is a clip on the descent: `lo_ts` sets a floor key `lo_ts‖0…`, and
-the skeleton emits only the tree at or above it — a prefix wholly inside the
-window is one label, a straddling one is descended, a wholly-below one is
-skipped, so a bounded recent window reconciles in O(depth). The floor IS the
-retention horizon; poc-13 has no retention/purge yet (Further Work), so the
-daemon passes 0 and the window is the whole durable-shareable set.
+Windowing is the domain's lower bound: the root claim covers `[floor, HI)`, and
+every sub-range is within it. The floor IS the retention horizon; poc-13 has no
+retention/purge yet (Further Work), so the daemon passes `b""` and the domain
+is the whole durable-shareable set.
 
-Dependency-awareness is demand-driven, never a send-time walk. Below-floor
-deps do not ride the window: a shipped fact whose Require dep is missing
-lands Parked, and the engine advertises each still-unmet Require key as a
-reserved closure `need` that every outgoing compare frame piggybacks; the
-peer answers a `need` by shipping the facts whose validated offers match.
-Deeper chains pull over rounds — each arrival parks, advertises, wakes as
-its deps land. The receiver admits every shipped fact through the normal
-gate (the replay-only `checked` path is never used for peer input).
+Dependency-awareness rides the id lists, never a send-time walk. When a small
+range is listed, the engine expands each leaf to its transitive dependency
+closure (the Require/suppressor ancestry over the `deps` memo, `closure()` in
+the kernel) — so a below-floor dependency is advertised as one of the range's
+closure ids and pulled by id like any other, convergent because a peer only
+ever requests ids the other side vouched for. The receiver admits every shipped
+fact through the normal gate (the replay-only `checked` path is never used for
+peer input).
 
-The split of labor is crisp. The pure reads — `leaves`, `closure` (the
-Require/suppressor ancestry over the engine's validated-deps memo), and
-shareability — are QUERIES, authority for nothing; `initiate`, `answer_of`,
-and `respond` are COMMANDS the daemon drives. The send side is the
-`sync.reply` family: a reply fact carries the answer's compare frame as a
-`send` offer and its shipments as by-reference `ship` offers (fact ids,
-resolved against the durable set at send time) at the host-watched outbox
-keys; when the daemon reports the flush (`shipped@SELF`, see The Clock) the
-reply reaps, leaving no residue — even sync's own frames ride the one send
-path. A compare frame crossing the wire IS a fact — facts stay the wire's
-only payload. Compare and reply facts extract to `(False, False)`: volatile,
-so replay never resurrects session state, and unshareable, so they are
-excluded from the very leaves they reconcile.
+The split of labor: `compare`/`need` are volatile families (extract
+`(False, False)`), so replay never resurrects session state and they are
+excluded from the very leaves they reconcile; a frame crossing the wire IS a
+fact, so facts stay the wire's only payload. `need` ships requested facts by
+reference (fact ids resolved against the durable set at send time) at the
+host-watched outbox keys, reaping on the flush (`shipped@SELF`, see The Clock).
+The affordance seam — `summary@range` and `resident@id` — is answered by the
+engine from its indexes, injected into ctx exactly as validated offers are, so
+the families read a peer's view uniformly.
 
-Sync is one root compare per peer at a time (poc-12's `maintain_sync` +
-settle discipline). The daemon opens a fresh root compare to a live peer
-only once the previous round with it has settled — the peer has been quiet
-of sync frames for `QUIET` — and then only when the periodic cadence is due
-or its change fingerprint has moved since it last synced that peer: the
-fingerprint covers the leaf XOR and the unmet-dep set, so both a fresh fact
-and a newly-parked dep reopen a round. In-flight frames keep the peer's
-settle marker fresh, so overlapping rounds — from either direction — never
-start; the fingerprint-change trigger gives fresh facts sub-cadence latency
-with no separate live-tail path. A lost frame needs no retry bookkeeping;
-the next cadence compare repairs it. All of this — cadence, settle, and
-last-synced fingerprint — is process-local daemon state: operational
-repetition, never durable time wakes or projector state. Every peer link is
-full-duplex, and reconciliation is what a fact authored on one side rides to
-reach the others.
+**Cadence is a fact, not a daemon marker.** A `sync.cadence` fact per
+(connection, tier) Watches the clock and opens a fresh round once per period
+(emitting my domain claims), a slice remembering the last boundary so it fires
+at most once per period though the clock re-wakes it every turn. It offers a
+`wake@clock` alarm at its next boundary, which `runtime.next_wake` reads for the
+select timeout — an idle daemon sleeps until the next boundary, not on a fixed
+poll. A `closed@conn` Suppress tears it down; being volatile, a reconnect
+re-arms it (tiers — narrow+frequent … wide+rare — are several of these,
+staggered). The daemon keeps only an immediate open on its own leaf-set change
+(sub-cadence latency for a fresh fact) and the connection's re-dial cadence; no
+settle marker, no round bookkeeping. A lost frame needs no retry state; the next
+cadence compare repairs it. Every peer link is full-duplex, and reconciliation
+is what a fact authored on one side rides to reach the others.
 
 ## Connections
 
