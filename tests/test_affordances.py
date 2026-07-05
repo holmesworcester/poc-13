@@ -1,19 +1,14 @@
-"""Engine-answered reserved needs (kernel §2.2-2.4): the `summary@prefix` and
-`resident@id` affordances the decomposed sync families read from ctx, plus the
-`deps`/`closure` edge memo they descend. Unit-level — we call the engine's answer
-methods directly on a populated Node, the way _step injects them into ctx. Mirrors
-test_sync's auth spine so admitted facts actually become shareable Merkle leaves.
-
-The shape being pinned: a summary of the ROOT of a multi-leaf tree hands back
-child fingerprints (descent handles), not closures; closure ids ride the summary
-at the prefix that RESOLVES to a leaf. That is how a leaf and its below-window
-dependency spine travel together, by id, deduped."""
+"""Engine-answered reserved needs (kernel §2.2-2.4), RBSR shape: a `summary@range`
+need is answered with my fingerprint for the range plus my reconciliation claims —
+either a B-way equal-count split (a fingerprint per part) or, for a small range, the
+range's id list expanded to its dependency closure. `resident@id` answers whether I
+hold a fact. Plus the `deps`/`closure` edge memo the summary walks. Unit-level: we
+call the engine's answer methods directly, the way _step injects them into ctx."""
 import os, sys
-from collections import Counter
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import crypto as _c
 from kernel import (Node, SUM_ROLE, RES_ROLE, RESERVED, summary_need,
-                    resident_need, encode, fact_id, ts_of)
+                    resident_need, encode, fact_id, _rd)
 from facts import ROOT
 from facts.auth.workspace import workspace
 from facts.auth.invite_accepted import invite_accepted
@@ -23,6 +18,7 @@ from facts.content.message import message
 RK, RPK = _c.ed25519_keygen(bytes(32))
 HOUR, MIN = 3_600, 60
 T0 = 1_700_000_000
+HI = b"\xff" * 41                                          # above every 40-byte key: the half-open domain end
 WS = workspace(b"acme", RPK, T0); WID = fact_id(WS)
 WS_SIG = signature(b"auth", RPK, WID, _c.ed25519_sign(RK, WID), T0)
 ACCEPT = invite_accepted(WID, bytes(32), bytes(32), b"", RPK, T0)
@@ -32,8 +28,11 @@ def node(*fs):
     for f in fs: n.admit(encode(f))
     n.run(); return n
 
-def _has_fids(rows):                                       # fids advertised by a summary answer (40-byte key)
-    return {a.target[1][8:] for _, _, a in rows if a.role == b"has"}
+def _unframe(v):
+    out, i = [], 0
+    while i < len(v): x, i = _rd(v, i); out.append(x)
+    return out
+def _role(rows, r): return [a for _, _, a in rows if a.role == r]
 
 def test_closure_includes_self_and_spine():
     m = message(WID, b"g", b"al", b"hi", T0 + HOUR); mid = fact_id(m)
@@ -43,25 +42,26 @@ def test_closure_includes_self_and_spine():
 def test_deps_structural_and_compat_alias():
     m = message(WID, b"g", b"al", b"hi", T0 + HOUR); n = node(WS, WS_SIG, m)
     assert WID in n.deps(fact_id(m))                       # a direct edge owner (asserted, not validity-gated)
-    assert n.validated_deps(fact_id(m)) == n.deps(fact_id(m))   # the compat alias the old compare still calls
+    assert n.validated_deps(fact_id(m)) == n.deps(fact_id(m))   # the compat alias the daemon path may call
 
-def test_summary_at_root_hands_back_descent_handles():
-    msgs = [message(WID, b"g", b"al", b"m%d" % i, T0 + HOUR + i * MIN) for i in range(5)]
-    rows = node(WS, WS_SIG, *msgs)._answer(summary_need(b""))
-    fps = [a.target[1] for _, _, a in rows if a.role == b"fp"]
-    assert b"" in fps                                      # my label for the whole range
-    assert any(t for t in fps)                             # child fingerprints to descend into
-    assert not _has_fids(rows)                             # closures ride at resolved leaves, never the root
-
-def test_summary_at_a_leaf_advertises_its_closure():
+def test_summary_small_range_is_one_id_list_with_closure():
     m = message(WID, b"g", b"al", b"hi", T0 + HOUR); mid = fact_id(m)
-    n = node(WS, WS_SIG, m)
-    key = ts_of(m).to_bytes(8, "big") + mid               # the leaf's 40-byte radix key
-    rows = n._answer(summary_need(key))
-    adv = _has_fids(rows)
-    assert {mid, WID, fact_id(WS_SIG)} <= adv             # the leaf and its below-window spine, by id
-    cnt = Counter(a.target[1][8:] for _, _, a in rows if a.role == b"has")
-    assert cnt[WID] == 1 and cnt[fact_id(WS_SIG)] == 1     # deduped: each closure id advertised exactly once
+    n = node(WS, WS_SIG, m)                                # 3 shareable leaves (<= T): the whole domain is "small"
+    rows = n._answer(summary_need(b"", HI))
+    assert len(_role(rows, b"fp")) == 1                    # one prune-check fingerprint for the range
+    cids = _role(rows, b"cids")
+    assert len(cids) == 1 and not _role(rows, b"cfp")      # small: a single id list, no split
+    ids = set(_unframe(cids[0].value))
+    assert {mid, WID, fact_id(WS_SIG)} <= ids              # leaves + below-window spine, by id, deduped
+
+def test_summary_large_range_splits_by_equal_count():
+    msgs = [message(WID, b"g", b"al", b"m%d" % i, T0 + HOUR + i * MIN) for i in range(40)]
+    n = node(WS, WS_SIG, *msgs)                            # > T leaves: the domain must be split, not listed
+    rows = n._answer(summary_need(b"", HI))
+    claims = _role(rows, b"cfp") + _role(rows, b"cids")
+    assert 1 < len(claims) <= 16                           # a B-way (<= 16) partition, not one giant blob
+    rngs = sorted((a.target[1], a.target[2]) for a in claims)
+    assert all(rngs[i][1] <= rngs[i + 1][0] for i in range(len(rngs) - 1))   # disjoint, ordered: a partition
 
 def test_resident_present_and_absent():
     m = message(WID, b"g", b"al", b"hi", T0 + HOUR); n = node(WS, WS_SIG, m)
@@ -71,6 +71,6 @@ def test_resident_present_and_absent():
 
 if __name__ == "__main__":
     for t in (test_closure_includes_self_and_spine, test_deps_structural_and_compat_alias,
-              test_summary_at_root_hands_back_descent_handles,
-              test_summary_at_a_leaf_advertises_its_closure, test_resident_present_and_absent):
+              test_summary_small_range_is_one_id_list_with_closure,
+              test_summary_large_range_splits_by_equal_count, test_resident_present_and_absent):
         t(); print("ok ", t.__name__)

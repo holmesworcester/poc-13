@@ -17,6 +17,7 @@ facts resident (hydration), so a session pays for what it asks about.
 
 Stand-in: BLAKE2b-256 for BLAKE3-256 (stdlib has no BLAKE3).
 """
+from bisect import bisect_left
 from collections import deque
 from dataclasses import dataclass, field, replace
 from itertools import chain
@@ -147,8 +148,8 @@ shipped_need = Atom(NEED, SHIPPED_ROLE, SHIPPED_SCOPE, SELF, effect=WATCH)
 SUM_ROLE, RES_ROLE, _SUM, _RES = b"\x00summary", b"\x00resident", b"\x00sum", b"\x00res"
 RESERVED = frozenset((SUM_ROLE, RES_ROLE))
 CLOSURE_CAP = 4096                       # generous safety valve on unique closure ids per summary answer
-_kb = lambda ts, fid: ts.to_bytes(8, "big") + fid            # (ts, fid) -> the 40-byte radix key
-summary_need = lambda pfx, floor=b"": Atom(NEED, SUM_ROLE, b"sync", Exact(pfx), floor, effect=WATCH)
+_kb = lambda ts, fid: ts.to_bytes(8, "big") + fid            # (ts, fid) -> the 40-byte reconciliation key
+summary_need = lambda lo, hi, floor=b"": Atom(NEED, SUM_ROLE, b"sync", Range(lo, hi), floor, effect=WATCH)
 resident_need = lambda fid: Atom(NEED, RES_ROLE, b"sync", Exact(fid), effect=WATCH)
 
 class Router:
@@ -253,88 +254,48 @@ class Store:
 
 # --- The sync skeleton -------------------------------------------------------------
 class Skeleton:
-    """poc-12's reconciliation skeleton: a canonical radix trie over the 40-byte
-    (ts‖FactId) leaf key. A node holds a single leaf, or branches on the key byte
-    at its depth; leaves live at the shortest depth that makes them unique, and a
-    removal that leaves one leaf collapses the chain back — so the shape is a pure
-    function of the leaf SET, not the insert order. A node's label = its leaf hash
-    (leaf) or H(child labels in byte order ‖ count) (internal); being determined
-    by the leaves under a prefix, two peers agree on a prefix's label exactly when
-    they share the leaves there. Reconciliation reads labels and never scans:
-    insert/remove touch one root→leaf path (O(depth)), a range fingerprint folds
-    O(depth) node labels, and a mismatch descends by prefix."""
-    EMPTY = H((0).to_bytes(6, "little"))     # the label of a prefix with no leaves
+    """Range-based set reconciliation (Meyer, rbsr_nonhomomorphic) over the sorted
+    40-byte (ts‖FactId) leaf keys. A range [lo,hi) is summarised by a NON-homomorphic
+    fingerprint — H of its leaf hashes in key order (‖ count) — so it is collision-
+    resistant, unlike an XOR/sum fold. A mismatched range is split into B parts of
+    EQUAL COUNT (by order-statistic), NOT by key prefix: fanout is the chosen B and
+    depth is log_B(n) regardless of key distribution (a radix trie's fanout is
+    whatever bytes happen to occur — the thing the paper rejects). A range of <= T
+    leaves is listed by id instead of fingerprinted, which ends the recursion and
+    lets an empty peer pull by receiving the (possibly empty) list.
 
-    def __init__(self): self.root = None
-    def _relabel(self, nd):
-        nd["count"] = sum(c["count"] for c in nd["kids"].values())
-        nd["label"] = H(b"".join(nd["kids"][b]["label"] for b in sorted(nd["kids"]))
-                        + nd["count"].to_bytes(6, "little"))
+    Body-independent: it stores only key -> leaf hash, never fact bytes. So the full
+    set can stay resident as the sync index while fact bodies are hydrated on demand
+    — the residency/sync split (docs/daemon-transition.md 'Further work'). A sorted
+    list keeps this readable; production would swap in a count-augmented balanced
+    tree (treap) for O(log n) insert and range fingerprints (see that note)."""
+    B, T = 16, 8                             # branching factor ; list-not-fingerprint threshold
+    EMPTY = H((0).to_bytes(6, "little"))     # the fingerprint of an empty range
 
-    def insert(self, kb, h): self.root = self._ins(self.root, kb, h, 0)
-    def _ins(self, nd, kb, h, d):
-        if nd is None: return {"k": kb, "h": h, "label": h, "count": 1}
-        if "kids" not in nd:                 # a leaf: replace, or split into a branch
-            if nd["k"] == kb: return {"k": kb, "h": h, "label": h, "count": 1}
-            nd = {"kids": {nd["k"][d]: nd}, "label": None, "count": 0}
-        b = kb[d]
-        nd["kids"][b] = self._ins(nd["kids"].get(b), kb, h, d + 1)
-        self._relabel(nd); return nd
+    def __init__(self): self.keys = []; self.h = {}          # sorted 40-byte keys ; key -> leaf hash
 
-    def remove(self, kb): self.root = self._rm(self.root, kb, 0)
-    def _rm(self, nd, kb, d):
-        if nd is None: return None
-        if "kids" not in nd: return None if nd["k"] == kb else nd
-        b = kb[d]
-        if b in nd["kids"]:
-            nd["kids"][b] = self._rm(nd["kids"][b], kb, d + 1)
-            if nd["kids"][b] is None: del nd["kids"][b]
-        if not nd["kids"]: return None
-        if sum(c["count"] for c in nd["kids"].values()) == 1:   # collapse chain to its lone leaf
-            while "kids" in nd: nd = next(iter(nd["kids"].values()))
-            return nd
-        self._relabel(nd); return nd
+    def insert(self, kb, h):
+        i = bisect_left(self.keys, kb)
+        if i == len(self.keys) or self.keys[i] != kb: self.keys.insert(i, kb)
+        self.h[kb] = h
+    def remove(self, kb):
+        i = bisect_left(self.keys, kb)
+        if i < len(self.keys) and self.keys[i] == kb: del self.keys[i]
+        self.h.pop(kb, None)
 
-    def _walk(self, prefix):                 # deepest node on the prefix path, with bytes consumed
-        nd, d = self.root, 0
-        while nd is not None and "kids" in nd and d < len(prefix):
-            nd = nd["kids"].get(prefix[d]); d += 1
-        return nd, d
-    def _collect(self, nd, out):
-        if "kids" in nd:
-            for c in nd["kids"].values(): self._collect(c, out)
-        else: out[nd["k"]] = nd["h"]
-
-    def label(self, prefix):                 # fingerprint of my leaves under `prefix`
-        nd, d = self._walk(prefix)
-        if nd is None: return self.EMPTY
-        if "kids" not in nd: return nd["label"] if nd["k"].startswith(prefix) else self.EMPTY
-        return nd["label"] if d == len(prefix) else self.EMPTY
-
-    def gather(self, prefix):                # {kb: leaf hash} of my leaves under `prefix`
-        nd, d = self._walk(prefix)
-        if nd is None: return {}
-        if "kids" not in nd:
-            return {nd["k"]: nd["h"]} if nd["k"].startswith(prefix) else {}
-        out = {}; self._collect(nd, out); return out
-
-    def emit(self, prefix, floor=b""):       # claims describing my in-window subtree at `prefix`
-        lo = prefix + b"\x00" * (40 - len(prefix))   # a prefix wholly in the window is summarised by
-        hi = prefix + b"\xff" * (40 - len(prefix))   # one node label; a straddling one is descended;
-        if hi < floor: return []                     # a wholly-below one contributes nothing.
-        if lo < floor:                               # straddle: split into children, clip each
-            nd, d = self._walk(prefix)
-            if nd is None: return []
-            if "kids" not in nd:                     # a lone leaf on the boundary path: a point claim
-                return ([("lst", nd["k"]), ("has", nd["k"])]
-                        if nd["k"].startswith(prefix) and nd["k"] >= floor else [])
-            out = []
-            for b in sorted(nd["kids"]):
-                cp = prefix + bytes([b]); clo = cp + b"\x00" * (40 - len(cp))
-                out += ([("fp", cp, nd["kids"][b]["label"])] if clo >= floor
-                        else self.emit(cp, floor))    # child wholly-in -> one fp; else recurse
-            return out
-        return self._emit_in(prefix)                 # wholly inside the window
+    def _span(self, lo, hi):                 # [i, j): the index range of keys in [lo, hi)
+        return bisect_left(self.keys, lo), bisect_left(self.keys, hi)
+    def count(self, lo, hi): i, j = self._span(lo, hi); return j - i
+    def small(self, lo, hi): return self.count(lo, hi) <= self.T
+    def fp(self, lo, hi):                    # non-homomorphic fingerprint of [lo, hi)
+        i, j = self._span(lo, hi)
+        return H(b"".join(self.h[k] for k in self.keys[i:j]) + (j - i).to_bytes(4, "little"))
+    def fids(self, lo, hi):                  # the 32-byte FactIds of my leaves in [lo, hi)
+        i, j = self._span(lo, hi); return [k[8:] for k in self.keys[i:j]]
+    def parts(self, lo, hi):                 # split [lo, hi) into <= B sub-ranges of equal COUNT
+        i, j = self._span(lo, hi); n = j - i
+        bounds = [lo] + [self.keys[i + (p * n) // self.B] for p in range(1, self.B)] + [hi]
+        return [(a, b) for a, b in zip(bounds, bounds[1:]) if a != b]
 
     def _emit_in(self, prefix):              # claims describing my whole subtree at `prefix`
         nd, d = self._walk(prefix)
@@ -439,19 +400,19 @@ class Node:
         if n.role == RES_ROLE: return self._resident_rows(n)
         return self.valid_offers(n)
 
-    def _summary_rows(self, n):          # my label for a prefix + (at a resolved leaf) its deduped closure ids
-        pfx = n.target[1]; floor = n.value or b""
-        R = lambda a: (_SUM, 0, a)
-        rows = [R(Atom(OFFER, b"fp", b"sync", Exact(pfx), self.tree.label(pfx)))]  # my fingerprint for the range
-        seen = set()                     # ONE visited-set across the emitted leaves -> deduped union closure
-        for c in self.tree.emit(pfx, floor):
-            if c[0] == "fp":
-                rows.append(R(Atom(OFFER, b"fp", b"sync", Exact(c[1]), c[2])))     # a child fingerprint to descend
-            elif c[0] == "has":
-                self.closure(c[1][8:], seen)         # a resolved leaf: accumulate it + its spine (spine added once)
-        for d in list(seen)[:CLOSURE_CAP]:           # leaves + their deduped deps, each advertised by id once
-            if d in self.facts:
-                rows.append(R(Atom(OFFER, b"has", b"sync", Exact(_kb(ts_of(self.facts[d]), d)))))
+    def _summary_rows(self, n):          # RBSR: my fingerprint for the range + my reconciliation claims for it.
+        lo, hi = n.target[1], n.target[2]; floor = n.value or b""
+        if floor > lo: lo = floor        # clip the range to the window floor
+        t = self.tree; R = lambda a: (_SUM, 0, a)
+        rows = [R(Atom(OFFER, b"fp", b"sync", Range(lo, hi), t.fp(lo, hi)))]   # the prune-check fingerprint
+        def claim(a, b):                 # my claim for [a,b): ids (+ their closures) if small, else a fingerprint
+            if t.small(a, b):
+                seen = set()
+                for f in t.fids(a, b): self.closure(f, seen)        # leaves + their deduped dependency closures
+                blob = frame(*[d for d in list(seen)[:CLOSURE_CAP] if d in self.facts])
+                return R(Atom(OFFER, b"cids", b"sync", Range(a, b), blob))
+            return R(Atom(OFFER, b"cfp", b"sync", Range(a, b), t.fp(a, b)))
+        rows += [claim(lo, hi)] if t.small(lo, hi) else [claim(a, b) for a, b in t.parts(lo, hi)]
         return rows
 
     def _resident_rows(self, n):         # answered iff I already hold the fact — the have/need pull seam

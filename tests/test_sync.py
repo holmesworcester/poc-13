@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import crypto as _c
 from kernel import Node, decode, encode, fact_id, _rd
 from facts import ROOT
-from facts.sync import compare as cmp, have as _have, need as _need
+from facts.sync import compare as cmp, need as _need
 from facts.auth.workspace import workspace
 from facts.auth.invite_accepted import invite_accepted
 from facts.auth.signature import signature
@@ -25,7 +25,7 @@ WS = workspace(b"acme", RPK, T0); WID = fact_id(WS)
 WS_SIG = signature(b"auth", RPK, WID, _c.ed25519_sign(RK, WID), T0)
 _ACCEPT = invite_accepted(WID, bytes(32), bytes(32), b"", RPK, T0)
 CID = b"\x11" * 32                                      # a fixed connection id for the in-process pair
-SYNC = {cmp.TAG, _have.TAG, _need.TAG}
+SYNC = {cmp.TAG, _need.TAG}
 
 def node(*facts):
     n = Node(ROOT)
