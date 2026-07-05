@@ -1,13 +1,17 @@
-"""Sync family tests: the negentropy algorithm in-process (two Nodes reconciled
-over a simulated single-type wire) plus one black-box bidirectional daemon run.
-Mirrors the poc-12 proof quantifiers — shuffled admission orders converge to
-bit-identical derived state; a one-fact diff ships exactly that fact's closure."""
+"""Decomposed dependency-aware sync: the negentropy descent expressed as three
+tiny volatile families — compare (one-range fingerprint descent), have (advertise
+a held id), need (pull one id) — reconciled over a manual daemon loop that mirrors
+bin/cond.py's cycle (admit inbox + present shipped) and pump (deliver send/ship
+offers, fire owners). No round state: convergence is fingerprint agreement,
+re-checked on leaf change. Mirrors the poc-12 quantifiers — shuffled admission
+orders converge to bit-identical derived state; a one-fact diff ships exactly that
+fact's closure; a below-window dependency rides in as a closure id, pulled by id."""
 import os, random, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import crypto as _c
-from kernel import Node, decode, encode, fact_id
+from kernel import Node, decode, encode, fact_id, _rd
 from facts import ROOT
-from facts.sync import compare as sync
+from facts.sync import compare as cmp, have as _have, need as _need
 from facts.auth.workspace import workspace
 from facts.auth.invite_accepted import invite_accepted
 from facts.auth.signature import signature
@@ -15,62 +19,74 @@ from facts.content.message import message, feed
 from facts.content.message_deletion import deletion
 
 RK, RPK = _c.ed25519_keygen(bytes(32))                  # a fixed workspace root key
-DAY, HOUR, MIN = 86_400, 3_600, 60                      # fact ts are epoch seconds — a sensible clock
+DAY, HOUR, MIN = 86_400, 3_600, 60
 T0 = 1_700_000_000                                      # 2023-11-14: the workspace is founded here
-WS = workspace(b"acme", RPK, T0); WID = fact_id(WS)     # the auth spine lives at the founding time
-# WS is Valid only with a root self-signature (shareable) AND local acceptance
-# (local-only). The signature rides sync in the closure; acceptance is authored
-# out-of-band on each node (the invite link), exactly as the real model requires.
+WS = workspace(b"acme", RPK, T0); WID = fact_id(WS)
 WS_SIG = signature(b"auth", RPK, WID, _c.ed25519_sign(RK, WID), T0)
 _ACCEPT = invite_accepted(WID, bytes(32), bytes(32), b"", RPK, T0)
+CID = b"\x11" * 32                                      # a fixed connection id for the in-process pair
+SYNC = {cmp.TAG, _have.TAG, _need.TAG}
 
 def node(*facts):
     n = Node(ROOT)
-    n.admit(encode(_ACCEPT))                          # this node accepted the workspace
+    n.admit(encode(_ACCEPT))                          # this node locally accepted the workspace
     for f in facts: n.admit(encode(f))
     n.run(); return n
 
-def reconcile(a, b, maxr=1000, lo=0):
-    """Drive a full round-trip between two nodes over the daemon's exact wire
-    discipline: each side opens a round on leaf-fp change, each answers an
-    admitted peer compare, both over the same recent-window horizon `lo`.
-    Returns the count of compare frames that crossed."""
-    pend, fp, rounds = {a: [], b: []}, {a: None, b: None}, 0
-    def half(me, other):
-        nonlocal rounds
-        mf = sync.myfp(me, lo); opened = fp[me] != mf
-        if opened: pend[other] += sync.initiate(me, None, lo); fp[me] = mf
-        box, pend[me] = pend[me], []
-        for fb in box:
-            new = fact_id(decode(fb)) not in me.facts
-            fid = me.admit(fb)
-            if fid and new and me.facts[fid].type_tag == sync.TAG:
-                rounds += 1; pend[other] += sync.respond(me, fid, lo)
+def _ids(v):                                          # a ship offer's value: length-framed fact ids
+    out, i = [], 0
+    while i < len(v): x, i = _rd(v, i); out.append(x)
+    return out
+
+def reconcile(a, b, maxr=6000, lo=0):
+    """Drive two nodes to convergence over the decomposed wire. Each side opens a
+    bare-root compare when its leaf set changes (the daemon's leaf_xor guard),
+    every send/ship offer is delivered to the peer and its owner fired, and fired
+    owners are presented as `shipped` next cycle so the volatile couriers reap.
+    Returns the count of wire frames (compares + haves + needs) that crossed."""
+    floor = b"" if lo <= 0 else lo.to_bytes(8, "big") + b"\x00" * 32
+    inbox = {a: [], b: []}; xor = {a: None, b: None}; fired = {a: [], b: []}; frames = [0]
+    def step(me, other):
+        me.turn(shipped=tuple(fired[me])); fired[me] = []       # present last cycle's flush reports
+        got, inbox[me] = inbox[me], []
+        for blob in got: me.admit(blob)                         # admit what the peer sent
         me.run()
-        return opened or bool(box)
-    while (half(a, b) | half(b, a)) and rounds < maxr: pass
-    return rounds
+        if me.leaf_xor != xor[me]:                              # leaf set moved: open a fresh round
+            cmp.open_round(me, CID, floor); xor[me] = me.leaf_xor; me.run()
+        did = False                                             # pump: deliver offers, fire owners
+        for role in (b"send", b"ship"):
+            for o, _, at in me.watched(role, b"outbox"):
+                if role == b"send": inbox[other].append(at.value); frames[0] += 1
+                else: inbox[other] += [me.durable[x] for x in _ids(at.value) if x in me.durable]
+                if o not in fired[me]: fired[me].append(o)
+                did = True
+        return did or bool(got)
+    while (step(a, b) | step(b, a)) and frames[0] < maxr: pass
+    for n in (a, b): n.turn(shipped=tuple(fired[n])); n.run()   # final flush so the last couriers reap
+    return frames[0]
+
+def leaves(n): return set(n.leafset)
 
 # --- The algorithm, in-process --------------------------------------------------
 def test_equal_sets_zero_ships():
     a, b = node(WS, WS_SIG), node(WS, WS_SIG)
     before = set(b.durable)
     reconcile(a, b)
-    assert set(b.durable) == before               # nothing to send
-    assert sync.leaves(a) == sync.leaves(b)
+    assert set(b.durable) == before                # nothing to send
+    assert leaves(a) == leaves(b)
 
-def test_one_fact_diff_ships_exactly_that_closure():
+def test_one_fact_diff_ships_exactly_that_fact():
     msgs = [message(WID, b"g", b"al", b"m%d" % i, T0 + HOUR + i * MIN) for i in range(20)]
-    a, b = node(WS, WS_SIG, *msgs), node(WS, WS_SIG, *msgs[:-1])   # b lacks the last message; deps present
+    a, b = node(WS, WS_SIG, *msgs), node(WS, WS_SIG, *msgs[:-1])   # b lacks the last; its deps present
     before, missing = set(b.durable), fact_id(msgs[-1])
     reconcile(a, b)
     assert set(b.durable) - before == {missing}    # exactly the one missing leaf
-    assert sync.leaves(a) == sync.leaves(b)
+    assert leaves(a) == leaves(b)
 
 def test_fresh_peer_gets_dependency_closure():
     a, b = node(WS, WS_SIG, message(WID, b"g", b"al", b"hi", T0 + HOUR)), node()
     reconcile(a, b)
-    assert set(a.durable) == set(b.durable)        # workspace rode along as the message's closure
+    assert set(a.durable) == set(b.durable)        # workspace + signature rode along as the message's closure
     assert feed(b, WID, b"g") == [b"hi"]
 
 def test_tombstone_travels_and_suppresses():
@@ -79,16 +95,17 @@ def test_tombstone_travels_and_suppresses():
     reconcile(a, b)
     assert b.memo[fact_id(m)] == "Suppressed"      # arrived already dead: no resurrection window
     assert feed(b, WID, b"g") == []
-    assert sync.leaves(a) == sync.leaves(b)         # the suppressed leaf still reconciles
+    assert leaves(a) == leaves(b)                  # the suppressed leaf still reconciles
 
 def test_sync_facts_volatile_and_excluded():
     a, b = node(WS, WS_SIG, message(WID, b"g", b"al", b"hi", T0 + HOUR)), node()
     reconcile(a, b)
     for n in (a, b):
-        syn = [fid for fid, f in n.facts.items() if f.type_tag == sync.TAG]
-        assert syn                                  # compare frames were admitted as facts
-        assert not any(fid in n.durable for fid in syn)                   # volatile: never flushed
-        assert not any(fid in {k[1] for k in sync.leaves(n)} for fid in syn)  # excluded from leaves
+        syn = [fid for fid, f in n.facts.items() if f.type_tag in SYNC]
+        assert not any(fid in n.durable for fid in syn)                    # volatile: never flushed
+        assert not any(fid in {k[1] for k in leaves(n)} for fid in syn)    # excluded from the leaves
+    assert not any(f.type_tag in SYNC for f in a.facts.values())           # pruned/shipped couriers reaped
+    assert not any(f.type_tag in SYNC for f in b.facts.values())           # no volatile residue after quiescence
 
 def test_shuffled_orders_converge():
     msgs = [message(WID, b"g", b"al", b"m%d" % i, T0 + HOUR + i * MIN) for i in range(10)]
@@ -99,81 +116,80 @@ def test_shuffled_orders_converge():
         a, b = node(*order), node()
         reconcile(a, b)
         outs.append(b.derived())
-    assert outs[0] == outs[1] == outs[2]            # order-independent derived state
+    assert outs[0] == outs[1] == outs[2]           # order-independent derived state
 
-def test_reply_offers_stand_until_shipped():
-    from facts.sync import reply as sreply
-    a, b = node(WS, WS_SIG, message(WID, b"g", b"al", b"hi", T0 + HOUR)), node(WS, WS_SIG)
-    cid = b.admit(sync.initiate(a)[0]); b.run()      # a's root compare lands on b
-    rid = sreply.answer(b, cid, b"dest", 5); b.run() # b's answer: offers at the outbox keys
-    rows = [a for _, _, a in b.watched(b"send", b"outbox") + b.watched(b"ship", b"outbox")]
-    assert rows and all(r.target == (0, b"dest") for r in rows)   # staged toward the peer
-    b.turn(shipped=[rid]); b.run()                   # daemon reports the flush: the reply reaps
-    assert not b.watched(b"send", b"outbox") and not b.watched(b"ship", b"outbox")
-    assert rid not in b.facts                         # reaped: no residue
+def test_reconcile_is_idempotent():
+    msgs = [message(WID, b"g", b"al", b"m%d" % i, T0 + HOUR + i * MIN) for i in range(10)]
+    a, b = node(WS, WS_SIG, *msgs), node(WS, WS_SIG, *msgs)
+    reconcile(a, b)
+    before = set(b.durable)
+    reconcile(a, b)                                # re-run on a converged pair
+    assert set(b.durable) == before                # content-addressed: no rounds, no double-ship
 
 def test_windowed_in_range_facts_and_their_deps_reconcile():
     """In range: a fact at/after the window floor reconciles, and its below-floor
-    dependencies ride in via the reserved closure need — the auth spine, founded a
-    month before the floor, travels because `recent` parks Requiring it and the
-    engine advertises the unmet dep, which the peer answers (poc-12 dep-aware sync)."""
-    recent = message(WID, b"g", b"al", b"recent", T0 + 30 * DAY)   # a month after founding
+    dependencies ride in as closure ids attached to its leaf — the auth spine,
+    founded a month before the floor, is advertised as `have`s at the recent leaf
+    and pulled by id (poc-12 dep-aware sync), in one descent, not a dep-chain of
+    round trips."""
+    recent = message(WID, b"g", b"al", b"recent", T0 + 30 * DAY)
     a = node(WS, WS_SIG, recent)
-    floor = T0 + 29 * DAY                                          # window ~ the last day
-    b = node()                                                    # b locally accepted the workspace
-    reconcile(a, b, lo=floor)
+    b = node()
+    reconcile(a, b, lo=T0 + 29 * DAY)                             # window ~ the last day
     assert fact_id(recent) in set(b.durable), "the in-range fact reconciled"
     assert {WID, fact_id(WS_SIG)} <= set(b.durable), \
-        "its below-floor spine deps arrived via the closure need, though founded at T0"
+        "its below-floor spine deps arrived as closure ids, though founded at T0"
     assert feed(b, WID, b"g") == [b"recent"]
 
 def test_windowed_out_of_range_content_is_not_reconciled():
     """Out of range: old content that nothing recent depends on sits below the
-    floor and does not travel — the point of the window. A floor of 0 (no window)
-    syncs the very same fact, proving the window is what withholds it."""
-    stale  = message(WID, b"g", b"al", b"stale",  T0 + HOUR)       # old, no recent dependent
+    floor and does not travel. A floor of 0 (no window) syncs the very same fact,
+    proving the window is what withholds it."""
+    stale  = message(WID, b"g", b"al", b"stale",  T0 + HOUR)
     recent = message(WID, b"g", b"al", b"recent", T0 + 30 * DAY)
     a = node(WS, WS_SIG, stale, recent)
-    floor = T0 + 29 * DAY
     b = node()
-    reconcile(a, b, lo=floor)
+    reconcile(a, b, lo=T0 + 29 * DAY)
     assert fact_id(stale) not in b.durable, "the window never shipped the stale message"
     assert feed(b, WID, b"g") == [b"recent"]
-    c = node()                                                     # no window: the stale fact reconciles
+    c = node()                                                   # no window: the stale fact reconciles
     reconcile(a, c, lo=0)
     assert fact_id(stale) in c.durable and feed(c, WID, b"g") == [b"stale", b"recent"]
 
 def test_windowed_bulk_converges_and_withholds():
     """A window carrying many facts over a shared below-floor spine: every in-range
-    fact reconciles and its spine arrives once via the closure need, while old
-    content nothing recent depends on stays put — order-independently."""
+    fact reconciles and its spine arrives via closure ids, while old content nothing
+    recent depends on stays put — order-independently."""
     stale  = [message(WID, b"g", b"al", b"s%d" % i, T0 + HOUR + i * MIN) for i in range(60)]
     recent = [message(WID, b"g", b"al", b"r%d" % i, T0 + 30 * DAY + i * MIN) for i in range(40)]
-    floor  = T0 + 29 * DAY
     for seed in range(3):
         order = [WS, WS_SIG] + stale + recent; random.Random(seed).shuffle(order)
         a, b = node(*order), node()
-        reconcile(a, b, lo=floor)
+        reconcile(a, b, lo=T0 + 29 * DAY)
         assert all(fact_id(m) in b.durable for m in recent), "every in-range fact reconciled"
         assert not any(fact_id(m) in b.durable for m in stale), "below-floor content withheld"
-        assert {WID, fact_id(WS_SIG)} <= set(b.durable), "the shared spine rode in via the closure need"
+        assert {WID, fact_id(WS_SIG)} <= set(b.durable), "the shared spine rode in via closure ids"
         assert feed(b, WID, b"g") == [b"r%d" % i for i in range(40)]
 
-def test_round_count_one_fact_in_hundred():
+def test_frame_count_is_sublinear():
+    """A one-fact diff over a 100-fact set costs O(depth) wire frames, not O(n): the
+    descent prunes matching prefixes by fingerprint and only the differing path (plus
+    the one leaf's have/need/ship) crosses the wire — nowhere near a push-all scan."""
     msgs = [message(WID, b"g", b"al", b"m%d" % i, T0 + HOUR + i * MIN) for i in range(100)]
     a, b = node(WS, WS_SIG, *msgs), node(WS, WS_SIG, *msgs[:-1])
-    rounds = reconcile(a, b)
-    assert sync.leaves(a) == sync.leaves(b)
-    assert rounds <= 30                             # ~logarithmic split, not a push-all scan
-    print("\ncompare frames, 1-fact diff over 100-fact set:", rounds)
+    before = set(b.durable)
+    frames = reconcile(a, b)
+    assert leaves(a) == leaves(b)
+    assert set(b.durable) - before == {fact_id(msgs[-1])}   # exactly one fact shipped
+    assert frames <= 100, frames                            # sublinear: prune-by-fingerprint, not push-all
+    print("\nwire frames, 1-fact diff over 100-fact set:", frames)
 
 if __name__ == "__main__":
-    for t in (test_equal_sets_zero_ships, test_one_fact_diff_ships_exactly_that_closure,
+    for t in (test_equal_sets_zero_ships, test_one_fact_diff_ships_exactly_that_fact,
               test_fresh_peer_gets_dependency_closure, test_tombstone_travels_and_suppresses,
               test_sync_facts_volatile_and_excluded, test_shuffled_orders_converge,
-              test_reply_offers_stand_until_shipped,
+              test_reconcile_is_idempotent,
               test_windowed_in_range_facts_and_their_deps_reconcile,
               test_windowed_out_of_range_content_is_not_reconciled,
-              test_windowed_bulk_converges_and_withholds,
-              test_round_count_one_fact_in_hundred):
+              test_windowed_bulk_converges_and_withholds, test_frame_count_is_sublinear):
         t(); print(f"ok  {t.__name__}")

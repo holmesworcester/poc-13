@@ -23,7 +23,7 @@ BIN = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [BIN, os.path.dirname(BIN)]
 from kernel import Node, Store, _rd, decode, fact_id, frame
 from facts import ROOT
-from facts.sync import compare as sync, reply as sreply
+from facts.sync import compare as sync
 from facts.auth import local_signer_secret, endpoint
 from facts.connection import request, connection as conn, frame as frames
 from con import flush, load
@@ -31,7 +31,6 @@ from con import flush, load
 BOUND = 64                               # admits per turn; engine drain bound
 OUTCAP = 1 << 20                         # per-address outbox byte cap: overflow parks
 CADENCE = 0.5                            # s between redials / periodic root compares per peer
-QUIET = 0.1                              # s of sync silence that marks a peer's round settled
 RETAIN_FLOOR = 0                         # sync reconciles [RETAIN_FLOOR, inf) of (ts, FactId); the reserved
                                          # closure need pulls deps below it. The floor IS the retention horizon
                                          # — poc-13 has no retention/purge yet (Further Work), so it is 0
@@ -40,7 +39,8 @@ RETAIN_FLOOR = 0                         # sync reconciles [RETAIN_FLOOR, inf) o
                                          # need still carries below-floor deps into a windowed peer.
 BARE, SEALED = 0, 1                      # wire discriminators
 now_ms = lambda: int(time.time() * 1000)
-now_s = lambda: int(time.time())         # fact-ts unit (kernel now()); reply timestamps
+now_s = lambda: int(time.time())         # fact-ts unit (kernel now())
+_floor_key = lambda ts: b"" if ts <= 0 else ts.to_bytes(8, "big") + b"\x00" * 32   # window floor -> radix key
 
 def serve(node, s, store, flushed):      # one framed verb request per unix connection
     try:
@@ -105,8 +105,7 @@ def main(db, *argv):
         h, pt = listen.rsplit(":", 1)
         tsock = socket.create_server((h, int(pt))); tsock.setblocking(False)
     links, inbound = {}, []              # links: addr -> outbound socket; inbound: read sources
-    redial, compared = {}, {}                         # process-local cadence markers (addr/cid -> last open)
-    active, synced = {}, {}                           # per-peer: last sync frame (round settle), last leaf-fp synced
+    redial, compared, synced = {}, {}, {}             # cadence markers: addr/cid -> last open ; cid -> last leaf_xor
     to_ship = set()                                   # flushed senders awaiting their reap
     for sg in (signal.SIGINT, signal.SIGTERM): signal.signal(sg, lambda *a: sys.exit(0))
     print("listening:", "%s:%s" % tsock.getsockname()[:2] if tsock else sp, flush=True)
@@ -144,8 +143,7 @@ def main(db, *argv):
                         rid = _admit_bare(node, body)
                         if rid: arrived.append(rid)   # a request arrived: react after the turn
                     else:
-                        c = _admit_frame(node, body, sreply)   # sync traffic keeps the round `active`
-                        if c is not None: active[c] = time.monotonic()
+                        _admit_frame(node, body)   # open + admit inners; sync projectors emit any response
                     n += 1; work = True
                     if n >= BOUND: break
                 if n >= BOUND: break
@@ -172,18 +170,15 @@ def main(db, *argv):
                     enqueue(link(links, a), BARE, env); redial[a] = nowm; work = True
             work |= _pump_data(node, links, to_ship)
             if not node.frontier:
-                lo = RETAIN_FLOOR                    # reconcile [floor, inf); closure pulls deps below it
-                mf = sync.myfp(node, lo)             # our leaf fingerprint over that window
+                lo = _floor_key(RETAIN_FLOOR)        # reconcile [floor, inf); closure ids pull deps below it
                 for _ep, _addr, cid, _who in conn.peers(node):
-                    # One round per peer at a time: open a fresh root compare only once the last
-                    # round has settled (peer quiet for QUIET), and then only when the periodic
-                    # cadence is due or our leaf set changed since we last synced this peer. Live
-                    # frames keep `active` fresh, so overlapping rounds — from either side — never
-                    # start; a settled peer with a changed set re-opens promptly (no live-tail path).
-                    if nowm - active.get(cid, 0) >= QUIET and (
-                            nowm - compared.get(cid, 0) >= CADENCE or mf != synced.get(cid)):
-                        sreply.open_round(node, cid, int(time.time()), sync.initiate(node, None, lo)[0])
-                        compared[cid] = active[cid] = nowm; synced[cid] = mf; work = True
+                    # Open a fresh bare-root compare when our leaf set moved since we last synced this
+                    # peer, or on the periodic cadence. No round state: content-addressing self-dedupes
+                    # overlapping descents, and the admitted compare/have/need projectors — not the
+                    # daemon — emit every response, so a dropped frame just re-descends next cadence.
+                    if node.leaf_xor != synced.get(cid) or nowm - compared.get(cid, 0) >= CADENCE:
+                        sync.open_round(node, cid, lo)
+                        compared[cid] = nowm; synced[cid] = node.leaf_xor; work = True
             for p in links.values():
                 if p["s"] and p["out"] and p["s"] in w:
                     try: k = p["s"].send(p["out"]); p["out"] = p["out"][k:]; work |= k > 0
@@ -203,19 +198,16 @@ def _admit_bare(node, body):             # a handshake fact; returns the rid if 
     except Exception: return None
     return fid if fid and node.facts[fid].type_tag == request.TAG else None
 
-def _admit_frame(node, body, sreply):    # a sealed data frame: open by its own connection id
-    cid = frames.frame_cid(body)         # -> cid if it carried a peer compare (round is live), else None
+def _admit_frame(node, body):            # a sealed data frame: open by its own connection id, admit inners
+    cid = frames.frame_cid(body)         # -> cid if it opened, else None (no session secret yet)
     r = conn.route(node, cid) if cid else None
-    if not r: return None                # no session secret yet: drop (sync will resend)
+    if not r: return None                # no session secret yet: drop (sync re-descends next cadence)
     blob = frames.open_frame(body, r[1])
     if blob is None: return None         # tamper / wrong key: whole-frame miss
-    saw = False
-    for inner in frames.unframe(blob):
-        try: fid = node.admit(inner)
-        except Exception: fid = None
-        if fid and node.facts[fid].type_tag == sync.TAG:
-            sreply.answer(node, fid, cid, now_s(), RETAIN_FLOOR); saw = True
-    return cid if saw else None
+    for inner in frames.unframe(blob):   # decomposed sync: the admitted fact's own projector answers
+        try: node.admit(inner)
+        except Exception: pass
+    return cid
 
 def _pump_data(node, links, to_ship):    # stage validated send/ship offers as sealed frames
     rows = {}
