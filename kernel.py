@@ -15,14 +15,19 @@ from the durable fact set alone: `replay()` is the whole crash story. With a
 Store, replay is demand-driven: a stepped fact's needs pull matching cold
 facts resident (hydration), so a session pays for what it asks about.
 
-Stand-in: BLAKE2b-256 for BLAKE3-256 (stdlib has no BLAKE3).
+Hash: BLAKE3-256 (the `blake3` package; stdlib has none).
 """
 from collections import deque
 from dataclasses import dataclass, field, replace
 from itertools import chain
-import hashlib, sqlite3, time
+import sqlite3, time
 
-H = lambda b: hashlib.blake2b(b, digest_size=32).digest()
+try:
+    from blake3 import blake3 as _b3
+except ImportError as e:
+    raise ImportError("poc-13 needs blake3 (pip install blake3)") from e
+
+H = lambda b: _b3(b).digest()
 now = lambda: int(time.time())           # host convenience; never engine input
 
 def frame(*ps):                          # ‖ : length-framed concat (injective)

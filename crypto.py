@@ -1,8 +1,8 @@
 """poc-13 crypto facade over PyNaCl/libsodium (poc-10: src/core/crypto.rs).
 
 Primitives only — no protocol labels; every derivation label lives in the
-fact family that owns it. The suite: BLAKE2b-256 keyed hashing (the repo's
-BLAKE3 stand-in, matching kernel.H) for deterministic derivations, X25519 for
+fact family that owns it. The suite: BLAKE3-256 keyed hashing (matching
+kernel.H) for deterministic derivations, X25519 for
 DH, HKDF-SHA256 (stdlib hmac, RFC 5869) for key derivation, and
 XChaCha20-Poly1305 (24-byte nonce) as the one AEAD. The open/dh sides never
 raise on attacker bytes: a bad point, wrong tag, or truncated input is None,
@@ -10,10 +10,11 @@ never an error — a projector treats None as Invalid, not a crash."""
 import hashlib, hmac, os
 
 try:
+    from blake3 import blake3 as _b3
     from nacl import bindings as _na
     from nacl.signing import SigningKey, VerifyKey
-except ImportError as e:                               # the repo's one dependency
-    raise ImportError("poc-13 needs PyNaCl (pip install pynacl)") from e
+except ImportError as e:                               # the repo's two dependencies
+    raise ImportError("poc-13 needs PyNaCl and blake3 (pip install pynacl blake3)") from e
 
 from kernel import H, frame
 
@@ -21,7 +22,7 @@ X25519_KEY_INFO = b"poc13 x25519 xchacha20poly1305 key"
 
 
 def keyed_hash(key32, domain, info):                   # deterministic derivation
-    return hashlib.blake2b(frame(domain, info), digest_size=32, key=key32).digest()
+    return _b3(frame(domain, info), key=key32).digest()
 
 
 # --- Ed25519 (RFC 8032): the fact-authority signature ---------------------------
