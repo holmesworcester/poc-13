@@ -133,6 +133,24 @@ now_of = lambda ctx: next((int.from_bytes(r[2].target[1], "big") for r in by(ctx
 SHIPPED_ROLE, SHIPPED_SCOPE, _SHIP = b"shipped", b"wire", b"\x00ship"
 shipped_need = Atom(NEED, SHIPPED_ROLE, SHIPPED_SCOPE, SELF, effect=WATCH)
 
+# Two further needs are answered the same transient way, but from the engine's
+# own indexes rather than the OS clock: a `summary` need over a key PREFIX is
+# answered with my radix-trie label for that range, plus — at a prefix that
+# resolves to a leaf — that leaf and its deduped dependency closure ids; a
+# `resident` need over a fact id is answered iff I already hold it. Both are the
+# seam the decomposed sync families read to descend (summary) and to pull by id
+# (resident); the closure ids are how a below-window dependency travels (poc-12
+# §Sync/§Hydration). Reserved roles: the leading NUL cannot occur in a family
+# role, so no family can author or collide with them; both are always WATCH and
+# never gate. _answer (in _step) injects their rows into ctx exactly as
+# valid_offers would, so `by(ctx, role)` reads them uniformly.
+SUM_ROLE, RES_ROLE, _SUM, _RES = b"\x00summary", b"\x00resident", b"\x00sum", b"\x00res"
+RESERVED = frozenset((SUM_ROLE, RES_ROLE))
+CLOSURE_CAP = 4096                       # generous safety valve on unique closure ids per summary answer
+_kb = lambda ts, fid: ts.to_bytes(8, "big") + fid            # (ts, fid) -> the 40-byte radix key
+summary_need = lambda pfx, floor=b"": Atom(NEED, SUM_ROLE, b"sync", Exact(pfx), floor, effect=WATCH)
+resident_need = lambda fid: Atom(NEED, RES_ROLE, b"sync", Exact(fid), effect=WATCH)
+
 class Router:
     """A projector that dispatches on one type-tag segment and delegates whole.
     Routers narrow inputs and cannot widen a delegate's context; delegation
@@ -347,7 +365,7 @@ class Node:
         self.memo, self.clean = {}, {}       # id -> verdict ; (role,scope) -> [(owner, ts, atom)]
         self.owned = {}                      # id -> its clean rows, for owner-scoped replacement
         self.slices = {}                     # key -> (owner, ts, value), LWW by (ts, owner)
-        self.deps = {}                       # id -> direct Require/suppress edges (poc-12 validated_deps memo)
+        self._deps = {}                      # id -> direct Require/suppress edges (poc-12 validated_deps memo)
         self.leafset = {}                    # (ts,FactId) -> content leaf hash: the sync reconciliation set
         self.leaf_xor = 0                    # XOR of every leaf hash: an O(1) whole-set change fingerprint
         self.tree = Skeleton()               # the same set as a radix Merkle trie: O(depth) reconciliation
@@ -369,7 +387,7 @@ class Node:
         for a in f.atoms:
             self.intake.setdefault((a.kind, a.role, a.scope), []).append((fid, mat(a, fid)))
         self.frontier.append(fid)
-        self.deps.clear()                    # the graph changed: rebuild the validated-edge memo lazily
+        self._deps.clear()                   # the graph changed: rebuild the validated-edge memo lazily
         return fid
 
     # Both match directions run over index ∪ intake; the overlay is transparent.
@@ -386,14 +404,22 @@ class Node:
         return [r for r in self.clean.get((need.role, need.scope), ())
                 if covers(r[2].target, need.target)]
 
-    def validated_deps(self, fid):       # fid's direct Require/suppress edge owners (poc-12 validated_deps).
-        d = self.deps.get(fid)           # rebuildable derived state: memoized, cleared whenever a fact admits.
-        if d is None:
+    def deps(self, fid):                 # fid's direct Require/suppress edge owners (poc-12 validated_deps):
+        d = self._deps.get(fid)          # STRUCTURAL/asserted (from offers_for), NOT validity-gated — validity is
+        if d is None:                    # decided in _step. Rebuildable derived state, cleared when a fact admits.
             f = self.facts.get(fid)
-            d = self.deps[fid] = frozenset() if f is None else frozenset(
+            d = self._deps[fid] = frozenset() if f is None else frozenset(
                 o for n in needs_of(f, fid) if n.effect in (REQUIRE, SUPPRESS)
                 for o, _ in self.offers_for(n))
         return d
+    validated_deps = deps                # compat alias for the old bundled compare; dropped when sync decomposes
+
+    def closure(self, fid, out=None):    # transitive deps (requires + suppressors), incl fid — the sync spine.
+        out = set() if out is None else out          # a shared visited-set across leaves dedups the union closure
+        if fid in out: return out
+        out.add(fid)
+        for d in self.deps(fid): self.closure(d, out)
+        return out
 
     def missing_needs(self):             # the reserved closure/hydrate need (poc-12 §Hydration):
         out = {}                         # a parked fact's still-unmet REQUIRE keys — the deps it lacks.
@@ -403,6 +429,34 @@ class Node:
                 if n.effect == REQUIRE and not self.valid_offers(n):
                     out[(n.role, n.scope, n.target)] = n
         return list(out.values())
+
+    # Engine-answered needs: a reserved index need is answered from the trie / the
+    # durable set and injected into ctx as clean-twin-shaped (owner, ts, atom) rows,
+    # exactly the way valid_offers answers an ordinary need, so `by(ctx, role)` reads
+    # them uniformly. Everything else falls through to the real clean twin.
+    def _answer(self, n):
+        if n.role == SUM_ROLE: return self._summary_rows(n)
+        if n.role == RES_ROLE: return self._resident_rows(n)
+        return self.valid_offers(n)
+
+    def _summary_rows(self, n):          # my label for a prefix + (at a resolved leaf) its deduped closure ids
+        pfx = n.target[1]; floor = n.value or b""
+        R = lambda a: (_SUM, 0, a)
+        rows = [R(Atom(OFFER, b"fp", b"sync", Exact(pfx), self.tree.label(pfx)))]  # my fingerprint for the range
+        seen = set()                     # ONE visited-set across the emitted leaves -> deduped union closure
+        for c in self.tree.emit(pfx, floor):
+            if c[0] == "fp":
+                rows.append(R(Atom(OFFER, b"fp", b"sync", Exact(c[1]), c[2])))     # a child fingerprint to descend
+            elif c[0] == "has":
+                self.closure(c[1][8:], seen)         # a resolved leaf: accumulate it + its spine (spine added once)
+        for d in list(seen)[:CLOSURE_CAP]:           # leaves + their deduped deps, each advertised by id once
+            if d in self.facts:
+                rows.append(R(Atom(OFFER, b"has", b"sync", Exact(_kb(ts_of(self.facts[d]), d)))))
+        return rows
+
+    def _resident_rows(self, n):         # answered iff I already hold the fact — the have/need pull seam
+        fid = n.target[1]
+        return [(_RES, 0, Atom(OFFER, b"resident", b"sync", Exact(fid)))] if fid in self.durable else []
 
     # Present the host's clock as one transient offer at the NOW key, waking any
     # time-waiting need whose deadline it now covers. Not a fact: one clean-twin
@@ -445,12 +499,12 @@ class Node:
             for n in ns:                 # resident first; offers never wake cold
                 for b in self.store.pull(n): self.admit(b, checked=True)
         # Precedence (ratified): Suppress > Require(Park) > Resolve.
-        if any(self.valid_offers(n) for n in ns if n.effect == SUPPRESS):
+        if any(self.valid_offers(n) for n in ns if n.effect == SUPPRESS and n.role not in RESERVED):
             out = Out("Suppressed")
-        elif any(not self.valid_offers(n) for n in ns if n.effect == REQUIRE):
+        elif any(not self.valid_offers(n) for n in ns if n.effect == REQUIRE and n.role not in RESERVED):
             out = Out("Parked")
-        else:                            # Context<Validated>; Watch never gates
-            ctx = {n: self.valid_offers(n) for n in ns if n.effect in (REQUIRE, WATCH)}
+        else:                            # Context<Validated>; Watch never gates. Reserved index needs are
+            ctx = {n: self._answer(n) for n in ns if n.effect in (REQUIRE, WATCH)}   # answered from the engine
             out = self.root.project(f, ctx, dict(self.slices)) or Out("Parked")
         self._promote(fid, f, out)
 
