@@ -27,8 +27,8 @@ from facts.sync import compare as sync
 from facts.auth import local_signer_secret, endpoint
 from facts.connection import request, connection as conn, frame as frames
 from con import flush, load
+from runtime import cycle, pump, BOUND
 
-BOUND = 64                               # admits per turn; engine drain bound
 OUTCAP = 1 << 20                         # per-address outbox byte cap: overflow parks
 CADENCE = 0.5                            # s between redials / periodic root compares per peer
 RETAIN_FLOOR = 0                         # sync reconciles [RETAIN_FLOOR, inf) of (ts, FactId); the reserved
@@ -83,11 +83,6 @@ def messages(src):                       # yield (kind, body) for each complete 
         w = b[4:4 + ln]; src["inb"] = b[4 + ln:]
         if w: yield w[0], w[1:]
 
-def _ids(v):                             # a ship offer's value: length-framed fact ids
-    out, i = [], 0
-    while i < len(v): x, i = _rd(v, i); out.append(x)
-    return out
-
 def main(db, *argv):
     listen, it = None, iter(argv)
     for a in it:
@@ -135,22 +130,23 @@ def main(db, *argv):
                     except OSError: c = b""
                     if c: src["inb"] = src.get("inb", b"") + c; work = True
                     elif src in inbound: s.close(); inbound.remove(src)
-            n, arrived = 0, []                        # admit inbound, bounded per turn
+            n, arrived, inbox = 0, [], []             # collect inbound, bounded per turn
             for src in inbound + [p for p in links.values() if p["s"]]:
                 if "inb" not in src: continue
                 for kind, body in messages(src):
                     if kind == BARE:
-                        rid = _admit_bare(node, body)
-                        if rid: arrived.append(rid)   # a request arrived: react after the turn
+                        inbox.append(body)            # a handshake fact: admit as-is in the cycle
+                        rid = _peek_request(body)     # a request fid, peeked (decode, no admit): react after
+                        if rid: arrived.append(rid)
                     else:
-                        _admit_frame(node, body)   # open + admit inners; sync projectors emit any response
+                        inbox += _open_frame(node, body)   # a sealed frame -> its inner fact bytes
                     n += 1; work = True
                     if n >= BOUND: break
                 if n >= BOUND: break
-            # ENGINE DRAIN — bounded; leftover frontier is next turn's work. Hand the
-            # wire's flush reports to the turn: a flushed sender that Watches shipped
-            # reaps this turn; keep re-presenting until it does, then prune the acted-on.
-            node.turn(now_ms(), to_ship, BOUND); work |= bool(node.frontier)
+            # ENGINE DRAIN — admit the inbox and drain one bounded turn, presenting the wire's
+            # flush reports: a flushed sender that Watches shipped reaps this turn; keep
+            # re-presenting until it does, then prune the acted-on. Leftover frontier is next turn.
+            cycle(node, inbox, now_ms(), to_ship, BOUND); work |= bool(node.frontier)
             to_ship &= {o for role in (b"send", b"ship") for o, _, _ in node.watched(role, b"outbox")}
             # respond seam: the onus is on the requester — its durable request re-dials on
             # a cadence; the responder just answers each ARRIVAL (no cadence of its own), so
@@ -168,7 +164,14 @@ def main(db, *argv):
                 a = addr.decode()
                 if nowm - redial.get(a, 0) >= CADENCE:
                     enqueue(link(links, a), BARE, env); redial[a] = nowm; work = True
-            work |= _pump_data(node, links, to_ship)
+            def deliver(cid, addr, secret, inners):        # pack + seal + enqueue toward the link
+                p = link(links, addr.decode())
+                if len(p["out"]) > OUTCAP: return False    # backpressure: park, do not fire
+                for blob in frames.pack(inners):
+                    enqueue(p, SEALED, frames.seal(blob, cid, secret, os.urandom(24)))
+                return True
+            fired = pump(node, lambda cid: conn.route(node, cid), deliver, to_ship)
+            to_ship |= fired; work |= bool(fired)          # flushed: next turn presents shipped@o and it reaps
             if not node.frontier:
                 lo = _floor_key(RETAIN_FLOOR)        # reconcile [floor, inf); closure ids pull deps below it
                 for _ep, _addr, cid, _who in conn.peers(node):
@@ -193,42 +196,17 @@ def _enc(node, fid):
     from kernel import encode
     return encode(node.facts[fid])
 
-def _admit_bare(node, body):             # a handshake fact; returns the rid if it was a request
-    try: fid = node.admit(body)
+def _peek_request(body):                 # a bare handshake fact's fid iff it is a sealed request (no admit)
+    try: f = decode(body)
     except Exception: return None
-    return fid if fid and node.facts[fid].type_tag == request.TAG else None
+    return fact_id(f) if f.type_tag == request.TAG else None
 
-def _admit_frame(node, body):            # a sealed data frame: open by its own connection id, admit inners
-    cid = frames.frame_cid(body)         # -> cid if it opened, else None (no session secret yet)
+def _open_frame(node, body):             # a sealed data frame -> its inner fact bytes (opened by connection id)
+    cid = frames.frame_cid(body)         # the daemon opens via a family query; it holds no sync policy
     r = conn.route(node, cid) if cid else None
-    if not r: return None                # no session secret yet: drop (sync re-descends next cadence)
+    if not r: return []                  # no session secret yet: drop (sync re-descends next cadence)
     blob = frames.open_frame(body, r[1])
-    if blob is None: return None         # tamper / wrong key: whole-frame miss
-    for inner in frames.unframe(blob):   # decomposed sync: the admitted fact's own projector answers
-        try: node.admit(inner)
-        except Exception: pass
-    return cid
-
-def _pump_data(node, links, to_ship):    # stage validated send/ship offers as sealed frames
-    rows = {}
-    for role in (b"send", b"ship"):
-        for o, _, a in node.watched(role, b"outbox"):
-            if o not in to_ship: rows.setdefault(o, []).append(a)   # edge-drain: not already flushed
-    moved = False
-    for o, atoms in sorted(rows.items()):
-        cid = atoms[0].target[1]
-        r = conn.route(node, cid)
-        if not r: continue               # no route yet: the offer stands (park)
-        addr, secret = r; p = link(links, addr.decode())
-        if len(p["out"]) > OUTCAP: continue
-        inners = []
-        for a in sorted(atoms, key=lambda a: (a.role, a.value)):
-            if a.role == b"send": inners.append(a.value)
-            else: inners += [node.durable[x] for x in _ids(a.value) if x in node.durable]
-        for blob in frames.pack(inners):
-            enqueue(p, SEALED, frames.seal(blob, cid, secret, os.urandom(24)))
-        to_ship.add(o); moved = True     # flushed: next turn presents shipped@o and it reaps
-    return moved
+    return list(frames.unframe(blob)) if blob is not None else []   # tamper/wrong key -> whole-frame miss
 
 if __name__ == "__main__":
     main(*sys.argv[1:])

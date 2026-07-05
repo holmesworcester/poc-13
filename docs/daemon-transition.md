@@ -514,3 +514,42 @@ the peer table, never atoms.
 - Not durable cadence (volatile, re-created on reconnect).
 - Not round bookkeeping (content-addressing + fp-convergence + cadence re-emit).
 - Not ranking/selection in facts (that's a query).
+
+---
+
+## 10. Further work (deferred, seams left open)
+
+### 10.1 Residency / sync separation (sync everything, hydrate a subset)
+Today the sync set = validated leaves = stepped = resident, so hydrating only recent
+messages syncs only recent. But a leaf hash is `H(fid‖ts‖H(bytes))` — bytes-only,
+independent of a fact's offers/context, and identical for Valid vs Suppressed. So
+the two coupled things separate cleanly:
+- **Skeleton = the sync index.** `(ts,fid) -> leafhash`, ~72 B/fact (72 MB for 1M),
+  the *full* set; already body-independent as of the RBSR rewrite. RBSR reconciles
+  over this alone — no fact bodies needed. Persist it so cold facts stay in sync
+  without being re-stepped.
+- **Residency = the hydration set.** Bodies + offers + slices, materialised only for
+  the recent window + active dependency closure; `Store.pull` on demand (to render,
+  or to ship a fact a peer asks for).
+Mechanism (declarative): a `hydrate` window fact whose offer every content fact
+WATCHes; the projector reads it to choose materialisation DEPTH (emit render/index
+offers in-window, stay lean out-of-window). This governs residency, NOT sync
+membership — the Skeleton keeps the leaf regardless, so shedding an old body never
+drops it from reconciliation, and a suppressor arriving for a shed fact does not
+desync (same leaf hash). Constraint: first-validation needs dep *content* (project
+reads ctx values), so validate once (hydrating the dep closure transiently) then
+shed; "stay in sync without staying materialised" — yes. Companion affordance:
+expose Skeleton membership as a `validated@id` need (sibling of `resident@id`/
+`summary@range`) so a fact whose validity depends only on dep *existence* can
+validate cold, against the Skeleton, with no materialisation. `extract`'s
+`shareable` bit stays the sync axis; the hydrate window is an orthogonal residency
+axis.
+
+### 10.2 Count-augmented balanced tree for the Skeleton
+The RBSR Skeleton uses a sorted list: correct, minimal, optimal *wire* cost, but
+insert is O(n) and a range fingerprint is O(range) (so `_summary_rows` re-hashes a
+matched range's partition — bounded by the `leaf_xor` cadence guard, but real).
+Production swaps in a treap with deterministic priority = hash(key) (order-
+independent shape) augmented with (count, subtree-hash): O(log n) insert/remove, and
+split/merge gives an O(log n) non-homomorphic range fingerprint + order-statistic
+count-split, killing the re-hash. Same protocol, same frames.
