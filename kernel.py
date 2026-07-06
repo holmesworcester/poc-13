@@ -17,7 +17,6 @@ facts resident (hydration), so a session pays for what it asks about.
 
 Stand-in: BLAKE2b-256 for BLAKE3-256 (stdlib has no BLAKE3).
 """
-from bisect import bisect_left
 from collections import deque
 from dataclasses import dataclass, field, replace
 import hashlib, sqlite3, struct, time
@@ -245,50 +244,142 @@ class Store:
 
     def commit(self): self.db.commit()   # host calls it: durable before the reply
 
-# --- The sync skeleton -------------------------------------------------------------
-class Skeleton:
-    """Range-based set reconciliation (Meyer, rbsr_nonhomomorphic) over the sorted
-    40-byte (ts‖FactId) leaf keys. A range [lo,hi) is summarised by a NON-homomorphic
-    fingerprint — H of its leaf hashes in key order (‖ count) — so it is collision-
-    resistant, unlike an XOR/sum fold. A mismatched range is split into B parts of
-    EQUAL COUNT (by order-statistic), NOT by key prefix: fanout is the chosen B and
-    depth is log_B(n) regardless of key distribution (a radix trie's fanout is
-    whatever bytes happen to occur — the thing the paper rejects). A range of <= T
-    leaves is listed by id instead of fingerprinted, which ends the recursion and
-    lets an empty peer pull by receiving the (possibly empty) list.
+# --- The sync skeleton: a clamping-invariant treap ---------------------------------
+# Range-based set reconciliation (Meyer & Scherer, rbsr_nonhomomorphic) over the
+# 40-byte (ts‖FactId) leaf keys. The reconciliation set is a TREAP — a binary search
+# tree on the key AND a heap on a priority. The priority is the leaf hash: a pure
+# function of the key, so the tree SHAPE is a function of the set alone (history-
+# independence) and two peers holding the same set build the same tree. Each node
+# caches its subtree size and a Merkle label lb = H(left.lb ‖ leaf_hash ‖ right.lb).
+# A range fingerprint is the CLAMPED label — the label of the tree with all out-of-
+# range items discarded — computed by walking only the two boundary spines (reading
+# precomputed labels for fully-in subtrees), O(log n) whp. Clamping-invariance makes
+# that label a canonical function of the in-range SET (independent of tree shape and
+# of out-of-range items), so peers agree using an ORDINARY hash — no homomorphic/xor
+# fold. A mismatched range is split into B parts of EQUAL COUNT (an order-statistic
+# select, not a key-prefix split), so fanout is B and depth is log_B(n) regardless of
+# key distribution. A range of <= T leaves is listed by id instead, ending the
+# recursion. (A maliciously degenerate set costs O(n) local compute; the paper shows
+# communication, roundtrips, and censorship-resistance stay immune.)
+_TREAP_EMPTY = H(b"")                         # the Merkle label of the empty tree
 
-    Body-independent: it stores only key -> leaf hash, never fact bytes. So the full
-    set can stay resident as the sync index while fact bodies are hydrated on demand
-    — the residency/sync split (docs/daemon-transition.md 'Further work'). A sorted
-    list keeps this readable; production would swap in a count-augmented balanced
-    tree (treap) for O(log n) insert and range fingerprints (see that note)."""
-    B, T = 16, 8                             # branching factor ; list-not-fingerprint threshold
-    EMPTY = H((0).to_bytes(6, "little"))     # the fingerprint of an empty range
+class _Nd:
+    # Two axes: the SEARCH key k = ts‖FactId orders the BST (so a ts-range is just a
+    # key-range — rbsr's arbitrary ranges are preserved), and the PRIORITY (the leaf
+    # hash lh) orders the heap that fixes the shape. lh is uniform and uncorrelated
+    # with the ts-major key, so even a run of same-ts facts balances.
+    __slots__ = ("k", "lh", "l", "r", "c", "lb")
+    def __init__(self, k, lh):
+        self.k, self.lh, self.l, self.r = k, lh, None, None
+        self.fix()
+    def fix(self):                           # recompute subtree count + Merkle label from the children
+        l, r = self.l, self.r
+        self.c = (l.c if l else 0) + (r.c if r else 0) + 1
+        self.lb = H((l.lb if l else _TREAP_EMPTY) + self.lh + (r.lb if r else _TREAP_EMPTY))
 
-    def __init__(self): self.keys = []; self.h = {}          # sorted 40-byte keys ; key -> leaf hash
+def _rot_r(t): x = t.l; t.l = x.r; x.r = t; t.fix(); x.fix(); return x
+def _rot_l(t): x = t.r; t.r = x.l; x.l = t; t.fix(); x.fix(); return x
 
-    def insert(self, kb, h):
-        i = bisect_left(self.keys, kb)
-        if i == len(self.keys) or self.keys[i] != kb: self.keys.insert(i, kb)
-        self.h[kb] = h
-    def remove(self, kb):
-        i = bisect_left(self.keys, kb)
-        if i < len(self.keys) and self.keys[i] == kb: del self.keys[i]
-        self.h.pop(kb, None)
+def _t_ins(t, k, lh):                         # insert/update, keeping the (lh, k) max-heap
+    if t is None: return _Nd(k, lh)
+    if k == t.k:                              # already present: same content => same lh, so a no-op
+        return t if lh == t.lh else _t_ins(_t_del(t, k), k, lh)   # (a priority change would re-heapify)
+    if k < t.k:
+        t.l = _t_ins(t.l, k, lh)
+        if (t.l.lh, t.l.k) > (t.lh, t.k): t = _rot_r(t)
+    else:
+        t.r = _t_ins(t.r, k, lh)
+        if (t.r.lh, t.r.k) > (t.lh, t.k): t = _rot_l(t)
+    t.fix(); return t
 
-    def _span(self, lo, hi):                 # [i, j): the index range of keys in [lo, hi)
-        return bisect_left(self.keys, lo), bisect_left(self.keys, hi)
-    def count(self, lo, hi): i, j = self._span(lo, hi); return j - i
+def _t_del(t, k):                             # rotate the target down to a leaf, then drop it
+    if t is None: return None
+    if k < t.k: t.l = _t_del(t.l, k)
+    elif k > t.k: t.r = _t_del(t.r, k)
+    else:
+        if t.l is None: return t.r
+        if t.r is None: return t.l
+        if (t.l.lh, t.l.k) > (t.r.lh, t.r.k): t = _rot_r(t); t.r = _t_del(t.r, k)
+        else: t = _rot_l(t); t.l = _t_del(t.l, k)
+    t.fix(); return t
+
+# The clamped-label walks are ITERATIVE (an explicit spine list, not recursion): honest
+# leaf-hash priorities keep height O(log n), but a maliciously degenerate spine must cost
+# O(n) time, never a stack overflow.
+_lb = lambda t: t.lb if t else _TREAP_EMPTY
+def _clamp_lo(t, lo):                         # label of t restricted to keys >= lo — fold the low boundary spine
+    spine = []
+    while t is not None:
+        if t.k < lo: t = t.r                  # t and its left are below lo: drop them, follow the boundary right
+        else: spine.append((t.lh, _lb(t.r))); t = t.l   # t in: its left clamps low, its right is wholly in
+    acc = _TREAP_EMPTY
+    for lh, rlb in reversed(spine): acc = H(acc + lh + rlb)   # fold deepest-first: innermost clamp outward
+    return acc
+def _clamp_hi(t, hi):                         # label of t restricted to keys < hi — fold the high boundary spine
+    spine = []
+    while t is not None:
+        if t.k >= hi: t = t.l
+        else: spine.append((_lb(t.l), t.lh)); t = t.r
+    acc = _TREAP_EMPTY
+    for llb, lh in reversed(spine): acc = H(llb + lh + acc)
+    return acc
+def _clamp(t, lo, hi):                        # label of t restricted to [lo, hi) — the range fingerprint
+    while t is not None:                      # descend to the split node (the first in-range key)
+        if t.k < lo: t = t.r
+        elif t.k >= hi: t = t.l
+        else: return H(_clamp_lo(t.l, lo) + t.lh + _clamp_hi(t.r, hi))
+    return _TREAP_EMPTY
+
+class Treap:
+    B, T = 16, 8                              # split fanout ; list-not-fingerprint threshold
+    EMPTY = _TREAP_EMPTY
+    def __init__(self): self.root = None
+
+    def insert(self, kb, lh): self.root = _t_ins(self.root, kb, lh)
+    def remove(self, kb): self.root = _t_del(self.root, kb)
+
+    def _rank(self, x):                       # number of keys < x
+        t, r = self.root, 0
+        while t:
+            if t.k < x: r += (t.l.c if t.l else 0) + 1; t = t.r
+            else: t = t.l
+        return r
+    def _select(self, i):                     # the 0-based i-th smallest key
+        t = self.root
+        while t:
+            lc = t.l.c if t.l else 0
+            if i < lc: t = t.l
+            elif i == lc: return t.k
+            else: i -= lc + 1; t = t.r
+        return None
+
+    def count(self, lo, hi): return self._rank(hi) - self._rank(lo)
     def small(self, lo, hi): return self.count(lo, hi) <= self.T
-    def fp(self, lo, hi):                    # non-homomorphic fingerprint of [lo, hi)
-        i, j = self._span(lo, hi)
-        return H(b"".join(self.h[k] for k in self.keys[i:j]) + (j - i).to_bytes(4, "little"))
-    def fids(self, lo, hi):                  # the 32-byte FactIds of my leaves in [lo, hi)
-        i, j = self._span(lo, hi); return [k[8:] for k in self.keys[i:j]]
-    def parts(self, lo, hi):                 # split [lo, hi) into <= B sub-ranges of equal COUNT
-        i, j = self._span(lo, hi); n = j - i
-        bounds = [lo] + [self.keys[i + (p * n) // self.B] for p in range(1, self.B)] + [hi]
+    def fp(self, lo, hi): return _clamp(self.root, lo, hi)
+    def parts(self, lo, hi):                  # <= B sub-ranges of equal COUNT (order-statistic select)
+        n = self.count(lo, hi)
+        if not n: return []                   # empty range: nothing to split (the caller guards via small(); stay total)
+        r0 = self._rank(lo)
+        bounds = [lo] + [self._select(r0 + (p * n) // self.B) for p in range(1, self.B)] + [hi]
         return [(a, b) for a, b in zip(bounds, bounds[1:]) if a != b]
+    def fids(self, lo, hi):                   # the 32-byte FactIds of my leaves in [lo, hi), in key order (iterative)
+        out, stack, t = [], [], self.root
+        while stack or t is not None:
+            if t is not None:
+                if t.k < lo: t = t.r          # t and its left subtree are below lo
+                else: stack.append(t); t = t.l
+            else:
+                t = stack.pop()
+                if t.k >= hi: break           # in-order is ascending: nothing more is in range
+                out.append(t.k[8:]); t = t.r  # lo <= t.k < hi
+        return out
+    @property
+    def keys(self):                           # every 40-byte key in order (iterative; the caller flushes pending first)
+        out, stack, t = [], [], self.root
+        while stack or t is not None:
+            if t is not None: stack.append(t); t = t.l
+            else: t = stack.pop(); out.append(t.k); t = t.r
+        return out
 
 # --- The match index ---------------------------------------------------------------
 class Bucket:
@@ -344,8 +435,9 @@ class Node:
         self.slices = {}                     # key -> (owner, ts, value), LWW by (ts, owner)
         self._deps = {}                      # id -> direct Require/suppress edge owners: the dependency memo
         self._sumcache = {}                  # (lo,hi) -> summary rows: reused while the leaf/durable set holds still
-        self.leaf_xor = 0                    # XOR of every leaf hash: an O(1) whole-set change fingerprint
-        self.tree = Skeleton()               # the reconciliation set: key -> leaf hash, range fp + count-split
+        self.leaf_ver = 0                    # monotonic set-version, bumped on every leaf delta: a hash-free change signal
+        self.tree = Treap()                  # the reconciliation set: a clamping-invariant treap (O(log n) range fp)
+        self._leaves = set()                 # fids currently in the leaf set: membership, to detect a no-op delta
         self.frontier = deque()              # FIFO of fids to (re)step
         self._queued = set()                 # membership mirror of the frontier: O(1) dedup ('in' on a deque is O(n))
 
@@ -494,17 +586,17 @@ class Node:
             out = self.root.project(f, ctx, dict(self.slices)) or Out("Parked")
         self._promote(fid, f, out)
 
-    def _leafset_update(self, fid, f):   # keep the skeleton's leaf-hash set + the XOR fingerprint current.
-        ts = ts_of(f); kb = _kb(ts, fid)   # a leaf iff durable, shareable, and Valid|Suppressed (tombstones stay)
-        new = None
-        if (fid in self.durable and self.memo.get(fid) in ("Valid", "Suppressed")
-                and self.root.extract(f)[1]):
-            new = H(frame(fid, ts.to_bytes(8, "little"), H(self.durable[fid])))
-        old = self.tree.h.get(kb)        # the skeleton IS the set; its leaf hash is the prior value
-        if old == new: return            # no delta: leave the set and its XOR untouched
-        if old is not None: self.leaf_xor ^= int.from_bytes(old, "big")
-        if new is not None: self.leaf_xor ^= int.from_bytes(new, "big")
-        self.tree.remove(kb) if new is None else self.tree.insert(kb, new)
+    def _leafset_update(self, fid, f):   # keep the reconciliation treap current with this fact's leaf membership.
+        # A fact is a leaf iff durable, shareable, and Valid|Suppressed (tombstones stay, so deletions reconcile).
+        # Its leaf hash is a constant per fid (fid/ts/bytes are all fixed), so membership is the only thing that
+        # changes; a fid set detects the no-op so a re-promotion neither re-hashes nor spuriously bumps leaf_ver.
+        should = (fid in self.durable and self.memo.get(fid) in ("Valid", "Suppressed")
+                  and self.root.extract(f)[1])
+        if should == (fid in self._leaves): return          # membership unchanged: no delta
+        kb = _kb(ts_of(f), fid)
+        if should: self._leaves.add(fid); self.tree.insert(kb, H(frame(fid, kb[:8], H(self.durable[fid]))))
+        else: self._leaves.discard(fid); self.tree.remove(kb)
+        self.leaf_ver += 1               # a cheap "my set moved" signal for the daemon (a counter, never a hash)
         self._sumcache.clear()           # the leaf set moved: the memoised summaries are stale
 
     def _promote(self, fid, f, out):

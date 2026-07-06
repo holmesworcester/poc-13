@@ -40,19 +40,19 @@ def _ids(v):                                          # a ship offer's value: le
 
 def reconcile(a, b, maxr=6000, lo=0):
     """Drive two nodes to convergence over the decomposed wire. Each side opens a
-    bare-root compare when its leaf set changes (the daemon's leaf_xor guard),
+    bare-root compare when its leaf set changes (the daemon's leaf_ver guard),
     every send/ship offer is delivered to the peer and its owner fired, and fired
     owners are presented as `shipped` next cycle so the volatile couriers reap.
     Returns the count of wire frames (compares + haves + needs) that crossed."""
     floor = b"" if lo <= 0 else lo.to_bytes(8, "big") + b"\x00" * 32
-    inbox = {a: [], b: []}; xor = {a: None, b: None}; fired = {a: [], b: []}; frames = [0]
+    inbox = {a: [], b: []}; ver = {a: None, b: None}; fired = {a: [], b: []}; frames = [0]
     def step(me, other):
         me.turn(shipped=tuple(fired[me])); fired[me] = []       # present last cycle's flush reports
         got, inbox[me] = inbox[me], []
         for blob in got: me.admit(blob)                         # admit what the peer sent
         me.run()
-        if me.leaf_xor != xor[me]:                              # leaf set moved: open a fresh round
-            cmp.open_round(me, CID, floor); xor[me] = me.leaf_xor; me.run()
+        if me.leaf_ver != ver[me]:                              # leaf set moved: open a fresh round
+            cmp.open_round(me, CID, floor); ver[me] = me.leaf_ver; me.run()
         did = False                                             # pump: deliver offers, fire owners
         for role in (b"send", b"ship"):
             for o, _, at in me.watched(role, b"outbox"):

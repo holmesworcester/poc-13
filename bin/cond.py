@@ -120,7 +120,7 @@ def main(db, *argv):
         h, pt = listen.rsplit(":", 1)
         tsock = socket.create_server((h, int(pt))); tsock.setblocking(False)
     links, inbound = {}, []              # links: addr -> outbound socket; inbound: read sources
-    redial, synced, armed = {}, {}, set()             # redial: addr -> last dial ; synced: cid -> last leaf_xor ; armed cids
+    redial, synced, armed = {}, {}, set()             # redial: addr -> last dial ; synced: cid -> last leaf_ver ; armed cids
     to_ship = set()                                   # flushed senders awaiting their reap
     for sg in (signal.SIGINT, signal.SIGTERM): signal.signal(sg, lambda *a: sys.exit(0))
     print("listening:", "%s:%s" % tsock.getsockname()[:2] if tsock else sp, flush=True)
@@ -197,8 +197,8 @@ def main(db, *argv):
                 for _ep, _addr, cid, _who in conn.peers(node):
                     if cid not in armed:             # a new connection: arm its cadence tiers (periodic pulls)
                         cadence.arm(node, cid, now_ms()); armed.add(cid); work = True
-                    if node.leaf_xor != synced.get(cid):    # my set moved: open a round now, don't wait a period
-                        sync.open_round(node, cid, lo); synced[cid] = node.leaf_xor; work = True
+                    if node.leaf_ver != synced.get(cid):    # my set moved: open a round now, don't wait a period
+                        sync.open_round(node, cid, lo); synced[cid] = node.leaf_ver; work = True
             for p in links.values():
                 if p["s"] and pending(p) and p["s"] in w:
                     try: work |= drain(p) > 0

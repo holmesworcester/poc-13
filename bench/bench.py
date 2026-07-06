@@ -138,15 +138,15 @@ def _ids(v):                             # a ship offer's value: length-framed f
 def leaves(n): return set(n.tree.keys)   # the reconciliation set as 40-byte (ts‖FactId) keys
 
 def _reconcile(a, b, maxr=100_000):      # the daemon's exact wire discipline, in-process (mirrors test_sync)
-    inbox, xor, fired = {a: [], b: []}, {a: None, b: None}, {a: [], b: []}
+    inbox, ver, fired = {a: [], b: []}, {a: None, b: None}, {a: [], b: []}
     frames, wire = [0], [0]
     def step(me, other):
         me.turn(shipped=tuple(fired[me])); fired[me] = []       # present last cycle's flush reports
         got, inbox[me] = inbox[me], []
         for blob in got: me.admit(blob)                         # admit what the peer sent
         me.run()
-        if me.leaf_xor != xor[me]:                              # leaf set moved: open a fresh compare round
-            sync.open_round(me, _CID, b""); xor[me] = me.leaf_xor; me.run()
+        if me.leaf_ver != ver[me]:                              # leaf set moved: open a fresh compare round
+            sync.open_round(me, _CID, b""); ver[me] = me.leaf_ver; me.run()
         did = False                                             # pump: deliver every send/ship offer to the peer
         for role in (b"send", b"ship"):
             for o, _, at in me.watched(role, b"outbox"):
@@ -172,10 +172,12 @@ def bench_sync():                         # the incremental case; bulk catch-up 
 # --- 5. two real daemons over TCP: sustained convergence ----------------------
 # Bulk catch-up used to cliff at ~1 MiB (a few hundred fact/s past it); a 2026-07-05
 # profiling pass fixed the four O(n^2) causes (frontier membership, bucket scan,
-# un-batched pulls, and the flush rescan — see TODO.md) and it now runs at thousands
-# of fact/s, mildly superlinear (~O(n^1.3)). The residual is B re-fingerprinting on
-# each re-descend; the flat-hash Skeleton.fp would need an augmented tree to finish
-# it. Live-tail (§5c) is unaffected. Budgets stay loose regression tripwires — the
+# un-batched pulls, and the flush rescan — see TODO.md), then `kernel.Treap` (a
+# clamping-invariant treap) took the range fingerprint from O(range) to O(log n),
+# clearing the last superlinear term in the tree (catch-up ~22% faster at 100k, ~3.8x
+# at 500k, controlled A/B). What now dominates the 500k tail is the daemon layer
+# (per-turn SQLite commit + admission + round-trips under OUTCAP), not the tree.
+# Live-tail (§5c) is unaffected. Budgets stay loose regression tripwires — the
 # feed-poll used to detect convergence is itself O(n) and understates throughput.
 def bench_daemons():
     section("5. two daemons over TCP (min 30s / 2000 facts)")

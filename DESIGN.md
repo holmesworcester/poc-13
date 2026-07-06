@@ -438,25 +438,31 @@ the window is engine-owned (see Hydration, Part I).
 Sync reconciles facts, never atoms. The protocol lives in `facts/sync/`; the
 kernel's contribution is engine state, not policy: every validity delta
 incrementally maintains the leaf set — `(ts, FactId) -> leaf hash` over every
-fact that is durable, shareable, and `Valid|Suppressed` — plus an XOR
-whole-set fingerprint (idle change-detection) and `kernel.Skeleton`, the
-reconciler over the sorted 40-byte `ts‖FactId` keys. Suppressed facts stay in
-the leaf set, which is how deletions reconcile. A leaf hash is
-`H(FactId ‖ ts ‖ H(bytes))` — bytes-only, so the skeleton stores only
+fact that is durable, shareable, and `Valid|Suppressed` — in `kernel.Treap`, plus
+`leaf_ver`, a monotonic counter (never a hash) the daemon watches for "my set
+moved". Suppressed facts stay in the leaf set, which is how deletions reconcile. A
+leaf hash is `H(FactId ‖ ts ‖ H(bytes))` — bytes-only, so the tree stores only
 `key -> leaf hash`, never fact bodies. That body-independence is the seam for a
 later residency/sync split (sync the full leaf set, hydrate a recent subset).
 
-**Range-based set reconciliation (RBSR; Meyer, rbsr_nonhomomorphic).** A key
-range `[lo, hi)` is summarised by a NON-homomorphic fingerprint — `H` of its
-leaf hashes in key order (‖ count), collision-resistant unlike an XOR/sum
-fold. A range whose fingerprints differ is split into `B` sub-ranges of EQUAL
-COUNT (an order-statistic split), NOT by key prefix — so fanout is the chosen
-`B` and depth is `log_B(n)` regardless of key distribution. (A radix/Merkle
-trie splits by tree shape, whose fanout is whatever key bytes happen to occur;
-that is the sub-optimal partitioning the paper rejects, and it made a fresh
-peer cost thousands of frames.) A range of `<= T` leaves is listed by id
-rather than fingerprinted, which ends the recursion — and lets an empty peer
-pull, since it lists its (empty) set and the peer then advertises what to send.
+**Range-based set reconciliation (RBSR; Meyer & Scherer, rbsr_nonhomomorphic).**
+The reconciliation set is a `kernel.Treap` — a search tree on the `ts‖FactId` key
+AND a heap on a priority (the leaf hash), so the tree SHAPE is a function of the
+set alone (history-independence) and two peers holding the same set build the same
+tree. Each node caches its subtree size and a Merkle label
+`H(left ‖ leaf hash ‖ right)`. A key range `[lo, hi)` is summarised by its CLAMPED
+label — the label of the tree with all out-of-range items discarded — computed by
+walking only the two boundary spines, `O(log n)`. Clamping-invariance makes that
+label a canonical function of the in-range SET (independent of tree shape and of
+out-of-range items), so two peers agree using an ORDINARY hash — no homomorphic or
+XOR/sum fold. A range whose fingerprints differ is split into `B` sub-ranges of
+EQUAL COUNT (an order-statistic `select` over the subtree counts), NOT by key
+prefix — so fanout is the chosen `B` and depth is `log_B(n)` regardless of key
+distribution. A range of `<= T` leaves is listed by id rather than fingerprinted,
+which ends the recursion — and lets an empty peer pull, since it lists its (empty)
+set and the peer then advertises what to send. (A maliciously degenerate set costs
+`O(n)` local compute to fingerprint; the paper shows communication, roundtrips, and
+censorship-resistance stay immune.)
 
 **One bundled family, `compare`.** A compare fact carries a set of claims over
 ranges — `fp` (a range fingerprint) or `ids` (a small range's complete id

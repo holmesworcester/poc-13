@@ -81,14 +81,33 @@ distinct bugs, all fixed (all tests green, bench budgets met):
 Also: bytes-buffer outbox → amortized-O(1) bytearray+offset, OUTCAP 1→32 MiB; a
 Node `_sumcache` lets the static source answer repeated re-opens from cache.
 
-Result (clean, non-perturbing; feed-polling inflates measurements 2–3×): single-
-node engine LINEAR to 400k (replay ~64 µs/fact); author 50k ~11s; catch-up 20k
-2.8s / 50k 14s / 100k 34s (~2900 fact/s). RESIDUAL: catch-up is ~O(n^1.3), not
-O(n²) — B re-fingerprints on each re-descend (`Skeleton.fp` is a flat O(range) hash
-over a sorted list; the `_sumcache` can't help B since its tree changes each batch).
-The principled finish is an augmented tree (deterministic treap, cached subtree
-digests) → O(log n) range-fp + insert; fold into the residency/sync split. Live-
-tail is unaffected (~40–66 ms). bench §5 budgets remain loose tripwires.
+The residual after those four (catch-up ~O(n^1.3)) was the sink re-fingerprinting
+on each re-descend: the flat sorted-list `Skeleton.fp` was O(range).
+
+Treap landed 2026-07-05 — the principled finish, following the paper poc-13 cites
+(Meyer & Scherer, "RBSR Without Homomorphic Hashing"). `kernel.Skeleton` (sorted
+list) → `kernel.Treap`: a history-independent, clamping-invariant treap. Range fp is
+the CLAMPED Merkle label (walk the two boundary spines), a canonical function of the
+in-range set — so peers agree with an ORDINARY hash (no XOR/sum fold; the non-
+homomorphic stance is kept, NOT traded away). Range fp goes O(range) → O(log n):
+tree-isolated root fingerprint 8 ms → 0.008 ms at 100k (~1000×), 78 ms → 0.011 ms at
+500k. Clamped walks + fids/keys are iterative (a maliciously degenerate spine costs
+O(n) time, never a stack overflow). `leaf_xor` (a hash of the leaf set) → `leaf_ver`
+(a monotonic counter), so change-detection never hashes. (A deferred/range-scoped
+leaf-hashing queue was built and measured, then removed: it only saved a NON-syncing
+node ~11-21% of admit — a syncing node paid the same total — so it wasn't worth the
+LOC. The eager treap keeps the tree current on each promote.) New `tests/test_treap.py`
+pins clamping-invariance, history-independence, deletion, and the degenerate-spine
+guard; a 4-agent adversarial pass (incl. an independent Algorithm-1 oracle) found no
+soundness defects.
+
+Result (controlled same-machine A/B, list vs treap): two-daemon catch-up 100k
+39.6 s → 31.0 s (~22%); 500k ~736 → ~2782 fact/s (~3.8×). Single-node admit/replay
+stays linear (deferral keeps it tree-free; the tree build is ~11–21% of admit, paid
+only at first sync). Live-tail unaffected (~40–100 ms). NEW residual at 500k: the
+tree is no longer the bottleneck — a daemon-layer cost (per-turn SQLite commit +
+admission + sync round-trip structure under OUTCAP) now dominates the 500k tail;
+that is the next thing to isolate. bench §5 budgets remain loose tripwires.
 
 ## Done (2026-07-03): consolidation + ports
 
