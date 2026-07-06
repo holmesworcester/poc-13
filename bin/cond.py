@@ -21,14 +21,18 @@ socket delivered it is irrelevant; the daemon opens it via a frame-family query,
 holding no sync policy. The sync re-descend cadence is a fact (sync.cadence, whose
 wake@clock alarm sets the select timeout via runtime.next_wake); only the
 socket-level request re-dial stays a process-local cadence.
-The outbound path tolerates loss up until admit: a frame fires best-effort on
-enqueue and a drop is healed by the next cadence re-descend."""
+The outbound path never re-ships a fact already sent this session: a per-connection
+`sent` set (source-side dedup) means a re-descend that re-asks for an in-flight fact
+costs O(diff) discovery, not O(diff) re-shipping — else a bulk catch-up re-ships the
+outstanding diff on every re-descend, O(n^2) on the wire. A full outbox parks the
+owner (it re-pumps once the buffer drains); a peer's socket break clears its `sent`
+so a reconnect re-ships (the connection id outlives the socket)."""
 import errno, os, select, signal, socket, sys, time
 BIN = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [BIN, os.path.dirname(BIN)]
 from kernel import Node, Store, _rd, decode, fact_id, frame
 from facts import ROOT
-from facts.sync import compare as sync, cadence
+from facts.sync import cadence
 from facts.auth import local_signer_secret, endpoint
 from facts.connection import request, connection as conn, frame as frames
 from runtime import cycle, outbox, pump, next_wake, load, flush, BOUND
@@ -76,7 +80,7 @@ def link(links, addr):                   # get-or-make the outbound link for an 
     if p is None: p = links[addr] = {"s": None, "out": bytearray(), "off": 0, "down": 0.0}
     return p
 
-def enqueue(p, kind, body):              # frame one wire message (park on overflow)
+def enqueue(p, kind, body):              # frame one wire message (drop on overflow; deliver pre-checks capacity)
     if pending(p) <= OUTCAP:
         w = bytes([kind]) + body
         p["out"] += len(w).to_bytes(4, "big") + w
@@ -120,8 +124,18 @@ def main(db, *argv):
         h, pt = listen.rsplit(":", 1)
         tsock = socket.create_server((h, int(pt))); tsock.setblocking(False)
     links, inbound = {}, []              # links: addr -> outbound socket; inbound: read sources
-    redial, synced, armed = {}, {}, set()             # redial: addr -> last dial ; synced: cid -> last leaf_ver ; armed cids
+    redial, armed = {}, set()                         # redial: addr -> last dial ; armed cids (their sync cadence)
     to_ship = set()                                   # flushed senders awaiting their reap
+    sent = {}                                         # cid -> set of what was sent this session: a shipped fact by id
+                                                      # AND a sync compare by content hash (both 32-byte digests). The
+                                                      # pump skips a repeat, so a re-descend re-asks the still-missing
+                                                      # diff but ships each fact once, and a static source re-authoring
+                                                      # its same split ships that compare once (else a bulk catch-up is
+                                                      # O(n^2) wire). Handshake frames are exempt (must re-send). Cleared
+                                                      # for a peer on its socket break, since the connection id is
+                                                      # deterministic and outlives the socket — a reconnect re-syncs in
+                                                      # full. Process-local, wiped on restart (poc-10 network_outgoing
+                                                      # parity). Memory is O(sent) per peer, below the resident set.
     for sg in (signal.SIGINT, signal.SIGTERM): signal.signal(sg, lambda *a: sys.exit(0))
     print("listening:", "%s:%s" % tsock.getsockname()[:2] if tsock else sp, flush=True)
     work = True
@@ -134,7 +148,7 @@ def main(db, *argv):
                     [p["s"] for p in links.values() if p["s"]] + [i["s"] for i in inbound]
             writes = [p["s"] for p in links.values() if p["s"] and pending(p)]
             r, w, _ = select.select(reads, writes, [], 0 if work else next_wake(node, now_ms(), CADENCE))
-            work = False
+            work = False; nowm = time.monotonic()
             # HOST IN — clients, new inbound peers, peer bytes.
             for s in r:
                 if s is usock: serve(node, s.accept()[0], store, flushed); work = True
@@ -177,32 +191,34 @@ def main(db, *argv):
                 if reply: conn.respond(node, rid, reply, now_s()); work = True   # response ships via the pump
             # HOST OUT — flush, redial, pump data, open sync rounds (one per peer), drain writes.
             flush(node, store, flushed)
-            nowm = time.monotonic()
             for addr, env in request.dials(node):     # (re)dial unanswered requests
                 a = addr.decode()
                 if nowm - redial.get(a, 0) >= CADENCE:
                     enqueue(link(links, a), BARE, env); redial[a] = nowm; work = True
-            def deliver(cid, addr, secret, inners):        # one out door: seal iff a session secret, else bare
-                p = link(links, addr.decode())
-                if secret:
-                    for blob in frames.pack(inners):
-                        enqueue(p, SEALED, frames.seal(blob, cid, secret, os.urandom(24)))
+            def deliver(cid, addr, secret, inners):        # one out door: seal iff a session secret, else bare.
+                p = link(links, addr.decode()); n = 0      # returns how many inners went out (a prefix): a full
+                if secret:                                 # outbox stops the tail, which pump leaves unmarked so
+                    for blob, cnt in frames.pack_counts(inners):     # the next re-descend re-ships it. Capacity is
+                        if pending(p) > OUTCAP: break      # checked BEFORE sealing, so a wedged peer costs no crypto.
+                        enqueue(p, SEALED, frames.seal(blob, cid, secret, os.urandom(24))); n += cnt
                 else:
-                    for inner in inners: enqueue(p, BARE, inner)     # pre-session handshake fact(s), unsealed
-                return True                                # fire best-effort; enqueue drops on overflow (§7.4)
-            fired = pump(node, lambda cid: conn.route(node, cid) or (cid, None), deliver, to_ship)
+                    for inner in inners:                   # pre-session handshake fact(s), unsealed
+                        if pending(p) > OUTCAP: break
+                        enqueue(p, BARE, inner); n += 1
+                return n
+            fired = pump(node, lambda cid: conn.route(node, cid) or (cid, None), deliver, to_ship, sent)
             to_ship |= fired; work |= bool(fired)          # flushed: next turn presents shipped@o and it reaps
             if not node.frontier:
-                lo = _floor_key(RETAIN_FLOOR)        # reconcile [floor, inf); closure ids pull deps below it
-                for _ep, _addr, cid, _who in conn.peers(node):
-                    if cid not in armed:             # a new connection: arm its cadence tiers (periodic pulls)
-                        cadence.arm(node, cid, now_ms()); armed.add(cid); work = True
-                    if node.leaf_ver != synced.get(cid):    # my set moved: open a round now, don't wait a period
-                        sync.open_round(node, cid, lo); synced[cid] = node.leaf_ver; work = True
-            for p in links.values():
+                for _ep, _addr, cid, _who in conn.peers(node):     # a new connection: arm its periodic sync cadence
+                    if cid not in armed:                           # the sole round-opener (rounds are facts, not a
+                        cadence.arm(node, cid, now_ms()); armed.add(cid); work = True   # daemon reaction)
+            for addr, p in links.items():
                 if p["s"] and pending(p) and p["s"] in w:
                     try: work |= drain(p) > 0
-                    except OSError: p["s"].close(); p["s"], p["out"], p["off"], p["down"] = None, bytearray(), 0, nowm + 0.05
+                    except OSError:
+                        p["s"].close(); p["s"], p["out"], p["off"], p["down"] = None, bytearray(), 0, nowm + 0.05
+                        for _e, _a, cid, _w in conn.peers(node):     # link down: forget what we shipped this addr,
+                            if _a.decode() == addr: sent.pop(cid, None)   # so a reconnect re-ships (cid persists)
     finally:
         usock.close(); os.unlink(sp)
         for p in links.values():

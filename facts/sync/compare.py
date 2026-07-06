@@ -43,12 +43,14 @@ def claims_within(claims, los, lo, hi):  # the claims fully inside [lo,hi), by b
     return out
 
 # SHAPE — a compare bundles claims (fp | ids) over key ranges, each paired with the
-# reserved summary need so the admitter's engine answers with its own view.
-def compare(cid, claims):                # claims: list of (role, lo, hi, payload)
-    atoms = [ts_atom(0, SC), Atom(OFFER, b"cid", SC, Exact(cid)), shipped_need]
+# reserved summary need (carrying the window floor, so the admitter's engine answers
+# with its own view AND, when windowed, the below-floor deps of each small range).
+def compare(cid, claims, floor=b""):     # claims: list of (role, lo, hi, payload)
+    atoms = [ts_atom(0, SC), Atom(OFFER, b"cid", SC, Exact(cid)),
+             Atom(OFFER, b"floor", SC, Exact(cid), floor), shipped_need]
     for role, lo, hi, payload in claims:
         atoms.append(Atom(OFFER, role, SC, Range(lo, hi), payload))
-        atoms.append(summary_need(lo, hi))
+        atoms.append(summary_need(lo, hi, floor))
     return fact(TAG, *atoms)
 
 # EXTRACT — volatile session state.
@@ -58,6 +60,7 @@ def extract(f): return False, False
 def project(f, ctx, sl):
     if by(ctx, b"shipped"): return Out("Reap")
     cid = _tgt(f, b"cid")
+    floor = next((a.value for a in f.atoms if a.role == b"floor"), b"")   # the window floor rides for re-threading
     S = by(ctx, SUM_ROLE)                                            # my view of each claimed range
     myfp   = {(a.target[1], a.target[2]): a.value for _, _, a in S if a.role == b"fp"}
     mycids = {(a.target[1], a.target[2]): a.value for _, _, a in S if a.role == b"cids"}
@@ -79,14 +82,14 @@ def project(f, ctx, sl):
             out += within(R)
     offers = []
     if want: offers.append(_send(cid, encode(need(cid, want))))     # ONE batched pull for everything I lack
-    if out: offers.append(_send(cid, encode(compare(cid, out))))
+    if out: offers.append(_send(cid, encode(compare(cid, out, floor))))   # re-thread the window floor into the descent
     if not offers: return Out("Reap")    # fully pruned, nothing to pull: done — reap, don't linger
     return Out(offers=tuple(offers))
 
 # COMMANDS — open a round: a bare fp-claim (b"" never matches) over the windowed
 # domain, so admitting it emits my split toward the peer without knowing theirs.
 def open_round(node, cid, floor=b""):
-    return node.admit(encode(compare(cid, [(b"fp", floor or b"", HI, b"")])))
+    return node.admit(encode(compare(cid, [(b"fp", floor or b"", HI, b"")], floor)))
 
 # QUERIES — none: the summary need is answered by the engine straight into project().
 

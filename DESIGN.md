@@ -515,6 +515,28 @@ settle marker, no round bookkeeping. A lost frame needs no retry state; the next
 cadence compare repairs it. Every peer link is full-duplex, and reconciliation
 is what a fact authored on one side rides to reach the others.
 
+**The daemon sends nothing to a peer twice — the re-descend is free.** Everything
+on the wire is content-addressed: a shipped fact by its id, and a compare frame by
+its content (a compare fixes `ts=0`, so an unchanged claim is byte-identical every
+time). The daemon keeps one per-connection *sent* set (source-side, process-local —
+poc-10's `network_outgoing` in spirit) holding both — both are 32-byte digests — and
+`pump` skips anything already sent this session. That closes the two halves of the
+old `O(n²)` catch-up: a `need` re-asks for facts still in flight (unadmitted on the
+peer), but each ships once; and a static source re-authoring the same split every
+cadence tick, or re-answering the same range on every re-descend, ships that compare
+once. A re-descend then costs `O(diff)` fresh discovery, not `O(n)` re-ship plus
+`O(n)` re-discovery — the difference between `O(n)` and `O(n²)` wire as the peer
+catches up, and a converged pair falls silent because its compares are all repeats.
+Handshake frames are exempt: `connection.connection`'s content *is* the connection id
+(both peers must derive it identically, and a durable request re-handshakes to the
+same id), so it can't vary — a reconnect must always re-send it. Only what actually
+left the outbox is marked (`deliver` reports the prefix it enqueued), so an
+overflow-dropped tail stays unmarked and re-ships on the next re-descend, and a
+partially-shipped `need` drains its remainder across turns rather than re-seal a
+parked frame. A peer's socket break clears its sent set — the connection id is
+deterministic and outlives the socket, so a reconnect (a healed partition) re-syncs
+in full. The set is wiped on restart, exactly as poc-10's temp-table outgoing queue is.
+
 ## Connections
 
 Peer sessions are facts too — the transport is a fact family, not an engine

@@ -16,16 +16,20 @@ were proven.
 - `bin/con.py` — `con <db> <scope.fact.verb> [args...]`. Proxies to a
   running daemon at `<db>.sock`, else a crash-and-demand: the file is
   indexed cold and hydration pulls only what the verb asks about.
-- `bin/cond.py` — `cond <db> [--listen HOST:PORT] [--peer HOST:PORT ...]`.
-  The daemon: owns the db, amortizes replay, serves con over the unix
-  socket, reconciles facts (the wire's only message) with TCP peers via the
-  sync family. Peers come from `connection.request` facts (`--peer` authors
-  one each); shipments ride `connection.frame` bundles. Backpressure everywhere
-  is the frontier's rule: park, never drop.
+- `bin/cond.py` — `cond <db> [--listen HOST:PORT]`. The daemon: owns the db,
+  amortizes replay, serves con over the unix socket, reconciles facts (the wire's
+  only message) with TCP peers via the sync family. A peer is dialed by a durable
+  sealed `connection.request` fact (the `connect` verb authors one); shipments ride
+  `connection.frame` bundles. Backpressure everywhere is the frontier's rule: park,
+  never drop.
 - `facts/sync/compare.py` — dependency-aware reconciliation over the kernel's
   radix Merkle skeleton: prefix-fingerprint descent over `(ts, FactId)` leaves,
-  reserved closure needs so deps travel on demand, compare frames that are
-  themselves volatile, unshareable facts.
+  splitting by count. A round carries a floor — a full round advertises leaves
+  only, a windowed one also rides each leaf's below-floor dependency closure, so a
+  recent fact validates without a dependency round-trip. Compare frames are
+  volatile, unshareable, content-addressed facts; the daemon dedups them (and the
+  fact ships) per connection, so a re-descend is fresh discovery, never re-work,
+  and a converged pair falls silent.
 - `facts/connection/` — peer sessions as facts: a durable sealed `request` to
   dial a peer and a `close` to retire it, a volatile `connection` record
   binding the session to a key, per-handshake `ephemeral_secret`s purged for

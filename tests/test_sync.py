@@ -9,9 +9,10 @@ fact's closure; a below-window dependency rides in as a closure id, pulled by id
 import os, random, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import crypto as _c
-from kernel import Node, decode, encode, fact_id, _rd
+from kernel import Node, decode, encode, fact_id, _rd, summary_need
 from facts import ROOT
 from facts.sync import compare as cmp, need as _need
+from facts.sync.compare import HI
 from facts.auth.workspace import workspace
 from facts.auth.invite_accepted import invite_accepted
 from facts.auth.signature import signature
@@ -67,6 +68,14 @@ def reconcile(a, b, maxr=6000, lo=0):
 
 def leaves(n): return {(int.from_bytes(k[:8], "big"), k[8:]) for k in n.tree.keys}  # (ts, fid) per leaf
 
+def cids_ids(n, lo, hi, floor):      # the fact ids a summary advertises as cids over [lo,hi) at this floor
+    out = set()
+    for _, _, a in n._summary_rows(summary_need(lo, hi, floor)):
+        if a.role != b"cids": continue
+        v, i = a.value, 0
+        while i < len(v): x, i = _rd(v, i); out.add(x)
+    return out
+
 # --- The algorithm, in-process --------------------------------------------------
 def test_equal_sets_zero_ships():
     a, b = node(WS, WS_SIG), node(WS, WS_SIG)
@@ -85,8 +94,8 @@ def test_one_fact_diff_ships_exactly_that_fact():
 
 def test_fresh_peer_gets_dependency_closure():
     a, b = node(WS, WS_SIG, message(WID, b"g", b"al", b"hi", T0 + HOUR)), node()
-    reconcile(a, b)
-    assert set(a.durable) == set(b.durable)        # workspace + signature rode along as the message's closure
+    reconcile(a, b)                                # full range (floor 0): the spine are in-range leaves of their
+    assert set(a.durable) == set(b.durable)        # own, enumerated and pulled directly — no closure ride needed
     assert feed(b, WID, b"g") == [b"hi"]
 
 def test_tombstone_travels_and_suppresses():
@@ -125,6 +134,21 @@ def test_reconcile_is_idempotent():
     before = set(b.durable)
     reconcile(a, b)                                # re-run on a converged pair
     assert set(b.durable) == before                # content-addressed: no rounds, no double-ship
+
+def test_full_range_advertises_leaves_only_windowed_carries_the_spine():
+    """The floor alone decides whether deps ride in cids — no separate flag. Over the
+    SAME range, a full round (floor=b"") advertises only the in-range leaf: every dep
+    is itself an in-range leaf, enumerated on its own, so repeating it is waste. A
+    windowed round (floor>0) additionally carries that leaf's below-floor SHAREABLE
+    spine as closure ids (the window won't enumerate it) — but never a local-only fact
+    like invite_accepted, which must not travel."""
+    recent = message(WID, b"g", b"al", b"recent", T0 + 30 * DAY)
+    a = node(WS, WS_SIG, recent)                                 # node() also holds a local invite_accepted (_ACCEPT)
+    lo = (T0 + 29 * DAY).to_bytes(8, "big") + b"\x00" * 32       # a range starting after the T0-founded spine
+    rid = fact_id(recent)
+    assert cids_ids(a, lo, HI, b"") == {rid}                     # full: just the in-range leaf, no deps repeated
+    assert cids_ids(a, lo, HI, lo) == {rid, WID, fact_id(WS_SIG)}   # windowed: + shareable below-floor spine
+    assert fact_id(_ACCEPT) not in cids_ids(a, lo, HI, lo)       # local-only invite_accepted never rides
 
 def test_windowed_in_range_facts_and_their_deps_reconcile():
     """In range: a fact at/after the window floor reconciles, and its below-floor
@@ -189,6 +213,7 @@ if __name__ == "__main__":
               test_fresh_peer_gets_dependency_closure, test_tombstone_travels_and_suppresses,
               test_sync_facts_volatile_and_excluded, test_shuffled_orders_converge,
               test_reconcile_is_idempotent,
+              test_full_range_advertises_leaves_only_windowed_carries_the_spine,
               test_windowed_in_range_facts_and_their_deps_reconcile,
               test_windowed_out_of_range_content_is_not_reconciled,
               test_windowed_bulk_converges_and_withholds, test_frame_count_is_sublinear):

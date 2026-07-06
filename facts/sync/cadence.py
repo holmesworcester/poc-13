@@ -8,7 +8,7 @@ per period. SUPPRESS on `closed@conn` tears it down; being volatile, a reconnect
 re-arms it (poc-10: sync cadence is process-local, cleared on restart). Tiers —
 narrow+frequent … wide+rare — are several of these per connection, staggered by
 their first boundary."""
-from kernel import (Atom, Exact, NEED, OFFER, Out, SELF, SUM_ROLE, SUPPRESS, WATCH,
+from kernel import (Atom, Exact, NEED, OFFER, Out, SELF, SUM_ROLE, SUPPRESS,
                     by, encode, fact, now_need, now_of, summary_need, ts_atom)
 from facts.sync.compare import compare, sorted_claims, claims_within, HI
 
@@ -28,7 +28,7 @@ def cadence(cid, floor, period_ms, first_ms):
                 Atom(OFFER, b"period", SC, SELF, _T8(period_ms)),
                 Atom(OFFER, b"first",  SC, SELF, _T8(first_ms)),
                 now_need(first_ms),                              # first wake at the first boundary
-                summary_need(floor or b"", HI),                  # my claims for the (windowed) domain
+                summary_need(floor or b"", HI, floor),           # my claims for the (windowed) domain, floor for deps
                 Atom(NEED, b"closed", b"conn", Exact(cid), effect=SUPPRESS))   # teardown on close
 
 # EXTRACT — volatile session state.
@@ -45,7 +45,7 @@ def project(f, ctx, sl):
         return Out(offers=(Atom(OFFER, *WAKE, Exact(_T8(due))),))
     sc = sorted_claims(by(ctx, SUM_ROLE))                         # due: open a round toward the peer
     claims = claims_within(sc, [c[0] for c in sc], floor or b"", HI)
-    offers = [Atom(OFFER, b"send", b"outbox", Exact(cid), encode(compare(cid, claims)))] if claims else []
+    offers = [Atom(OFFER, b"send", b"outbox", Exact(cid), encode(compare(cid, claims, floor)))] if claims else []
     offers.append(Atom(OFFER, *WAKE, Exact(_T8(now + period))))   # re-arm the next boundary
     return Out(offers=tuple(offers), slice_delta={(b"tick", cid, floor): _T8(now)})
 

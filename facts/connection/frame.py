@@ -33,13 +33,16 @@ def project(f, ctx, sl): return Out()
 # COMMANDS — none: a frame is sealed onto the wire, not into the db.
 
 # QUERIES — pure transforms over frame bytes; authority for nothing.
-def pack(items):                         # group fact frames into ~TARGET-sized plaintext blobs
+def pack_counts(items):                  # group into ~TARGET blobs, each with the inner count it holds
     out, cur, sz = [], [], 0
     for b in items:
-        if cur and sz + len(b) > TARGET: out.append(frame(*cur)); cur, sz = [], 0
+        if cur and sz + len(b) > TARGET: out.append((frame(*cur), len(cur))); cur, sz = [], 0
         cur.append(b); sz += len(b)
-    if cur: out.append(frame(*cur))
+    if cur: out.append((frame(*cur), len(cur)))
     return out
+
+def pack(items):                         # group fact frames into ~TARGET-sized plaintext blobs
+    return [blob for blob, _ in pack_counts(items)]
 
 def seal(blob, cid, secret, nonce):      # one plaintext blob -> one sealed wire message
     aad = frame(PURPOSE, cid, nonce)

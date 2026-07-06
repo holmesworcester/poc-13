@@ -557,19 +557,23 @@ class Node:
         # both are held fixed while only volatile sync facts churn, so a peer that
         # re-opens the same round every quiescence answers from this memo instead of
         # re-fingerprinting and re-walking closures. Cleared on any leaf/durable change.
-        cached = self._sumcache.get((lo, hi))
+        cached = self._sumcache.get((lo, hi, floor))    # floor keys the memo: it selects which deps ride in cids
         if cached is not None: return cached
         t = self.tree; R = lambda a: (_SUM, 0, a)
         rows = [R(Atom(OFFER, b"fp", b"sync", Range(lo, hi), t.fp(lo, hi)))]   # the prune-check fingerprint
-        def claim(a, b):                 # my claim for [a,b): ids (+ their closures) if small, else a fingerprint
+        def claim(a, b):                 # my claim for [a,b): the leaves (+ windowed: their below-floor deps), else a fp
             if t.small(a, b):
-                seen = set()
-                for f in t.fids(a, b): self.closure(f, seen)        # leaves + their deduped dependency closures
-                blob = frame(*[d for d in list(seen)[:CLOSURE_CAP] if d in self.facts])
+                ids = list(t.fids(a, b))                            # my leaves in range: always advertised (enumerate)
+                if floor:                                           # a windowed round: a leaf's below-floor deps won't
+                    seen = set()                                    # enumerate as leaves of their own, so they ride here
+                    for d in ids: self.closure(d, seen)             # as closure ids — only the shareable, below-floor ones
+                    ids += [d for d in seen if d in self.facts and _kb(ts_of(self.facts[d]), d) < floor
+                            and self.root.extract(self.facts[d])[1]]
+                blob = frame(*ids[:CLOSURE_CAP])                    # full round (floor==b""): leaves only — none below b""
                 return R(Atom(OFFER, b"cids", b"sync", Range(a, b), blob))
             return R(Atom(OFFER, b"cfp", b"sync", Range(a, b), t.fp(a, b)))
         rows += [claim(lo, hi)] if t.small(lo, hi) else [claim(a, b) for a, b in t.parts(lo, hi)]
-        self._sumcache[(lo, hi)] = rows
+        self._sumcache[(lo, hi, floor)] = rows
         return rows
 
     def _resident_rows(self, n):         # answered iff I already hold the fact — the have/need pull seam
