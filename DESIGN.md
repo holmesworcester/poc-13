@@ -83,8 +83,7 @@ LE length). Each atom contributes its own framed canonical byte form.
 FactId = H("poc13.fact.v1" ‖ type_tag ‖ atoms)
 ```
 
-`H` is 32-byte BLAKE2b standing in for BLAKE3-256 (the switch to real
-BLAKE3 is staged on branch `blake3-h`). The encoding is one fixed
+`H` is BLAKE3-256 (32 bytes, via the `blake3` package). The encoding is one fixed
 self-delimiting byte form, version-free forever; the domain string is the
 only dialect marker. Strict decode rejects malformed encodings, unsorted or
 duplicate atoms, and trailing bytes — anything that does not re-encode

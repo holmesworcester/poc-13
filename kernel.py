@@ -15,13 +15,18 @@ from the durable fact set alone: `replay()` is the whole crash story. With a
 Store, replay is demand-driven: a stepped fact's needs pull matching cold
 facts resident (hydration), so a session pays for what it asks about.
 
-Stand-in: BLAKE2b-256 for BLAKE3-256 (stdlib has no BLAKE3).
+Hash: BLAKE3-256 (the `blake3` package; stdlib has none).
 """
 from collections import deque
 from dataclasses import dataclass, field, replace
-import hashlib, sqlite3, struct, time
+import sqlite3, struct, time
 
-H = lambda b: hashlib.blake2b(b, digest_size=32).digest()
+try:
+    from blake3 import blake3 as _b3
+except ImportError as e:                 # the repo's one non-crypto-suite dependency
+    raise ImportError("poc-13 needs blake3 (pip install blake3)") from e
+
+H = lambda b: _b3(b).digest()
 now = lambda: int(time.time())           # host convenience; never engine input
 
 def frame(*ps):                          # ‖ : length-framed concat (injective)
@@ -414,6 +419,40 @@ class Bucket:
             return [r for v, rs in self.exact.items() if lo <= v <= hi for r in rs]
         return []
 
+class CleanBucket:
+    """The clean-twin index for one (role, scope): the SAME exact/range split as
+    Bucket, but over validated `(owner, ts, atom)` rows, so `valid_offers` is a
+    point/range lookup and not a scan of every same-key offer (the last linear
+    scan in the match path). Iterable — `list(bucket)` / `for o,t,a in bucket`
+    yield every row — so watched() and derived() read it unchanged."""
+    __slots__ = ("exact", "ranges")
+    def __init__(self): self.exact, self.ranges = {}, []      # value -> [row] ; [row]  (row = (owner, ts, atom))
+
+    def add(self, r):
+        (self.exact.setdefault(r[2].target[1], []) if r[2].target[0] == EXACT
+         else self.ranges).append(r)
+    def remove(self, r):
+        if r[2].target[0] == EXACT:
+            lst = self.exact.get(r[2].target[1])
+            if lst and r in lst:
+                lst.remove(r)
+                if not lst: del self.exact[r[2].target[1]]
+        elif r in self.ranges: self.ranges.remove(r)
+
+    def match(self, nt):                 # rows whose OFFER target covers the NEED target nt (the covers() relation)
+        if nt[0] == EXACT:               # need a point: exact offers at v, plus every range offer spanning v
+            v = nt[1]
+            return (list(self.exact.get(v, ()))
+                    + [r for r in self.ranges if r[2].target[1] <= v <= r[2].target[2]])
+        if nt[0] == RANGE:               # need a range: the exact offers inside it (SELF/range-range never match)
+            lo, hi = nt[1], nt[2]
+            return [r for v, rs in self.exact.items() if lo <= v <= hi for r in rs]
+        return []
+    def __iter__(self):                  # every row, in no particular order — for watched() and derived()
+        return iter([r for rs in self.exact.values() for r in rs] + self.ranges)
+    def __len__(self):
+        return sum(len(rs) for rs in self.exact.values()) + len(self.ranges)
+
 # --- The engine --------------------------------------------------------------------
 class Node:
     """One engine over one root projector. Durable authority = self.durable
@@ -467,9 +506,8 @@ class Node:
         b = self.rows.get((OFFER, need.role, need.scope)); return b.match(need.target) if b else []
     def needs_for(self, offer):          # wake fanout direction
         b = self.rows.get((NEED, offer.role, offer.scope)); return b.match(offer.target) if b else []
-    def valid_offers(self, need):        # the clean twin: the only justifier
-        return [r for r in self.clean.get((need.role, need.scope), ())
-                if covers(r[2].target, need.target)]
+    def valid_offers(self, need):        # the clean twin: the only justifier — a point/range lookup, not a scan
+        b = self.clean.get((need.role, need.scope)); return b.match(need.target) if b else []
 
     def _enqueue(self, fid):             # add to the frontier iff not already pending (mirror keeps 'in' O(1))
         if fid not in self._queued: self.frontier.append(fid); self._queued.add(fid)
@@ -544,7 +582,9 @@ class Node:
     # `shipped` is the daemon's flush reports at the SHIPPED key, waking a sender
     # Watching shipped@SELF to decide its own retirement.
     def _present(self, role, scope, rows):
-        self.clean[(role, scope)] = rows
+        b = CleanBucket()
+        for r in rows: b.add(r)
+        self.clean[(role, scope)] = b
         for _, _, off in rows: self._wake(off)
 
     def _present_now(self, now):
@@ -608,7 +648,7 @@ class Node:
         for r in old: self.clean[(r[2].role, r[2].scope)].remove(r)
         new = ([(fid, ts_of(f), mat(a, fid)) for a in out.offers]
                if out.verdict == "Valid" else [])
-        for r in new: self.clean.setdefault((r[2].role, r[2].scope), []).append(r)
+        for r in new: self.clean.setdefault((r[2].role, r[2].scope), CleanBucket()).add(r)
         if new: self.owned[fid] = new
         self.slices = {k: v for k, v in self.slices.items() if v[0] != fid}
         if out.verdict == "Valid":

@@ -101,13 +101,32 @@ pins clamping-invariance, history-independence, deletion, and the degenerate-spi
 guard; a 4-agent adversarial pass (incl. an independent Algorithm-1 oracle) found no
 soundness defects.
 
-Result (controlled same-machine A/B, list vs treap): two-daemon catch-up 100k
-39.6 s → 31.0 s (~22%); 500k ~736 → ~2782 fact/s (~3.8×). Single-node admit/replay
-stays linear (deferral keeps it tree-free; the tree build is ~11–21% of admit, paid
-only at first sync). Live-tail unaffected (~40–100 ms). NEW residual at 500k: the
-tree is no longer the bottleneck — a daemon-layer cost (per-turn SQLite commit +
-admission + sync round-trip structure under OUTCAP) now dominates the 500k tail;
-that is the next thing to isolate. bench §5 budgets remain loose tripwires.
+Result (controlled A/B, list vs treap): two-daemon catch-up 100k 39.6 s → 31.0 s
+(~22%); 500k ~736 → ~2782 fact/s (~3.8×). Single-node admit/replay stays linear.
+
+CleanBucket landed 2026-07-05 — the daemon-layer residual, isolated. A daemon
+cProfile of the sink at 100k named `valid_offers` (the clean twin, the only
+justifier) the #1 cost: it was the ONE index the earlier six-bug pass left as a
+LINEAR SCAN of `self.clean[(role,scope)]` (the asserted index got `Bucket`; the
+clean twin did not). Some (role,scope) bucket grows with n, so the scan was O(n)
+per call × O(n) calls = O(n²). `kernel.CleanBucket` gives it the same exact/range
+split as Bucket → a point lookup. Controlled A/B (pre 974cce9 vs post): catch-up
+100k 59.8 s → 33.8 s, 200k 251.9 s → 143.8 s — a ~1.77× win (bench §3 confirms
+valid_offers is now a 0.1 µs bucket lookup).
+
+STILL superlinear after CleanBucket (200k/100k ≈ 4.3×): a SECOND O(n²) in the
+re-descend structure. The sink re-opens a root compare on every leaf_ver change
+(cond.py); each re-descend re-finds the (still large) remaining diff and the peer
+re-advertises/re-ships facts already in the sink's inbox → the cost shows up as
+codec (re-decoding re-sent compares/facts). Damping the immediate re-open was
+tried and BACKFIRED (200k 143.8 s → 271.6 s: the immediate open is load-bearing —
+it pulls the next batch promptly; without it the sink idles on the 500 ms cadence).
+The real fix is source-side: don't re-ship a fact recently sent to a peer (poc-10
+per-connection shipped-set) so a re-descend during drain costs O(diff) discovery,
+not O(diff) re-shipping. Left as the next residual. bench §5 budgets stay loose.
+
+Hash: `H` switched from the BLAKE2b-256 stand-in to real BLAKE3-256 (the `blake3`
+package; `crypto.keyed_hash` too) — every fact id changes; all tests + bench green.
 
 ## Done (2026-07-03): consolidation + ports
 

@@ -35,8 +35,8 @@ were proven.
   file shape), and black-box tests (one process per command, plus real
   daemon subprocesses on real sockets).
 
-Run: `pytest` or `python3 tests/test_<name>.py`. One dependency: PyNaCl
-(`pip install pynacl`).
+Run: `pytest` or `python3 tests/test_<name>.py`. Two dependencies: PyNaCl and
+blake3 (`pip install pynacl blake3`).
 
 ```
 $ bin/con.py w.facts auth.workspace.create acme        # prints <wid>
