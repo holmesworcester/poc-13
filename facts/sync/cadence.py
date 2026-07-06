@@ -10,7 +10,7 @@ narrow+frequent … wide+rare — are several of these per connection, staggered
 their first boundary."""
 from kernel import (Atom, Exact, NEED, OFFER, Out, SELF, SUM_ROLE, SUPPRESS, WATCH,
                     by, encode, fact, now_need, now_of, summary_need, ts_atom)
-from facts.sync.compare import compare, claims_within, HI
+from facts.sync.compare import compare, sorted_claims, claims_within, HI
 
 TAG = b"sync.cadence"
 SC = b"sync"
@@ -43,7 +43,8 @@ def project(f, ctx, sl):
     due = (last + period) if last is not None else first
     if now is None or now < due:                             # not due: just hold the alarm at `due`
         return Out(offers=(Atom(OFFER, *WAKE, Exact(_T8(due))),))
-    claims = claims_within(by(ctx, SUM_ROLE), floor or b"", HI)   # due: open a round toward the peer
+    sc = sorted_claims(by(ctx, SUM_ROLE))                         # due: open a round toward the peer
+    claims = claims_within(sc, [c[0] for c in sc], floor or b"", HI)
     offers = [Atom(OFFER, b"send", b"outbox", Exact(cid), encode(compare(cid, claims)))] if claims else []
     offers.append(Atom(OFFER, *WAKE, Exact(_T8(now + period))))   # re-arm the next boundary
     return Out(offers=tuple(offers), slice_delta={(b"tick", cid, floor): _T8(now)})

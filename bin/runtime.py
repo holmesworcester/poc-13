@@ -21,10 +21,13 @@ def load(node, store):                   # full replay: own db passed the gate o
     for fb in store.all(): node.admit(fb, checked=True)
     node.run()
 
-def flush(node, store, flushed):         # one transaction per host turn; the flushed
-    if len(flushed) == len(node.durable): return   # set keeps the repeat scan cheap
-    for fid, fb in node.durable.items():
-        if fid not in flushed: store.add(fb, hot=True); flushed.add(fid)
+def flush(node, store, flushed):         # one transaction per host turn. durable is
+    if len(flushed) == len(node.durable): return   # append-only, so the unflushed facts are a
+    new = []                             # contiguous tail: scan back from newest until an already-
+    for fid in reversed(node.durable):   # flushed id, never the whole set (that repeat scan was O(n^2)).
+        if fid in flushed: break
+        new.append(fid)
+    for fid in reversed(new): store.add(node.durable[fid], hot=True); flushed.add(fid)
     store.commit()
 
 def cycle(node, inbox, now_ms, shipped, bound=BOUND):

@@ -33,7 +33,10 @@ from facts.auth import local_signer_secret, endpoint
 from facts.connection import request, connection as conn, frame as frames
 from runtime import cycle, outbox, pump, next_wake, load, flush, BOUND
 
-OUTCAP = 1 << 20                         # per-address outbox byte cap: overflow parks
+OUTCAP = 32 << 20                        # per-address outbox byte cap: overflow parks (healed by re-descend).
+                                         # Larger = fewer catch-up round-trips (each re-descend re-fingerprints),
+                                         # bounded by the memory a stalled peer may hold. The buffer is a
+                                         # bytearray drained by offset, so a big cap stays O(1)-amortized.
 CADENCE = 0.5                            # s between redials / periodic root compares per peer
 RETAIN_FLOOR = 0                         # sync reconciles [RETAIN_FLOOR, inf) of (ts, FactId); the reserved
                                          # closure need pulls deps below it. The floor IS the retention horizon
@@ -62,15 +65,28 @@ def serve(node, s, store, flushed):      # one framed verb request per unix conn
     s.close()
 
 # --- outbound: a persistent socket per destination address ----------------------
+# The outbox is a bytearray drained by a send offset (`off`), never re-sliced per
+# send, so append and drain are amortized O(1) regardless of buffer size — a fresh
+# peer's whole catch-up can queue without the O(n^2) that byte-string concat costs.
+SENDWIN = 1 << 20                        # bytes copied out per send() — a bound, not the whole buffer
+pending = lambda p: len(p["out"]) - p["off"]   # unsent bytes still buffered
+
 def link(links, addr):                   # get-or-make the outbound link for an address
     p = links.get(addr)
-    if p is None: p = links[addr] = {"s": None, "out": b"", "down": 0.0}
+    if p is None: p = links[addr] = {"s": None, "out": bytearray(), "off": 0, "down": 0.0}
     return p
 
 def enqueue(p, kind, body):              # frame one wire message (park on overflow)
-    if len(p["out"]) <= OUTCAP:
+    if pending(p) <= OUTCAP:
         w = bytes([kind]) + body
         p["out"] += len(w).to_bytes(4, "big") + w
+
+def drain(p):                            # push a bounded window; compact the sent prefix amortized
+    seg = bytes(p["out"][p["off"]:p["off"] + SENDWIN])
+    k = p["s"].send(seg); p["off"] += k
+    if p["off"] >= len(p["out"]): p["out"], p["off"] = bytearray(), 0   # fully sent: reset
+    elif p["off"] > SENDWIN: del p["out"][:p["off"]]; p["off"] = 0      # reclaim the sent prefix
+    return k
 
 def dial(p):                             # non-blocking (re)connect to the address
     h, pt = p["addr"].rsplit(":", 1)
@@ -112,11 +128,11 @@ def main(db, *argv):
     try:
         while True:
             for a, p in list(links.items()):         # bring up outbound links that owe bytes
-                if not p["s"] and p["out"] and time.monotonic() >= p["down"]:
+                if not p["s"] and pending(p) and time.monotonic() >= p["down"]:
                     p["addr"] = a; dial(p)
             reads = [usock] + ([tsock] if tsock else []) + \
                     [p["s"] for p in links.values() if p["s"]] + [i["s"] for i in inbound]
-            writes = [p["s"] for p in links.values() if p["s"] and p["out"]]
+            writes = [p["s"] for p in links.values() if p["s"] and pending(p)]
             r, w, _ = select.select(reads, writes, [], 0 if work else next_wake(node, now_ms(), CADENCE))
             work = False
             # HOST IN — clients, new inbound peers, peer bytes.
@@ -184,9 +200,9 @@ def main(db, *argv):
                     if node.leaf_xor != synced.get(cid):    # my set moved: open a round now, don't wait a period
                         sync.open_round(node, cid, lo); synced[cid] = node.leaf_xor; work = True
             for p in links.values():
-                if p["s"] and p["out"] and p["s"] in w:
-                    try: k = p["s"].send(p["out"]); p["out"] = p["out"][k:]; work |= k > 0
-                    except OSError: p["s"].close(); p["s"], p["out"], p["down"] = None, b"", nowm + 0.05
+                if p["s"] and pending(p) and p["s"] in w:
+                    try: work |= drain(p) > 0
+                    except OSError: p["s"].close(); p["s"], p["out"], p["off"], p["down"] = None, bytearray(), 0, nowm + 0.05
     finally:
         usock.close(); os.unlink(sp)
         for p in links.values():

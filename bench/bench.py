@@ -10,8 +10,9 @@ The load is deliberately the shape the design assumes: one workspace, messages
 fanned across a few channels. Two costs are made visible rather than hidden: full
 in-memory replay and every sync `leaves()` are LINEAR over the resident set; the
 daemon's cold start pays a full replay before it serves (§2). The two-daemon TCP
-sync sections (§5) run in a slow, variable regime past ~1 MiB of shipped bytes —
-see the note there — so their budgets are loose smoke-test floors. See README.
+sync sections (§5) are now thousands of fact/s (mildly superlinear — see the note
+there); budgets stay loose because the feed-poll used to detect convergence is
+itself O(n) and the wall varies with the box. See README.
 """
 import os, signal, socket, subprocess, sys, tempfile, time
 BENCH = os.path.dirname(os.path.abspath(__file__))
@@ -169,13 +170,13 @@ def bench_sync():                         # the incremental case; bulk catch-up 
     report("  wire", w / 1024, "KiB", 60)
 
 # --- 5. two real daemons over TCP: sustained convergence ----------------------
-# Bulk catch-up is bimodal: below ~1 MiB of shipped bytes (~2000 messages) it runs
-# at thousands of facts/s; past that it falls to a few hundred/s. Two compounding
-# causes (measured): the outbox OUTCAP (1 MiB) parks the overflow, healed only on
-# the next re-descend; and the RBSR descent restarts from the root per bounded
-# batch, so bulk-from-empty is ~O(n^2). Live-tail (a fresh leaf to a caught-up
-# peer, §5c) stays sub-second regardless. The budgets here are loose regression
-# tripwires for this regime, not tuned targets.
+# Bulk catch-up used to cliff at ~1 MiB (a few hundred fact/s past it); a 2026-07-05
+# profiling pass fixed the four O(n^2) causes (frontier membership, bucket scan,
+# un-batched pulls, and the flush rescan — see TODO.md) and it now runs at thousands
+# of fact/s, mildly superlinear (~O(n^1.3)). The residual is B re-fingerprinting on
+# each re-descend; the flat-hash Skeleton.fp would need an augmented tree to finish
+# it. Live-tail (§5c) is unaffected. Budgets stay loose regression tripwires — the
+# feed-poll used to detect convergence is itself O(n) and understates throughput.
 def bench_daemons():
     section("5. two daemons over TCP (min 30s / 2000 facts)")
     with tempfile.TemporaryDirectory() as d:
@@ -229,8 +230,8 @@ def bench_catchup():                      # a bulk backlog authored on A (the fo
             dt = time.time() - t0
             assert got >= n, f"caught up only {got}/{n}"
             mb = os.path.getsize(dbb) / 1048576               # B's db is exactly the fact bytes it synced
-            report("catch-up (bulk sync)", n / dt, "fact/s", 40, hi_ok=True)
-            report("catch-up volume", mb / dt, "MB/s", 0.04, hi_ok=True)
+            report("catch-up (bulk sync)", n / dt, "fact/s", 800, hi_ok=True)  # ~5700 here; catches the old ~200/s cliff
+            report("catch-up volume", mb / dt, "MB/s", 0.5, hi_ok=True)
         finally: stop(pa, pb)
 
 def bench_newest():                       # live-tail: a freshly-authored leaf reaches a caught-up

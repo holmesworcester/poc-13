@@ -63,16 +63,32 @@ Done (2026-07-03): fresh-facts-first landed as live-tail sends (poc-10
 block) — a fresh leaf reaches a caught-up peer in ~37 ms (bench 5c, retargeted
 2026-07-05 to measure exactly that steady-state live-tail latency).
 
-Known perf (measured 2026-07-05): **bulk sync catch-up from empty is ~O(n²)**
-with a sharp throughput cliff at ~1 MiB of shipped bytes (~2000 messages): fast
-below it (thousands/s), a few hundred/s above. Two compounding causes — the
-outbox `OUTCAP` (1 MiB) parks overflow, healed only on the next re-descend; and
-the RBSR descent restarts from the root per bounded batch, re-fingerprinting the
-growing tree (raising OUTCAP gave 2–4×; lowering CADENCE did nothing, so it is
-not pacing-bound). Live-tail is unaffected. Fold the fix (resume/stream the
-descent; re-ship parked frames when the outbox drains) into the residency/sync
-split — the daemon-transition work. bench §5 budgets are loose tripwires until
-then.
+Perf (profiled + largely fixed 2026-07-05). A "profile 10k–500k, isolate
+segments, make it work" pass root-caused the apparent bulk-catch-up O(n²) to four
+distinct bugs, all fixed (all tests green, bench budgets met):
+  1. `_wake` used `o not in self.frontier` (deque membership, O(len)); a late-
+     validating fact wakes N needs as the frontier grows 0→N → O(n²). Now a
+     `_queued` set mirrors the frontier → O(1). Replay 295→61 µs/fact (5×).
+  2. `needs_for`/`offers_for` scanned a whole (role,scope) bucket then filtered by
+     `covers`; the volatile-courier `shipped` bucket got rescanned every turn
+     (358M covers). Now `kernel.Bucket` indexes exact targets in a dict → O(1) point.
+  3. `sync/compare.project` authored one `need` per claim, not the batched single
+     pull it documents → catch-up frames 139k→16 at n=4000. `claims_within` also
+     rescanned the whole summary per claim → now a bisect over sorted claims.
+  4. `runtime.flush` rescanned ALL of `node.durable` each call → authoring N facts
+     was O(n²) (the dominant cost, 36s/96s at 50k). durable is append-only, so scan
+     only the new tail. Authoring is now linear (~0.2 ms/fact).
+Also: bytes-buffer outbox → amortized-O(1) bytearray+offset, OUTCAP 1→32 MiB; a
+Node `_sumcache` lets the static source answer repeated re-opens from cache.
+
+Result (clean, non-perturbing; feed-polling inflates measurements 2–3×): single-
+node engine LINEAR to 400k (replay ~64 µs/fact); author 50k ~11s; catch-up 20k
+2.8s / 50k 14s / 100k 34s (~2900 fact/s). RESIDUAL: catch-up is ~O(n^1.3), not
+O(n²) — B re-fingerprints on each re-descend (`Skeleton.fp` is a flat O(range) hash
+over a sorted list; the `_sumcache` can't help B since its tree changes each batch).
+The principled finish is an augmented tree (deterministic treap, cached subtree
+digests) → O(log n) range-fp + insert; fold into the residency/sync split. Live-
+tail is unaffected (~40–66 ms). bench §5 budgets remain loose tripwires.
 
 ## Done (2026-07-03): consolidation + ports
 

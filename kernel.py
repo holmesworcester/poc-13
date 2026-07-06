@@ -290,6 +290,39 @@ class Skeleton:
         bounds = [lo] + [self.keys[i + (p * n) // self.B] for p in range(1, self.B)] + [hi]
         return [(a, b) for a, b in zip(bounds, bounds[1:]) if a != b]
 
+# --- The match index ---------------------------------------------------------------
+class Bucket:
+    """One (kind, role, scope) match bucket. Exact-target atoms live in a dict
+    keyed by target value (the common case: a point need/offer is an O(1) lookup,
+    not a scan of every same-role atom); the few range-target atoms sit in a short
+    list. covers() reduces, in BOTH match directions, to the same function of the
+    query target — a point hits `exact[v]` plus any range that spans v; a range
+    hits the exact values inside it (range-vs-range never matches) — so one
+    `match` serves offers_for and needs_for alike."""
+    __slots__ = ("exact", "ranges")
+    def __init__(self): self.exact, self.ranges = {}, []      # value -> [(owner,atom)] ; [(owner,atom)]
+
+    def add(self, owner, a):
+        (self.exact.setdefault(a.target[1], []) if a.target[0] == EXACT
+         else self.ranges).append((owner, a))
+    def discard(self, owner, a):
+        if a.target[0] == EXACT:
+            lst = self.exact.get(a.target[1])
+            if lst and (owner, a) in lst:
+                lst.remove((owner, a))
+                if not lst: del self.exact[a.target[1]]
+        elif (owner, a) in self.ranges: self.ranges.remove((owner, a))
+
+    def match(self, t):                  # the atoms a query target `t` covers-matches (either direction)
+        if t[0] == EXACT:                # a point: the exact bin at v, plus every range that spans v
+            v = t[1]
+            return (list(self.exact.get(v, ()))
+                    + [r for r in self.ranges if r[1].target[1] <= v <= r[1].target[2]])
+        if t[0] == RANGE:                # a range: the exact values inside it (ranges never match ranges)
+            lo, hi = t[1], t[2]
+            return [r for v, rs in self.exact.items() if lo <= v <= hi for r in rs]
+        return []
+
 # --- The engine --------------------------------------------------------------------
 class Node:
     """One engine over one root projector. Durable authority = self.durable
@@ -303,15 +336,18 @@ class Node:
         self.facts, self.durable = {}, {}    # id -> Fact ; id -> canonical bytes
         # Match index bucketed by (kind, role, scope): a need only ever matches
         # offers sharing its role+scope, so one bucket is the whole candidate
-        # set — no linear scan of the asserted set per query.
-        self.rows = {}                       # (kind,role,scope) -> [(owner, atom)]: the asserted match index
+        # set. Each bucket then indexes exact targets by value, so a point query
+        # is an O(1) lookup, never a scan of every same-role atom.
+        self.rows = {}                       # (kind,role,scope) -> Bucket: the asserted match index
         self.memo, self.clean = {}, {}       # id -> verdict ; (role,scope) -> [(owner, ts, atom)]
         self.owned = {}                      # id -> its clean rows, for owner-scoped replacement
         self.slices = {}                     # key -> (owner, ts, value), LWW by (ts, owner)
         self._deps = {}                      # id -> direct Require/suppress edge owners: the dependency memo
+        self._sumcache = {}                  # (lo,hi) -> summary rows: reused while the leaf/durable set holds still
         self.leaf_xor = 0                    # XOR of every leaf hash: an O(1) whole-set change fingerprint
         self.tree = Skeleton()               # the reconciliation set: key -> leaf hash, range fp + count-split
-        self.frontier = deque()
+        self.frontier = deque()              # FIFO of fids to (re)step
+        self._queued = set()                 # membership mirror of the frontier: O(1) dedup ('in' on a deque is O(n))
 
     # Host in — admission gates; a failed gate is inert. checked=True (replay
     # from own durable file) skips the family self-check: those bytes passed once.
@@ -325,28 +361,30 @@ class Node:
         if chk and not chk(f): return None   # per-family self-check: falsy = inert miss
         durable, _shareable = self.root.extract(f)
         self.facts[fid], self.memo[fid] = f, "Unknown"
-        if durable: self.durable[fid] = b    # atomic flush
+        if durable: self.durable[fid] = b; self._sumcache.clear()   # the closure graph grew: drop the memo
         for a in f.atoms:
-            self.rows.setdefault((a.kind, a.role, a.scope), []).append((fid, mat(a, fid)))
-        self.frontier.append(fid)
+            self.rows.setdefault((a.kind, a.role, a.scope), Bucket()).add(fid, mat(a, fid))
+        self._enqueue(fid)
         self._deps.clear()                   # the graph changed: rebuild the validated-edge memo lazily
         return fid
 
     # A shared role+scope is the whole precondition for a match, so it keys the
-    # bucket; covers() decides the rest over just those candidates.
+    # bucket; the bucket's own index decides the rest over just the candidates a
+    # point/range can touch — the same covers() relation, without the linear scan.
     def offers_for(self, need):          # asserted, dirty: discovery only
-        return [(o, a) for o, a in self.rows.get((OFFER, need.role, need.scope), ())
-                if covers(a.target, need.target)]
+        b = self.rows.get((OFFER, need.role, need.scope)); return b.match(need.target) if b else []
     def needs_for(self, offer):          # wake fanout direction
-        return [(o, a) for o, a in self.rows.get((NEED, offer.role, offer.scope), ())
-                if covers(offer.target, a.target)]
+        b = self.rows.get((NEED, offer.role, offer.scope)); return b.match(offer.target) if b else []
     def valid_offers(self, need):        # the clean twin: the only justifier
         return [r for r in self.clean.get((need.role, need.scope), ())
                 if covers(r[2].target, need.target)]
 
+    def _enqueue(self, fid):             # add to the frontier iff not already pending (mirror keeps 'in' O(1))
+        if fid not in self._queued: self.frontier.append(fid); self._queued.add(fid)
+
     def _wake(self, offer, skip=None):   # re-enqueue every need this offer covers (never its own owner)
         for o, _ in self.needs_for(offer):
-            if o != skip and o not in self.frontier: self.frontier.append(o)
+            if o != skip: self._enqueue(o)
 
     def deps(self, fid):                 # fid's direct Require/suppress edge owners: its dependency spine.
         d = self._deps.get(fid)          # STRUCTURAL/asserted (from offers_for), NOT validity-gated — validity is
@@ -385,6 +423,12 @@ class Node:
     def _summary_rows(self, n):          # RBSR: my fingerprint for the range + my reconciliation claims for it.
         lo, hi = n.target[1], n.target[2]; floor = n.value or b""
         if floor > lo: lo = floor        # clip the range to the window floor
+        # A summary is a pure function of the leaf set + the durable closure graph;
+        # both are held fixed while only volatile sync facts churn, so a peer that
+        # re-opens the same round every quiescence answers from this memo instead of
+        # re-fingerprinting and re-walking closures. Cleared on any leaf/durable change.
+        cached = self._sumcache.get((lo, hi))
+        if cached is not None: return cached
         t = self.tree; R = lambda a: (_SUM, 0, a)
         rows = [R(Atom(OFFER, b"fp", b"sync", Range(lo, hi), t.fp(lo, hi)))]   # the prune-check fingerprint
         def claim(a, b):                 # my claim for [a,b): ids (+ their closures) if small, else a fingerprint
@@ -395,6 +439,7 @@ class Node:
                 return R(Atom(OFFER, b"cids", b"sync", Range(a, b), blob))
             return R(Atom(OFFER, b"cfp", b"sync", Range(a, b), t.fp(a, b)))
         rows += [claim(lo, hi)] if t.small(lo, hi) else [claim(a, b) for a, b in t.parts(lo, hi)]
+        self._sumcache[(lo, hi)] = rows
         return rows
 
     def _resident_rows(self, n):         # answered iff I already hold the fact — the have/need pull seam
@@ -423,7 +468,8 @@ class Node:
         if now is not None: self._present_now(now)   # the host hands time to the turn
         self._present_shipped(shipped)               # and the wire hands back its flush reports
         for _ in range(min(bound, len(self.frontier))):
-            self._step(self.frontier.popleft())
+            fid = self.frontier.popleft(); self._queued.discard(fid)
+            self._step(fid)
 
     def run(self):
         for _ in range(100_000):
@@ -459,6 +505,7 @@ class Node:
         if old is not None: self.leaf_xor ^= int.from_bytes(old, "big")
         if new is not None: self.leaf_xor ^= int.from_bytes(new, "big")
         self.tree.remove(kb) if new is None else self.tree.insert(kb, new)
+        self._sumcache.clear()           # the leaf set moved: the memoised summaries are stale
 
     def _promote(self, fid, f, out):
         self.memo[fid] = out.verdict
@@ -485,8 +532,7 @@ class Node:
                     assert o == fid or na.effect not in (REQUIRE, SUPPRESS), "reap of a gating offer"
             self.facts.pop(fid, None); self.memo.pop(fid, None)
             for a in f.atoms:                # drop its asserted rows so nothing re-wakes it
-                k, m = (a.kind, a.role, a.scope), mat(a, fid)
-                if (bk := self.rows.get(k)) and (fid, m) in bk: bk.remove((fid, m))
+                if bk := self.rows.get((a.kind, a.role, a.scope)): bk.discard(fid, mat(a, fid))
 
     # Host out — the host drains validated offers at keys it watches, performs
     # external work, and admits facts reporting what happened. It never writes.

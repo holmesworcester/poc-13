@@ -18,6 +18,7 @@ log_B(n) and matched subranges are pruned wholesale. No rounds and no daemon
 reaction: convergence is fingerprint agreement, every response is a projector offer
 at the connection's outbox key, and a dropped frame just re-descends next cadence.
 Volatile (extract -> False, False): session state, never itself a leaf."""
+from bisect import bisect_left
 from kernel import (Atom, Exact, OFFER, Out, Range, SUM_ROLE, by, encode, fact,
                     summary_need, shipped_need, ts_atom, _rd)
 from facts.sync.need import need
@@ -31,9 +32,15 @@ def _unframe(v):
     out, i = [], 0
     while i < len(v): x, i = _rd(v, i); out.append(x)
     return out
-def claims_within(S, lo, hi):            # my summary's claim rows inside [lo,hi) -> wire (fp | ids) claims
-    return [(b"fp" if a.role == b"cfp" else b"ids", a.target[1], a.target[2], a.value)
-            for _, _, a in S if a.role in (b"cfp", b"cids") and lo <= a.target[1] and a.target[2] <= hi]
+def sorted_claims(S):                    # my split claims (cfp|cids) as wire claims, sorted by low key
+    return sorted((a.target[1], a.target[2], b"fp" if a.role == b"cfp" else b"ids", a.value)
+                  for _, _, a in S if a.role in (b"cfp", b"cids"))
+def claims_within(claims, los, lo, hi):  # the claims fully inside [lo,hi), by bisect (claims are disjoint)
+    out, i = [], bisect_left(los, lo)    # first claim with low >= lo; scan forward while still below hi
+    while i < len(claims) and claims[i][0] < hi:
+        clo, chi, role, val = claims[i]; i += 1
+        if chi <= hi: out.append((role, clo, chi, val))
+    return out
 
 # SHAPE — a compare bundles claims (fp | ids) over key ranges, each paired with the
 # reserved summary need so the admitter's engine answers with its own view.
@@ -54,8 +61,9 @@ def project(f, ctx, sl):
     S = by(ctx, SUM_ROLE)                                            # my view of each claimed range
     myfp   = {(a.target[1], a.target[2]): a.value for _, _, a in S if a.role == b"fp"}
     mycids = {(a.target[1], a.target[2]): a.value for _, _, a in S if a.role == b"cids"}
-    within = lambda R: claims_within(S, R[0], R[1])                  # my claims inside a range, as wire claims
-    out, offers = [], []
+    claims = sorted_claims(S); los = [c[0] for c in claims]         # sorted once, range-restricted by bisect
+    within = lambda R: claims_within(claims, los, R[0], R[1])       # my claims inside a range, as wire claims
+    out, want, seen = [], [], set()                                 # out: claims to descend; want: ids to pull
     for a in f.atoms:
         if a.role not in (b"fp", b"ids"): continue                  # a peer claim
         R = (a.target[1], a.target[2])
@@ -63,12 +71,14 @@ def project(f, ctx, sl):
             if myfp.get(R) == a.value: continue                     # ranges agree: prune
             out += within(R)                                        # differ: descend / advertise my side
         elif R in mycids:                                           # peer id list, small on my side too: diff
-            mset, pset = set(_unframe(mycids[R])), set(_unframe(a.value))
-            lack = [x for x in _unframe(a.value) if x not in mset]
-            if lack: offers.append(_send(cid, encode(need(cid, lack))))   # pull what I lack, batched
-            if mset - pset: out.append((b"ids", R[0], R[1], mycids[R]))    # I hold extras: re-advertise
+            mset, pids = set(_unframe(mycids[R])), _unframe(a.value)
+            for x in pids:                                          # accumulate what I lack (deduped, ordered)
+                if x not in mset and x not in seen: seen.add(x); want.append(x)
+            if mset - set(pids): out.append((b"ids", R[0], R[1], mycids[R]))   # I hold extras: re-advertise
         else:                                                       # peer id list, large on my side: descend
             out += within(R)
+    offers = []
+    if want: offers.append(_send(cid, encode(need(cid, want))))     # ONE batched pull for everything I lack
     if out: offers.append(_send(cid, encode(compare(cid, out))))
     if not offers: return Out("Reap")    # fully pruned, nothing to pull: done — reap, don't linger
     return Out(offers=tuple(offers))
