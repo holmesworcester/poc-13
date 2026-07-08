@@ -8,7 +8,7 @@ per period. SUPPRESS on `closed@conn` tears it down; being volatile, a reconnect
 re-arms it (poc-10: sync cadence is process-local, cleared on restart). Tiers —
 narrow+frequent … wide+rare — are several of these per connection, staggered by
 their first boundary."""
-from kernel import (Atom, Exact, NEED, OFFER, Out, SELF, SUM_ROLE, SUPPRESS,
+from kernel import (Atom, Exact, H, NEED, OFFER, Out, SELF, SUM_ROLE, SUPPRESS,
                     by, encode, fact, now_need, now_of, summary_need, ts_atom)
 from facts.sync.compare import compare, sorted_claims, claims_within, HI
 
@@ -34,20 +34,35 @@ def cadence(cid, floor, period_ms, first_ms):
 # EXTRACT — volatile session state.
 def extract(f): return False, False
 
-# PROJECT — hold the alarm until due; when due, open a round and re-arm.
+# PROJECT — hold the alarm until due; when due, open a round and re-arm. The clock
+# wakes this every turn (now_need is an unbounded deadline watch), and a promote clears
+# the fact's own slices, so BOTH the last-fire tick and the last-shipped opener hash are
+# carried forward in slice_delta on every branch — else an early (not-due) wake during a
+# busy turn would drop them, re-firing the opener each turn. Carrying them makes the fact
+# self-limit: fire at most once per period, re-open only when my split actually moved.
 def project(f, ctx, sl):
     cid, floor = _tgt(f, b"cid"), _val(f, b"floor")
     period, first = int.from_bytes(_val(f, b"period"), "big"), int.from_bytes(_val(f, b"first"), "big")
     now = now_of(ctx)
     rec = sl.get((b"tick", cid, floor)); last = int.from_bytes(rec[1], "big") if rec else None
+    srec = sl.get((b"sent", cid, floor)); sent_h = srec[1] if srec else b""   # my last-shipped opener hash
+    keep = {}                                                    # carry memory across the clearing promote
+    if last is not None: keep[(b"tick", cid, floor)] = _T8(last)
+    if sent_h: keep[(b"sent", cid, floor)] = sent_h
     due = (last + period) if last is not None else first
     if now is None or now < due:                             # not due: just hold the alarm at `due`
-        return Out(offers=(Atom(OFFER, *WAKE, Exact(_T8(due))),))
+        return Out(offers=(Atom(OFFER, *WAKE, Exact(_T8(due))),), slice_delta=keep)
     sc = sorted_claims(by(ctx, SUM_ROLE))                         # due: open a round toward the peer
     claims = claims_within(sc, [c[0] for c in sc], floor or b"", HI)
-    offers = [Atom(OFFER, b"send", b"outbox", Exact(cid), encode(compare(cid, claims, floor)))] if claims else []
+    offers = []
+    if claims:                                                    # my split for the (windowed) domain
+        body = encode(compare(cid, claims, floor)); h = H(body)
+        if h != sent_h:                                           # only re-open when my split moved since last ship —
+            offers.append(Atom(OFFER, b"send", b"outbox", Exact(cid), body))   # idempotent silence otherwise, no daemon dedup
+            keep[(b"sent", cid, floor)] = h
     offers.append(Atom(OFFER, *WAKE, Exact(_T8(now + period))))   # re-arm the next boundary
-    return Out(offers=tuple(offers), slice_delta={(b"tick", cid, floor): _T8(now)})
+    keep[(b"tick", cid, floor)] = _T8(now)
+    return Out(offers=tuple(offers), slice_delta=keep)
 
 # COMMANDS — arm the tiers for a connection (staggered first boundaries).
 TIERS = ((b"", 500),)                    # (floor, period_ms): one full-domain tier by default

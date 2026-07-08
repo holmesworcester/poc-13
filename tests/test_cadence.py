@@ -1,8 +1,10 @@
-"""Cadence as facts (M7): a sync.cadence fact opens a round once per period, driven
-by the clock the turn presents — no daemon marker. It offers a wake@clock alarm at
-its next boundary (runtime.next_wake reads it for the select timeout), fires at most
-once per period though the clock re-wakes it every turn, re-arms itself, and is torn
-down by a closed@conn Suppress. Driven in-process by advancing turn(now=...)."""
+"""Cadence as facts (M7): a sync.cadence fact opens a round each period IF its domain
+split moved, driven by the clock the turn presents — no daemon marker. It offers a
+wake@clock alarm at its next boundary (runtime.next_wake reads it for the select
+timeout), fires at most once per period though the clock re-wakes it every turn,
+re-opens only when its split hash changed since the last ship (idempotent silence
+otherwise — the fact-native replacement for the daemon's opener dedup), re-arms
+itself, and is torn down by a closed@conn Suppress. Driven by advancing turn(now=...)."""
 import os, sys
 HERE = os.path.dirname(os.path.abspath(__file__)); ROOT_DIR = os.path.dirname(HERE)
 sys.path[:0] = [ROOT_DIR, os.path.join(ROOT_DIR, "bin")]
@@ -33,7 +35,7 @@ def _compares(n):                                       # send offers carrying a
     return [a for _, _, a in n.watched(b"send", b"outbox")
             if a.target[1] == CID and decode(a.value).type_tag == CMP_TAG]
 
-def test_cadence_opens_a_round_once_per_period():
+def test_cadence_opens_a_round_when_the_split_moves():
     n = node()
     cadence.arm(n, CID, 0)                               # first boundary at now(0) + PERIOD
     n.turn(now=0); n.run()
@@ -45,7 +47,12 @@ def test_cadence_opens_a_round_once_per_period():
     n.turn(now=PERIOD + 1); n.run()
     assert not _compares(n)                              # same period, re-woken: does not fire again
     n.turn(now=2 * PERIOD); n.run()
-    assert len(_compares(n)) == 1                        # next period: fires once more
+    assert not _compares(n)                              # next period, split unchanged: idempotent silence
+    n.admit(encode(message(WID, b"g", b"al", b"hi2", T0 + 3601))); n.run()   # my shareable set moves
+    n.turn(now=3 * PERIOD); n.run()
+    assert len(_compares(n)) == 1                        # split changed: re-opens exactly one round
+    n.turn(now=4 * PERIOD); n.run()
+    assert not _compares(n)                              # and falls silent again once it has re-shipped
 
 def test_next_wake_reads_the_alarm():
     n = node(); cadence.arm(n, CID, 0); n.turn(now=100); n.run()
@@ -67,6 +74,6 @@ def test_cadence_is_volatile():
     assert syn and not any(fid in n.durable for fid in syn)   # session state, never flushed
 
 if __name__ == "__main__":
-    for t in (test_cadence_opens_a_round_once_per_period, test_next_wake_reads_the_alarm,
+    for t in (test_cadence_opens_a_round_when_the_split_moves, test_next_wake_reads_the_alarm,
               test_closed_conn_tears_it_down, test_cadence_is_volatile):
         t(); print("ok ", t.__name__)
