@@ -1,13 +1,15 @@
 """Close and purge (poc-10 close-purge): severing a live session flips its whole
 cluster — the connection, its request, and the handshake ephemerals — to
 Suppressed via the death key each carries, so the daemon drops the socket and
-stops dialing; the close is durable, so a restart replays it and the peer stays
-closed. Purge is the forward-secrecy sweep: once suppressed, the ephemeral
+stops dialing; the close is durable, so a reboot faults it back and the peer
+stays closed. Purge is the forward-secrecy sweep: once suppressed, the ephemeral
 private keys are DELETEd from disk and dropped from memory, leaving no residue."""
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from kernel import Node, Store, encode
+from harness import reboot
 from facts import ROOT
 from facts.auth import endpoint, invite_accepted, local_signer_secret, user_invite
 from facts.auth import workspace as wsmod
@@ -46,7 +48,7 @@ def test_restart_stays_closed():
     host, joiner = _node(), _node()
     rid, cid = _handshake(host, joiner)
     close.sever(host, cid, 5); host.run()
-    m = host.replay()                                            # durable close replays
+    m = reboot(host)                                             # the durable close reboots
     assert m.memo[rid] == "Suppressed", "a severed peer stays closed across restart"
 
 def test_purge_reclaims_the_ephemeral_secret():

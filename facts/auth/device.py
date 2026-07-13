@@ -59,7 +59,7 @@ def own(node, workspace_id):             # this node's own device (endpoint_shar
                  if _split3(a.value)[0] == epk and _split3(a.value)[2] == workspace_id), None)
 
 def devices(node, workspace_id):
-    hydrate.demand(node, b"device", workspace_id); node.run()
+    hydrate.demand(node, b"device", workspace_id)
     return [a.value for o, t, a in sorted(node.watched(b"device", workspace_id),
                                           key=lambda r: (r[1], r[0]))]
 

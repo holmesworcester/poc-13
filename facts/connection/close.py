@@ -56,6 +56,7 @@ def purge(node, store, cid):             # forward secrecy: reclaim the severed 
         for m in (node.durable, node.facts, node.memo): m.pop(fid, None)
         gone.append(fid)
     store.commit()
+    node.refault()                       # the relation changed underneath: re-check the keys
     return gone
 
 def _eph_id(node, eph_pk):

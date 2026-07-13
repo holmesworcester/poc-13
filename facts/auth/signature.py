@@ -46,7 +46,7 @@ def attest(node, workspace_id, sk, pk, target_id, t):
 
 # QUERIES — observations over validated state only.
 def signed(node, workspace_id, target_id):
-    hydrate.demand(node, b"sig", workspace_id); node.run()
+    hydrate.demand(node, b"sig", workspace_id)
     return [a.value for _, _, a in node.watched(b"sig", workspace_id)
             if a.target == Exact(target_id)]
 

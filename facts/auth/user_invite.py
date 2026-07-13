@@ -50,7 +50,7 @@ def invite(node, workspace_id, t):
 
 # QUERIES — observations over validated state only.
 def outstanding(node, workspace_id):
-    hydrate.demand(node, b"invite", workspace_id); node.run()
+    hydrate.demand(node, b"invite", workspace_id)
     return [o for o, t, a in node.watched(b"invite", workspace_id)]
 
 # CLI — string boundary over COMMANDS/QUERIES.

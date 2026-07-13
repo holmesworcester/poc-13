@@ -28,7 +28,7 @@ def queue(node, dest, payload, t):
 
 # QUERIES — observations over validated state only, ordered by (ts, owner).
 def pending(node):
-    hydrate.demand(node, b"send", b"outbox"); node.run()
+    hydrate.demand(node, b"send", b"outbox")
     return sorted(node.watched(b"send", b"outbox"), key=lambda r: (r[1], r[0]))
 
 # CLI — string boundary over COMMANDS/QUERIES.

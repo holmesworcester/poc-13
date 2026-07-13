@@ -1,10 +1,14 @@
 """Signature tests: RFC 8032 vectors, the admission gate, and the promise that
-replay never re-verifies. A detached signature is checked exactly once, when
-it first enters; a user parks until its signature lands (either order)."""
+a reboot never re-verifies: a signature is checked exactly once, when it
+first enters — existence in the store is the persisted certificate, and the
+re-hash on reconstruction transfers it. A user parks until its signature
+lands (either order)."""
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import crypto as e
+from harness import reboot
 from kernel import Node, Atom, encode, fact, fact_id, ts_atom
 from facts import ROOT
 from facts.auth import signature as sigmod, user as usermod, workspace as wsmod
@@ -106,8 +110,8 @@ def test_replay_never_reverifies():
                                      if f.type_tag == b"auth.signature"][0]])
         assert calls, "a live check must call verify"   # gate really runs the crypto
         calls.clear()
-        m = n.replay()                                  # rebuild from the durable file
-        assert calls == [], "replay must not re-verify"
+        m = reboot(n)                                   # boot from the durable rows
+        assert calls == [], "boot must not re-verify: existence is the certificate"
         assert m.memo[uid] == "Valid"                   # yet the member is still valid
     finally:
         sigmod.verify = orig

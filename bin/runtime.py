@@ -7,9 +7,9 @@ Watches shipped reaps); `outbox` is the validated send/ship rows a pump ships;
 durable bytes, hands the inners to a `deliver` callback, and returns the owners that
 fired — the next cycle's `shipped`. No sockets and no sync/handshake logic live
 here: the daemon supplies `route` (connection -> addr+secret) and `deliver` (pack,
-seal, enqueue), so this stays testable with plain callbacks. `load`/`flush` bookend
-the turn with the durable store: `load` replays it on startup, `flush` persists each
-turn's new durable facts (a flushed set keeps the repeat scan cheap)."""
+seal, enqueue), so this stays testable with plain callbacks. `flush` persists each
+turn's new durable facts (a flushed set keeps the repeat scan cheap). There is no
+load: boot is a fact — store.hydrate's total demand faults the db resident."""
 import os, sys
 BIN = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [BIN, os.path.dirname(BIN)]
@@ -17,17 +17,13 @@ from kernel import unframe, H
 
 BOUND = 64                               # admits/steps per turn; the engine drain bound
 
-def load(node, store):                   # full replay: own db passed the gate once
-    for fb in store.all(): node.admit(fb, checked=True)
-    node.run()
-
 def flush(node, store, flushed):         # one transaction per host turn. durable is
     if len(flushed) == len(node.durable): return   # append-only, so the unflushed facts are a
     new = []                             # contiguous tail: scan back from newest until an already-
     for fid in reversed(node.durable):   # flushed id, never the whole set (that repeat scan was O(n^2)).
         if fid in flushed: break
         new.append(fid)
-    for fid in reversed(new): store.add(node.durable[fid], hot=True); flushed.add(fid)
+    for fid in reversed(new): store.add(node.durable[fid]); flushed.add(fid)
     store.commit()
 
 def cycle(node, inbox, now_ms, shipped, bound=BOUND):

@@ -54,7 +54,7 @@ def join(node, workspace_id, name, t, invite):
 
 # QUERIES — observations over validated state only, ordered by (ts, owner).
 def roster(node, workspace_id):
-    hydrate.demand(node, b"member", workspace_id); node.run()
+    hydrate.demand(node, b"member", workspace_id)
     return [a.value for o, t, a in sorted(node.watched(b"member", workspace_id),
                                           key=lambda r: (r[1], r[0]))]
 

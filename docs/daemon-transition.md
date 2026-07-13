@@ -1,5 +1,10 @@
 # Daemon / sync / connection transition — implementation plan
 
+> **Superseded in part (branch fault-in):** the store hook, hydration windows,
+> `missing_needs`, `Store.pull/all`, `Node.replay`, and `runtime.load` no longer
+> exist. Matching faults from the persisted atom relation at step time, and boot
+> is one total `store.hydrate` fact. References below describe main as it was.
+
 Executable plan for reshaping the daemon, sync, and connection model into the declarative
 form we settled on. Optimising for **readability, simplicity, low LOC**. This doc is the
 source of truth: current-state inventory, concrete code for every change, per-milestone

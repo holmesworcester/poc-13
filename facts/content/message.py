@@ -31,7 +31,7 @@ def send(node, workspace_id, channel, author, body, t):
 # QUERIES — observations over validated state only, ordered by (ts, owner).
 # Queries author volatile demand (never durable facts) and drain before reading.
 def feed(node, workspace_id, channel):
-    hydrate.demand(node, b"msg", workspace_id); node.run()
+    hydrate.demand(node, b"msg", workspace_id)
     return [a.value for o, t, a in sorted(node.watched(b"msg", workspace_id),
                                           key=lambda r: (r[1], r[0]))
             if a.target == Exact(channel)]

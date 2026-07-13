@@ -6,13 +6,25 @@ per call — for bulk authoring, same precedent as bench.py's uverb). The story
 tests are only acceptable because failures self-describe: converge() names the
 phase, the node, what was expected and what was last observed; fleet() tracks
 every spawned daemon and appends each one's stderr tail to any failure."""
-import os, signal, socket, subprocess, sys, tempfile, time
+import os, random, signal, socket, subprocess, sys, tempfile, time
 from contextlib import contextmanager
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BIN = os.path.join(ROOT, "bin")
 sys.path.insert(0, ROOT)
-from kernel import frame, _rd
+from kernel import Node, Store, frame, _rd
+
+def reboot(node, seed=0):
+    """The crash story: flush the node's durable set to a store (shuffled —
+    db row order must not matter), then a fresh node over that store boots
+    by ONE total hydrate fact. There is no load and no replay to call."""
+    from facts.store import hydrate
+    s = Store()
+    bs = list(node.durable.values()); random.Random(seed).shuffle(bs)
+    for b in bs: s.add(b)
+    m = Node(node.root, s)
+    hydrate.demand(m)
+    return m
 
 def spawn(db, *args):                    # -> (proc, announced addr)
     p = subprocess.Popen([sys.executable, os.path.join(BIN, "cond.py"), db, *args],

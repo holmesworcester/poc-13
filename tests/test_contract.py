@@ -28,13 +28,12 @@ def test_fact_contract():
         assert "CLI = {" in part["# CLI"], p                      # explicit verb table
 
 def test_needs_carry_no_values():
-    """Need values belong to the engine — today that is the hydration window
-    on Watch needs (kernel Store.pull keys on a 21-byte value). A family
-    that put a value on a need would get silently windowed pulls, so no
-    family constructs one; store/hydrate is the single exemption, since
-    authoring the window is its whole job."""
+    """Needs carry no values — a need is a key, and matching reads nothing
+    else. No exemptions: the hydration window died with the store spider
+    (a demand is one value-free Watch need; the total demand is a reserved
+    key the fault leg reads as 'every stored fact')."""
     for p in FACTS.rglob("*.py"):
-        if p.name == "__init__.py" or p.relative_to(FACTS).parts == ("store", "hydrate.py"):
+        if p.name == "__init__.py":
             continue
         for node in ast.walk(ast.parse(p.read_text())):
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)

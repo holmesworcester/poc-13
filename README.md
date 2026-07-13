@@ -14,10 +14,11 @@ were proven.
   the routers: `facts.ROOT` dispatches type tags, api paths, and CLI verbs
   through one tree. The module is the Python API.
 - `bin/con.py` — `con <db> <scope.fact.verb> [args...]`. Proxies to a
-  running daemon at `<db>.sock`, else a crash-and-demand: the file is
-  indexed cold and hydration pulls only what the verb asks about.
+  running daemon at `<db>.sock`; with no daemon reachable it refuses and
+  names the daemon to start.
 - `bin/cond.py` — `cond <db> [--listen HOST:PORT]`. The daemon: owns the db,
-  amortizes replay, serves con over the unix socket, reconciles facts (the wire's
+  boots by one total hydrate fact (there is no load or replay path), serves
+  con over the unix socket, reconciles facts (the wire's
   only message) with TCP peers via the sync family. A peer is dialed by a durable
   sealed `connection.request` fact (the `connect` verb authors one); shipments ride
   `connection.frame` bundles. Backpressure everywhere is the frontier's rule: park,
@@ -58,24 +59,25 @@ real regression. Headline numbers over a 10,000-fact workspace (one laptop core)
 
 | path | cost |
 |---|---|
-| admit + run 10k facts | ~0.35s (0.035 ms/fact) |
-| full in-memory replay of 10k facts | ~0.54s |
-| one verb, cold `con.py` (crash + demand + verb) | ~0.04s |
-| same verb via the daemon (replay amortized) | ~0.04s |
+| admit + run 10k facts | ~0.47s (0.047 ms/fact) |
+| boot 10k facts from rows (one total demand) | ~1.0s |
+| daemon cold boot, 10k-fact db | ~1.0s |
+| one verb via the daemon (boot amortized) | ~0.02s |
 | `feed()` query over 10k messages | ~1 ms |
 | sync a 1-fact diff into a 10k set | 28 rounds, ~9 KiB, ~0.35s |
 | two daemons over TCP, sustained | ~395 authored facts/s converged, query stays low-ms |
 | bulk sync catch-up (5000 facts, fresh peer) | ~1900 facts/s, ~0.58 MB/s (frame bundles) |
-| signed-fact admission (Ed25519 verify) | ~14/s; replay re-verifies **0** |
+| signed-fact admission (Ed25519 verify) | ~15k/s gated; boot re-verifies **0** |
 
 **Where the linearity lives now.** The db is the kernel `Store`: sqlite holding
-the dumb `facts(fid, bytes)` table plus a derived atom index, WAL-journaled.
-A cold `con.py` is demand-driven — hydration pulls only the facts the verb's
-needs and queries ask about, which is why the cold-verb cost above matches the
-daemon-proxy cost instead of a full replay. Full `replay()` and every sync
-`leaves()` remain linear over the resident set — the daemon full-loads
-deliberately, because sync fingerprints must cover the whole durable set (a
-partially-hydrated node must never initiate compare rounds). If a single db
+the persisted atom relation (one row per atom; canonical bytes derived on
+read — reconstruct, re-encode, re-hash), WAL-journaled. A session with a
+store is demand-driven — a stepped fact's needs fault only what they ask
+about resident, so a bounded working set costs its own size, not the db's.
+Boot and every sync `leaves()` remain linear over the resident set — the
+daemon demands everything deliberately, because sync fingerprints must cover
+the whole durable set (a partially-hydrated node must never initiate compare
+rounds; coverage-clipped partial sync is a later wave). If a single db
 ever outgrows the daemon's resident set, the next step is teaching the sync
 family to ship from the Store rather than from residency — a family change,
 not a kernel one. Linear is accepted and measured, not hidden.

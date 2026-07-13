@@ -1,13 +1,15 @@
 """Handshake tests, in-process: two Nodes hand-carry the sealed request and
 connection over a simulated wire and must derive the SAME connection_secret,
-the responder's authoring must be deterministic under replay, and every forged
+the responder's authoring must be deterministic across a reboot, and every forged
 or mis-addressed variant must be refused. Mirrors poc-10
 poc10_connection_handler_test.rs — secret agreement, responder determinism,
 mis-addressed and bad-signature refusals — in poc-13's atom model."""
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from kernel import Node, decode, encode, fact_id
+from harness import reboot
 from facts import ROOT
 from facts.auth import endpoint, invite_accepted, local_signer_secret, workspace as wsmod
 from facts.auth import user_invite
@@ -60,8 +62,8 @@ def test_both_sides_derive_the_same_secret():
 def test_responder_authoring_is_deterministic():
     host, joiner = _node(), _node()
     _, cid1 = _handshake(host, joiner)
-    # re-run respond on a fresh replay of the host: identical connection id
-    host2 = host.replay()
+    # re-run respond on a freshly rebooted host: identical connection id
+    host2 = reboot(host)
     rid = next(fid for fid, f in host.facts.items() if f.type_tag == req.TAG)
     cid2 = conn.respond(host2, rid, b"127.0.0.1:7", 4); host2.run()
     assert cid2 == cid1, "deterministic responder output: same connection id on replay"

@@ -28,7 +28,7 @@ def set_window(node, workspace_id, ttl, t):
 
 # QUERIES — observations over validated state only (here: the LWW slice).
 def window(node, workspace_id):
-    hydrate.demand(node, b"retention", workspace_id); node.run()
+    hydrate.demand(node, b"retention", workspace_id)
     row = node.slices.get(("retention", workspace_id))
     return int.from_bytes(row[1], "little") if row else None
 

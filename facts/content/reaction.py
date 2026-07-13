@@ -29,7 +29,7 @@ def react(node, workspace_id, message_id, emoji, t):
 
 # QUERIES — observations over validated state only, ordered by (ts, owner).
 def on(node, workspace_id, message_id):
-    hydrate.demand(node, b"reaction", workspace_id); node.run()
+    hydrate.demand(node, b"reaction", workspace_id)
     return [a.value for o, t, a in sorted(node.watched(b"reaction", workspace_id),
                                           key=lambda r: (r[1], r[0]))
             if a.target == Exact(message_id)]

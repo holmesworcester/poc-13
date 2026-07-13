@@ -59,12 +59,12 @@ def create(node, name, t):
 
 # QUERIES — observations over validated state only, ordered by (ts, owner).
 def index(node):
-    hydrate.demand(node, b"workspace", b"auth"); node.run()
+    hydrate.demand(node, b"workspace", b"auth")
     return [(o, a.value) for o, t, a in sorted(node.watched(b"workspace", b"auth"),
                                                key=lambda r: (r[1], r[0]))]
 
 def root(node, workspace_id):
-    hydrate.demand(node, b"root", b"auth"); node.run()
+    hydrate.demand(node, b"root", b"auth")
     return next((a.value for _, _, a in node.watched(b"root", b"auth")
                  if a.target == Exact(workspace_id)), None)
 

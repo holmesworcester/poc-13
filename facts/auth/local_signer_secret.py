@@ -32,7 +32,7 @@ def keygen(node, t):
 
 # QUERIES — observations over validated state only.
 def current(node):
-    hydrate.demand(node, b"sk", b"local"); hydrate.demand(node, b"pk", b"local"); node.run()
+    hydrate.demand(node, b"sk", b"local"); hydrate.demand(node, b"pk", b"local")
     sk = next((a.value for _, _, a in node.watched(b"sk", b"local")), None)
     pk = next((a.value for _, _, a in node.watched(b"pk", b"local")), None)
     return (sk, pk) if sk and pk else None

@@ -93,16 +93,20 @@ def bench_engine():
     n.run(); dt = time.time() - t
     report("admit+run", dt, "s", 1.2)                 # MEASURED 0.4-0.6s
     report("  per fact", dt / N * 1e3, "ms", None)
-    t = time.time(); m = n.replay(); rp = time.time() - t
-    assert m.derived() == n.derived(), "replay diverged"
-    report("replay (full, in-memory)", rp, "s", 1.3)   # MEASURED 0.5-0.7s
+    from facts.store import hydrate
+    hydrate.demand(n)                                 # same seed fact on both sides
+    st = Store()
+    for b in n.durable.values(): st.add(b)
+    t = time.time(); m = Node(ROOT, st); hydrate.demand(m); rp = time.time() - t
+    assert m.derived() == n.derived(), "boot diverged"
+    report("boot (one total demand)", rp, "s", 2.6)   # MEASURED ~1.1-1.3s (reconstruct + re-hash)
     return n
 
 # --- 2. daemon cold-load, then one proxied verb against a big db --------------
 def bench_cli(db):
-    section("2. daemon load + one verb against a %d-fact db" % N)
-    t = time.time(); p, _ = spawn(db)     # cond replays the whole db before it announces "listening:"
-    report("daemon cold load (full replay)", time.time() - t, "s", 2.0)
+    section("2. daemon boot + one verb against a %d-fact db" % N)
+    t = time.time(); p, _ = spawn(db)     # cond faults the whole db resident before "listening:"
+    report("daemon cold boot (one total demand)", time.time() - t, "s", 3.5)
     try:
         uverb(db + ".sock", "content.message.feed", WID.hex(), "c0")      # warm the loaded node
         t = time.time(); cli(db, "content.message.send", WID.hex(), "c0", "al", "warm", "98")
@@ -286,8 +290,12 @@ def bench_crypto():
         report("  verify() cost", dt / M * 1e3, "ms", None)
         assert calls[0] >= M, "the gate must have verified each signature"
         calls[0] = 0
-        m = n.replay()                                            # rebuild from durable file
-        report("replay verifies (must be 0)", calls[0], "", 0)
+        from facts.store import hydrate
+        hydrate.demand(n)                                         # same seed fact on both sides
+        st = Store()
+        for b in n.durable.values(): st.add(b)
+        m = Node(ROOT, st); hydrate.demand(m)                     # boot from the durable rows
+        report("boot verifies (must be 0)", calls[0], "", 0)
         assert m.derived() == n.derived()
     finally: signature.verify = orig
 

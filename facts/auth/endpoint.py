@@ -39,10 +39,10 @@ def keygen(node, t):
 
 # QUERIES — observations over validated state only.
 def current(node):                           # (esk, epk) | None
-    hydrate.demand(node, b"endpoint", b"local"); node.run()
+    hydrate.demand(node, b"endpoint", b"local")
     epk = next((a.target[1] for _, _, a in node.watched(b"endpoint", b"local")), None)
     if not epk: return None
-    hydrate.demand(node, b"esk", b"local"); node.run()
+    hydrate.demand(node, b"esk", b"local")
     esk = next((a.value for _, _, a in node.watched(b"esk", b"local") if a.target[1] == epk), None)
     return (esk, epk) if esk else None
 

@@ -21,7 +21,6 @@ from kernel import (Atom, Exact, NEED, OFFER, Out, Range, SELF, SUPPRESS, WATCH,
 from crypto import open_x25519
 from crypto import ed25519_keygen as keygen, ed25519_sign as sign, ed25519_verify as verify
 from facts.auth import endpoint, invite_accepted as ish
-from facts.store import hydrate
 
 TAG = b"connection.request"
 SC = b"conn"

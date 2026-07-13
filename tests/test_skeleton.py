@@ -1,11 +1,14 @@
 """High-level tests: the design's headline claims, end to end."""
-import os, random, sys
+import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from kernel import (Node, Out, Router, decode, encode, fact, fact_id, ts_atom,
                     ts_of, Atom, Exact, OFFER)
 import crypto as _c
 from facts import ROOT
+from facts.store import hydrate
+from harness import reboot
 from facts.auth.workspace import workspace
 from facts.auth.invite_accepted import invite_accepted
 from facts.auth.signature import signature
@@ -61,7 +64,7 @@ def test_admission_check_hook():
     assert n.admit(bad) is None                       # falsy check: inert miss
     assert n.admit(bad, checked=True) is not None     # replay path never re-runs the check
 
-def test_outbox_reap_and_replay():
+def test_outbox_reap_and_reboot():
     n = Node(ROOT)
     fid = n.admit(encode(send(b"peer1", b"hello", 1))); n.run()
     assert [a.value for _, _, a in n.watched(b"send", b"outbox")] == [b"hello"]
@@ -72,14 +75,14 @@ def test_outbox_reap_and_replay():
     assert not n.durable                                      # a volatile send persists nothing
     for f in WS_CHAIN + [message(WID, CH, b"al", b"hi", 5)]: n.admit(encode(f))
     n.run()
-    ids, states = list(n.durable), []
-    for seed in range(3):                                     # shuffled admission orders
-        random.Random(seed).shuffle(ids)
-        states.append(n.replay(ids).derived())
-    assert states[0] == states[1] == states[2] == n.derived() # replay is bit-identical
+    hydrate.demand(n)                    # the seed is itself a fact: give the original the
+    states = []                          # same one, so derived() compares like for like
+    for seed in range(3):                                     # shuffled db row orders
+        states.append(reboot(n, seed).derived())
+    assert states[0] == states[1] == states[2] == n.derived() # boot is bit-identical
 
 if __name__ == "__main__":
     for t in (test_identity_and_admission, test_requires_suppression_and_wakes,
-              test_admission_check_hook, test_outbox_reap_and_replay):
+              test_admission_check_hook, test_outbox_reap_and_reboot):
         t(); print(f"ok  {t.__name__}")
     print("\nall tests passed")

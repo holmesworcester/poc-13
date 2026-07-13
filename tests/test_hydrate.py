@@ -1,11 +1,18 @@
-"""Hydration tests: demand-driven replay agrees with full replay on every
-resident fact; Require closure, suppression, and Watch units hold across the
-cold boundary; budget is an amortization knob with no semantic residue."""
+"""Hydration tests: matching looks to the persisted relation. A stepped
+fact's needs fault their cold matches resident — transitively, over RECORDED
+rows rather than family code — so a demand-driven session agrees with the
+fully resident node on every fact it holds, across renamed roles and
+reshaped facts. Boot is the degenerate demand: ONE total hydrate fact
+replaces load and replay entirely, and this file pins their absence.
+Existence is the certificate: reads reconstruct, re-encode, and re-hash, so
+damage is a miss (never a wrong fact) that a repair fully reverses."""
 import os, random, sys
+from types import SimpleNamespace
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from kernel import (Atom, Exact, NEED, OFFER, Node, RANGE, REQUIRE, Store,
-                    WATCH, covers, decode, encode, fact, fact_id, ts_atom, window)
+from kernel import (Atom, Exact, NEED, OFFER, Node, Out, RANGE, REQUIRE, Range,
+                    Router, SELF, SUPPRESS, Store, WATCH, all_need, covers,
+                    decode, encode, fact, fact_id, mat, needs_of, ts_atom)
 from facts import ROOT
 from facts.auth import admin, local_signer_secret, user, workspace
 from facts.content import message, message_deletion
@@ -28,18 +35,19 @@ CORPUS = list(FULL.durable.values())     # exactly what a db would hold
 
 def store_of(bs, seed=0):
     s, bs = Store(), list(bs)
-    random.Random(seed).shuffle(bs)      # file order must not matter
+    random.Random(seed).shuffle(bs)      # row order must not matter
     for b in bs: s.add(b)
     return s
 
 def full(): return FULL
 
-def test_demand_agrees_with_full_replay():
+# --- the working-set story: queries demand, needs fault, verdicts agree ---------
+def test_demand_agrees_with_the_fully_resident_node():
     f = full()
     for seed in range(3):
         n = Node(ROOT, store_of(CORPUS, seed))
         assert feed(n, WID, CH) == [b"m0", b"m1", b"m3", b"m4"]     # m2 deleted, cold tombstone
-        for fid in n.facts:              # every resident fact judged as full replay judged it
+        for fid in n.facts:              # every resident fact judged as the resident node judged it
             if fid in f.memo: assert n.memo[fid] == f.memo[fid], fid.hex()
 
 def test_gating_needs_pull_their_closure():
@@ -51,58 +59,255 @@ def test_gating_needs_pull_their_closure():
 def test_suppression_across_the_cold_boundary():
     n = Node(ROOT, store_of(CORPUS))
     feed(n, WID, CH)
-    assert n.memo[MIDS[2]] == "Suppressed"                   # tombstone was pulled
+    assert n.memo[MIDS[2]] == "Suppressed"                   # tombstone was faulted in
     assert n.memo[MIDS[3]] == "Valid"
 
 def test_unrelated_facts_stay_cold():
     n = Node(ROOT, store_of(CORPUS))
     feed(n, WID, CH)
-    assert UID not in n.facts            # a channel feed pulls message closure, not membership
+    assert UID not in n.facts            # a channel feed faults message closure, not membership
 
-def test_budget_is_amortization_only():
-    f = full()
+def test_hydration_is_only_ever_a_fact():
+    """The demand IS the mechanism: content-addressed (the same demand twice
+    is one fact, one check), volatile (never durable, never flushed), and
+    nothing becomes resident until a fact carries a need into a step."""
     n = Node(ROOT, store_of(CORPUS))
-    lo, got = 0, 0
-    for _ in range(9):                   # page to exhaustion: cursor = last ts, inclusive;
-        hydrate.demand(node=n, role=b"msg", scope=WID,               # pop-as-dedup makes
-                       win=window(lo=lo, budget=2)); n.run()         # re-scan safe
-        rows = n.watched(b"msg", WID)
-        if len(rows) == got: break
-        got, lo = len(rows), max(t for _, t, _ in rows)
-    assert feed(n, WID, CH) == feed(Node(ROOT, store_of(CORPUS)), WID, CH)
-    for fid in n.facts:
-        if fid in f.memo: assert n.memo[fid] == f.memo[fid]
+    assert not n.facts                                 # cold until something demands
+    a = hydrate.demand(n, b"msg", WID)
+    b = hydrate.demand(n, b"msg", WID)
+    assert a == b and a not in n.durable               # one volatile fact
 
-def test_sql_pull_mirrors_covers():
-    """Exhaustive mirror: Store.pull == the kernel-covers reference, for every
-    target-shape pair on a small alphabet and every window arm — coverage,
-    ts filter, asc/desc order, budget, and blob-ts ordering across the byte
-    boundary (all ts > 255, where a wrong-endian encoding would missort)."""
+# --- the boot story: one total demand, no load, no replay -----------------------
+def test_boot_is_one_fact():
+    n = Node(ROOT, store_of(CORPUS))
+    seed = hydrate.demand(n)                           # the whole boot
+    assert set(n.durable) == set(FULL.durable)
+    assert all(n.durable[fid] == FULL.durable[fid] for fid in FULL.durable)
+    assert all(n.memo[fid] == FULL.memo[fid] for fid in FULL.durable)
+    assert set(n.memo) == set(FULL.durable) | {seed}   # residency = the durable set + the seed
+    assert n.derived()[:2] == FULL.derived()[:2]       # clean twin + slices bit-identical
+    assert feed(n, WID, CH) == [b"m0", b"m1", b"m3", b"m4"]
+
+def test_the_seed_is_the_only_boot():
+    """The elimination, pinned: no load, no replay, no bulk read — the only
+    way from rows to residency is a fact's need meeting the fault leg."""
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin"))
+    import runtime, kernel
+    assert not hasattr(runtime, "load")
+    assert not hasattr(Store, "all") and not hasattr(Store, "pull")
+    assert not hasattr(Node, "replay") and not hasattr(Node, "missing_needs")
+    assert not hasattr(kernel, "window") and not hasattr(kernel, "WINDOW_LEN")
+
+def test_a_checked_total_ends_faulting():
+    """After the total demand everything is resident and every future step
+    skips the store: existence is monotone (rows enter only via residency),
+    so a checked total covers every key for the rest of the session."""
+    s = store_of(CORPUS)
+    n = Node(ROOT, s)
+    hydrate.demand(n)
+    calls = []
+    s.owners = lambda *a: (calls.append(a), [])[1]     # any further call would land here
+    assert feed(n, WID, CH) == [b"m0", b"m1", b"m3", b"m4"]
+    assert calls == []
+
+def test_a_flushed_key_is_already_resident():
+    """Monotonicity of the fault memo: rows enter the store only through
+    resident facts (flush), so a key checked while cold never goes stale."""
+    s = Store()
+    n = Node(ROOT, s)
+    hydrate.demand(n, b"msg", WID)                     # checked while the db is empty
+    for b in CORPUS: n.admit(b, checked=True)          # the workspace arrives live...
+    n.run()
+    for b in CORPUS: s.add(b)                          # ...and is flushed (runtime.flush)
+    assert feed(n, WID, CH) == [b"m0", b"m1", b"m3", b"m4"]   # the memoized key lost nothing
+
+# --- the relation is version-neutral: closures cross vocabulary eras ------------
+S = b"s"
+_epoch = SimpleNamespace(extract=lambda f: (True, False),   # a minimal always-valid family:
+                         project=lambda f, ctx, sl:         # promote every offer, gate on needs
+                             Out(offers=tuple(a for a in f.atoms if a.kind == OFFER)))
+EPOCHS = Router({b"v1": _epoch, b"v2": _epoch, b"v3": _epoch})
+
+def _chain():
+    """Three vocabulary eras, one dependency chain. v1 speaks role b"doc";
+    v2 renamed it b"document" and grew a b"meta" field; v3 is the live head.
+    Nothing current-era — no family code, no demand key — names the old
+    vocabulary; only the recorded rows relate the eras. R is a RANGE offer
+    covering the exact b"doc" needs, so the fault walk crosses a range edge
+    at depth >= 1 deterministically."""
+    A = fact(b"v1.doc", ts_atom(10), Atom(OFFER, b"doc", S, SELF))
+    B = fact(b"v1.doc", ts_atom(20), Atom(NEED, b"doc", S, Exact(fact_id(A)), effect=REQUIRE),
+             Atom(NEED, b"gone", S, SELF, effect=SUPPRESS), Atom(OFFER, b"doc", S, SELF))
+    T = fact(b"v2.doc", ts_atom(50), Atom(NEED, b"doc", S, Exact(fact_id(B)), effect=REQUIRE),
+             Atom(OFFER, b"document", S, SELF), Atom(OFFER, b"meta", S, SELF, b"lang=en"))
+    C = fact(b"v3.item", ts_atom(100), Atom(NEED, b"document", S, Exact(fact_id(T)), effect=REQUIRE),
+             Atom(OFFER, b"item", S, Exact(b"k")))
+    R = fact(b"v1.idx", ts_atom(15), Atom(OFFER, b"doc", S, Range(b"\x00" * 32, b"\xff" * 32)))
+    return [A, B, T, C, R]
+
+def test_a_keyed_demand_pulls_related_facts_transitively():
+    """A demand at the newest era's key hydrates the whole related web: the
+    fault walk crosses a role rename and a field addition because it walks
+    recorded rows, never family vocabulary."""
+    chain = _chain()
+    s = Store()
+    for f in chain: s.add(encode(f))
+    n = Node(EPOCHS, s)
+    hydrate.demand(n, b"item", S)                      # the era-3 key only
+    ids = [fact_id(f) for f in chain]
+    assert all(i in n.facts for i in ids)     # A, B, R arrived via a role nothing current names
+    assert all(n.memo[i] == "Valid" for i in ids)
+    m = Node(EPOCHS)
+    for f in chain: m.admit(encode(f), checked=True)
+    m.run()
+    assert {i: n.memo[i] for i in ids} == {i: m.memo[i] for i in ids}
+
+def test_a_tombstone_rides_the_closure_across_eras():
+    """A suppressor is one recorded Suppress edge from its target, so it
+    arrives with it: a cold old-era tombstone is never outrun by the
+    new-era facts that depend on its target."""
+    chain = _chain()
+    D = fact(b"v1.tomb", ts_atom(25), Atom(OFFER, b"gone", S, Exact(fact_id(chain[1]))))
+    s = Store()
+    for f in chain + [D]: s.add(encode(f))
+    n = Node(EPOCHS, s)
+    hydrate.demand(n, b"item", S)
+    assert fact_id(D) in n.facts                       # faulted via B's suppress key
+    assert n.memo[fact_id(chain[1])] == "Suppressed"
+    m = Node(EPOCHS)
+    for f in chain + [D]: m.admit(encode(f), checked=True)
+    m.run()
+    ids = [fact_id(f) for f in chain + [D]]
+    assert {i: n.memo[i] for i in ids} == {i: m.memo[i] for i in ids}
+
+def test_needs_fault_their_own_deps():
+    """No demand needed: a resident fact's own step checks its keys against
+    the relation, so a head whose spine is cold validates as it lands."""
+    chain = _chain()
+    s = Store()
+    for f in chain[:3] + chain[4:]: s.add(encode(f))   # A, B, T, R cold in the db
+    n = Node(EPOCHS, s)
+    cid = n.admit(encode(chain[3])); n.run()           # the head arrives...
+    assert n.memo[cid] == "Valid"                      # ...and faults its whole spine
+    assert all(fact_id(f) in n.facts for f in chain[:3])
+
+def test_a_cold_suppressor_bites_without_a_demand():
+    """The suppress flavor: a live-authored fact's own step checks its
+    suppress key, so a tombstone cold in the db flips it immediately —
+    never a lasting wrong Valid waiting for the right demand."""
+    chain = _chain()
+    D = fact(b"v1.tomb", ts_atom(25), Atom(OFFER, b"gone", S, Exact(fact_id(chain[1]))))
+    s = Store()
+    s.add(encode(chain[0])); s.add(encode(D))          # A and B's tombstone, cold
+    n = Node(EPOCHS, s)
+    bid = n.admit(encode(chain[1])); n.run()           # B authored live
+    assert fact_id(D) in n.facts and n.memo[bid] == "Suppressed"
+
+# --- existence is the certificate: reconstruction, damage, repair ---------------
+def test_rows_rebuild_the_exact_bytes():
+    """The relation is the store: reconstruction re-derives byte-identical
+    canonical facts — every target shape, and the None vs b"" value
+    distinction, included."""
+    s = store_of(CORPUS)
+    for b in CORPUS: assert s.fact_bytes(fact_id(decode(b))) == b
+    f = fact(b"no.such", ts_atom(7), Atom(OFFER, b"a", b"s", SELF),
+             Atom(OFFER, b"b", b"s", Exact(b"k"), b""),
+             Atom(NEED, b"c", b"s", Range(b"a", b"z"), effect=WATCH),
+             Atom(NEED, b"d", b"s", Exact(b"k"), effect=SUPPRESS))
+    s2 = Store(); s2.add(encode(f))
+    assert s2.fact_bytes(fact_id(f)) == encode(f)
+
+def test_a_damaged_row_is_a_miss_never_a_wrong_fact():
+    s = store_of(CORPUS)
+    victim = fact_id(decode(CORPUS[0]))
+    s.db.execute("UPDATE atoms SET value=x'ff' WHERE fid=? AND value IS NOT NULL", (victim,))
+    assert s.fact_bytes(victim) is None                # no longer re-hashes to its fid
+    n = Node(ROOT, s)
+    hydrate.demand(n)                                  # boot over the damaged db
+    assert victim not in n.facts                       # a miss...
+    for fid, b in n.durable.items():
+        assert b == FULL.durable[fid]                  # ...and everything held is exact
+
+def test_repair_after_damage_redelivers():
+    """Damage leaves no residue: delete + the true bytes + refault (the
+    close.purge discipline) redeliver without any new demand — the parked
+    dependent's own key re-checks and heals."""
+    chain = _chain()
+    s = Store()
+    for f in chain[:2]: s.add(encode(f))
+    s.db.execute("UPDATE atoms SET value=x'ff' WHERE fid=? AND value IS NOT NULL",
+                 (fact_id(chain[0]),))                 # damage A (its ts row)
+    n = Node(EPOCHS, s)
+    hydrate.demand(n, b"doc", S)                       # B delivered; A missed
+    assert n.memo[fact_id(chain[1])] == "Parked"
+    s.delete(fact_id(chain[0])); s.add(encode(chain[0]))
+    n.refault(); n.run()                               # the relation changed underneath
+    assert n.memo[fact_id(chain[1])] == "Valid"
+
+# --- mirrors: the SQL coverage relation and the fault fixpoint ------------------
+def test_fault_fixpoint_mirrors_kernel_covers():
+    """Property mirror: the resident set a demand faults in equals a
+    pure-Python fixpoint (needs_of x covers over materialized atoms) on
+    random fact graphs mixing every target shape and effect."""
+    rng = random.Random(7)
+    ks = [bytes([k]) for k in range(4)]
+    tshapes = [Exact(k) for k in ks] + [Range(a, b) for a in ks for b in ks if a <= b] + [SELF]
+    roles = [b"p", b"q", b"r"]
+    for trial in range(25):
+        fs = {}
+        for i in range(12):
+            atoms = [ts_atom(50 + i)]
+            for _ in range(rng.randrange(1, 4)):
+                if rng.random() < 0.5:
+                    atoms.append(Atom(OFFER, rng.choice(roles), S, rng.choice(tshapes)))
+                else:
+                    atoms.append(Atom(NEED, rng.choice(roles), S, rng.choice(tshapes),
+                                      effect=rng.choice((REQUIRE, WATCH, SUPPRESS))))
+            f = fact(b"no.such", *atoms)
+            fs[fact_id(f)] = f
+        def covering(n):                 # owners of offers covering one materialized need
+            return {i for i, f in fs.items()
+                    if any(a.kind == OFFER and (a.role, a.scope) == (n.role, n.scope)
+                           and covers(mat(a, i).target, n.target) for a in f.atoms)}
+        seed = Atom(NEED, b"p", S, Range(b"", b"\xff"), effect=WATCH)
+        want, queue = set(), sorted(covering(seed))
+        while queue:
+            i = queue.pop()
+            if i in want: continue
+            want.add(i)
+            for n in needs_of(fs[i], i): queue += sorted(covering(n))
+        st = Store()
+        for f in fs.values(): st.add(encode(f))
+        nd = Node(Router({}), st)
+        sid = nd.admit(encode(fact(b"x.demand", seed))); nd.run()
+        assert set(nd.facts) - {sid} == want, trial
+
+def test_sql_owners_mirrors_covers():
+    """Exhaustive mirror: Store.owners == the kernel-covers reference for
+    every target-shape pair on a small alphabet, plus the total key."""
     ks = [bytes([b]) for b in range(4)]
-    shapes = ([Exact(k) for k in ks] +
-              [(RANGE, a, b) for a in ks for b in ks if a <= b])
-    offers = [(250 + 7 * i, t) for i, t in enumerate(shapes)]
+    shapes = [Exact(k) for k in ks] + [(RANGE, a, b) for a in ks for b in ks if a <= b]
+    s, fids = Store(), {}
+    for i, ot in enumerate(shapes):
+        f = fact(b"no.such", ts_atom(250 + 7 * i), Atom(OFFER, b"r", b"s", ot))
+        s.add(encode(f)); fids[fact_id(f)] = ot
     for nt in shapes:
-        for w in (None, (0, 2**64 - 1, 3, 0), (260, 320, 2, 1)):
-            need = Atom(NEED, b"r", b"s", nt, w and window(*w),
-                        effect=REQUIRE if w is None else WATCH)
-            s = Store()                  # fresh store: hot-set dedup stays out of frame
-            fids = {}
-            for ts, ot in offers:
-                f = fact(b"no.such", ts_atom(ts), Atom(OFFER, b"r", b"s", ot))
-                s.add(encode(f)); fids[fact_id(f)] = (ts, ot)
-            got = [fact_id(decode(fb)) for fb in s.pull(need)]
-            want = sorted((ts, fid) for fid, (ts, ot) in fids.items() if covers(ot, nt))
-            if w:
-                lo, hi, budget, order = w
-                want = sorted((r for r in want if lo <= r[0] <= hi),
-                              reverse=bool(order))[:budget]
-            assert got == [fid for _, fid in want], (nt, w)
+        need = Atom(NEED, b"r", b"s", nt, effect=REQUIRE)
+        assert set(s.owners(need)) == {fid for fid, ot in fids.items() if covers(ot, nt)}, nt
+    assert set(s.owners(all_need)) == set(fids)        # the total demand: every stored fact
 
 if __name__ == "__main__":
-    for t in (test_demand_agrees_with_full_replay, test_gating_needs_pull_their_closure,
-              test_suppression_across_the_cold_boundary,
-              test_unrelated_facts_stay_cold, test_budget_is_amortization_only,
-              test_sql_pull_mirrors_covers):
+    for t in (test_demand_agrees_with_the_fully_resident_node,
+              test_gating_needs_pull_their_closure,
+              test_suppression_across_the_cold_boundary, test_unrelated_facts_stay_cold,
+              test_hydration_is_only_ever_a_fact, test_boot_is_one_fact,
+              test_the_seed_is_the_only_boot, test_a_checked_total_ends_faulting,
+              test_a_flushed_key_is_already_resident,
+              test_a_keyed_demand_pulls_related_facts_transitively,
+              test_a_tombstone_rides_the_closure_across_eras,
+              test_needs_fault_their_own_deps, test_a_cold_suppressor_bites_without_a_demand,
+              test_rows_rebuild_the_exact_bytes, test_a_damaged_row_is_a_miss_never_a_wrong_fact,
+              test_repair_after_damage_redelivers, test_fault_fixpoint_mirrors_kernel_covers,
+              test_sql_owners_mirrors_covers):
         t(); print(f"ok  {t.__name__}")
     print("\nall tests passed")

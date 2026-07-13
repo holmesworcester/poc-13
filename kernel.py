@@ -11,15 +11,16 @@ is just a projector that dispatches on the next type-tag segment. Extraction
 routes through the same tree.
 
 Derived state (validity memo, clean twin, slices, frontier) is rebuildable
-from the durable fact set alone: `replay()` is the whole crash story. With a
-Store, replay is demand-driven: a stepped fact's needs pull matching cold
-facts resident (hydration), so a session pays for what it asks about.
+from the durable fact set alone. There is no replay: a stepped fact's needs
+fault their cold matches resident from the Store (the persisted atom
+relation), so boot is one total demand and a session pays for what it asks
+about. The store answers existence, never standing.
 
 Hash: BLAKE3-256 (the `blake3` package; stdlib has none).
 """
 from collections import deque
 from dataclasses import dataclass, field, replace
-import sqlite3, struct, time
+import sqlite3, time
 
 try:
     from blake3 import blake3 as _b3
@@ -119,8 +120,8 @@ by = lambda ctx, role: [r for n, rs in ctx.items() if n.role == role for r in rs
 # `turn(now)`, which presents it as a single transient offer at the NOW key. A
 # time-waiting fact carries a Watch need over [deadline, ∞); when now reaches the
 # deadline the offer falls in range and wakes it. Time is never stored, so nothing
-# accumulates, and durable derived state never depends on now — replay at any now
-# rebuilds it identically.
+# accumulates, and durable derived state never depends on now — a reboot at any
+# now rebuilds it identically.
 NOW_ROLE, NOW_SCOPE, _NOW = b"now", b"clock", b"\x00now"   # sentinel owner, not a fid
 now_need = lambda deadline_ms: Atom(NEED, NOW_ROLE, NOW_SCOPE,
                                     Range(deadline_ms.to_bytes(8, "big"), b"\xff" * 8), effect=WATCH)
@@ -146,7 +147,15 @@ shipped_need = Atom(NEED, SHIPPED_ROLE, SHIPPED_SCOPE, SELF, effect=WATCH)
 # WATCH and never gate. _answer (in _step) injects their rows into ctx exactly as
 # valid_offers would, so `by(ctx, role)` reads them uniformly.
 SUM_ROLE, RES_ROLE, _SUM, _RES = b"\x00summary", b"\x00resident", b"\x00sum", b"\x00res"
-RESERVED = frozenset((SUM_ROLE, RES_ROLE))
+
+# The total demand is the whole boot story: one reserved Watch need whose key
+# the fault leg reads as "every stored fact". Once checked, faulting is over —
+# facts enter the store only via admission, so nothing cold appears behind it.
+ALL_ROLE = b"\x00all"
+all_need = Atom(NEED, ALL_ROLE, b"store", Range(b"", b"\xff" * 64), effect=WATCH)
+_ALL_KEY = (ALL_ROLE, b"store", all_need.target)
+
+RESERVED = frozenset((SUM_ROLE, RES_ROLE, ALL_ROLE))
 CLOSURE_CAP = 4096                       # generous safety valve on unique closure ids per summary answer
 _kb = lambda ts, fid: ts.to_bytes(8, "big") + fid            # (ts, fid) -> the 40-byte reconciliation key
 summary_need = lambda lo, hi, floor=b"": Atom(NEED, SUM_ROLE, b"sync", Range(lo, hi), floor, effect=WATCH)
@@ -178,25 +187,20 @@ class Router:
         return c.project(f, ctx, sl) if c else None
 
 # --- The durable store --------------------------------------------------------------
-# Hydration window, riding in a Watch need's value: engine-owned bytes, never
-# read by matching. Gating needs (Require/Suppress) ignore it — their pulls
-# are exhaustive, because a missed offer could change a verdict.
-_WIN = "<QQIB"                           # a window blob: lo(u64) hi(u64) budget(u32) order(u8), little-endian
-WINDOW_LEN = struct.calcsize(_WIN)       # 21
-window = lambda lo=0, hi=2**64 - 1, budget=2**32 - 1, order=0: struct.pack(_WIN, lo, hi, budget, order)
-_window = lambda v: struct.unpack(_WIN, v)
-
-_t8 = lambda t: t.to_bytes(8, "big")     # u64 ts as blob: memcmp order, no i64 overflow
-
 class Store:
-    """The db: `facts(fid, bytes)` — the dumb table, canonical fact bytes and
-    nothing else — is the one durable authority; `atoms` is a derived match
-    index (one materialized offer row per atom, rebuildable from facts); TEMP
-    `hot` is this session's delivered set, the per-fact dedup that makes a
-    window re-scan never deliver the same owner twice. Outside the trust
-    boundary — every pull re-enters through checked admission, so wrong
-    bytes are a miss. The atom coverage relation is the one WHERE clause in
-    pull(); kernel `covers` is its spec (mirror-tested)."""
+    """The persisted atom relation: one row per atom of every durable fact —
+    canonical columns plus materialized match columns (SELF rewritten to the
+    owner id). Facts are a derived view: a read regroups a fid's rows,
+    rebuilds, re-encodes, and re-hashes, so rows that no longer add up to
+    their fid are a miss, never a wrong fact. One write door — add(),
+    downstream of admission — makes existence the persisted certificate:
+    intrinsic checks ran once, and the re-hash transfers them, so a faulted
+    fact re-enters checked. The store answers existence (owners, fact_bytes)
+    and never standing: verdicts live in the engine alone. The coverage
+    WHERE clause mirrors kernel `covers` (mirror-tested)."""
+
+    _COV = (" AND ((ex=1 AND lo BETWEEN ? AND ?)"    # ex=const per arm: both index-narrowed
+            " OR (ex=0 AND ? AND ? BETWEEN lo AND hi))")
 
     def __init__(self, path=":memory:"):
         self.db = sqlite3.connect(path)
@@ -204,48 +208,50 @@ class Store:
         self.db.execute("PRAGMA journal_mode=WAL")   # commit per turn without a full fsync
         self.db.execute("PRAGMA synchronous=NORMAL") # fsync at checkpoints, not every commit
         self.db.executescript("""
-          CREATE TABLE IF NOT EXISTS facts(fid BLOB PRIMARY KEY, bytes BLOB) WITHOUT ROWID;
-          CREATE TABLE IF NOT EXISTS atoms(fid BLOB, ts BLOB, role BLOB, scope BLOB,
+          CREATE TABLE IF NOT EXISTS facts(fid BLOB PRIMARY KEY, tag BLOB) WITHOUT ROWID;
+          CREATE TABLE IF NOT EXISTS atoms(fid BLOB, kind INT, effect INT, role BLOB, scope BLOB,
+                                           tt INT, t1 BLOB, t2 BLOB, value BLOB,
                                            ex INT, lo BLOB, hi BLOB);
-          CREATE INDEX IF NOT EXISTS match_ix ON atoms(role, scope, lo, ts);
-          CREATE TEMP TABLE hot(fid BLOB PRIMARY KEY);""")
+          CREATE INDEX IF NOT EXISTS match_ix ON atoms(kind, role, scope, ex, lo);
+          CREATE INDEX IF NOT EXISTS owner_ix ON atoms(fid);""")
 
-    def add(self, fb, hot=False):        # checked load: bad bytes are a miss
-        try: f = decode(fb)
+    def add(self, fb):                   # checked write: decode + derive EVERY row before the
+        try:                             # first insert, inside a savepoint — no torn facts
+            f = decode(fb); fid = fact_id(f)
+            rows = [(fid, a.kind, a.effect, a.role, a.scope,
+                     *(a.target + (None, None))[:3], a.value,
+                     m.target[0] == EXACT, m.target[1], m.target[-1])
+                    for a in f.atoms for m in (mat(a, fid),)]
         except Exception: return
-        fid = fact_id(f)
-        if not self.db.execute("INSERT OR IGNORE INTO facts VALUES(?,?)", (fid, fb)).rowcount:
-            return                       # already stored: atoms are already indexed
-        if hot: self.db.execute("INSERT OR IGNORE INTO hot VALUES(?)", (fid,))
-        self.db.executemany("INSERT INTO atoms VALUES(?,?,?,?,?,?,?)",
-            [(fid, _t8(ts_of(f)), m.role, m.scope, m.target[0] == EXACT,
-              m.target[1], m.target[-1])
-             for a in f.atoms if a.kind == OFFER for m in (mat(a, fid),)])
+        self.db.execute("SAVEPOINT a")
+        try:
+            if self.db.execute("INSERT OR IGNORE INTO facts VALUES(?,?)", (fid, f.type_tag)).rowcount:
+                self.db.executemany("INSERT INTO atoms VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+        except Exception: self.db.execute("ROLLBACK TO a")
+        finally: self.db.execute("RELEASE a")
 
-    def pull(self, need):                # matches not yet delivered, (ts, fid) order,
-        nlo, nhi = need.target[1], need.target[-1]     # budget counts primary hits
-        sql = """SELECT DISTINCT ts, fid, bytes FROM atoms JOIN facts USING(fid)
-                 WHERE role=? AND scope=?
-                 AND ((ex AND lo BETWEEN ? AND ?) OR (NOT ex AND ? AND ? BETWEEN lo AND hi))
-                 AND fid NOT IN (SELECT fid FROM hot)"""
-        args = [need.role, need.scope, nlo, nhi, need.target[0] == EXACT, nlo]
-        if need.effect == WATCH and need.value and len(need.value) == WINDOW_LEN:
-            lo, hi, budget, order = _window(need.value)
-            d = "DESC" if order else "ASC"
-            sql += f" AND ts BETWEEN ? AND ? ORDER BY ts {d}, fid {d} LIMIT ?"
-            args += [_t8(lo), _t8(hi), budget]
-        else:
-            sql += " ORDER BY ts, fid"   # gating: exhaustive, a miss could flip a verdict
-        rows = self.db.execute(sql, args).fetchall()
-        self.db.executemany("INSERT OR IGNORE INTO hot VALUES(?)", [(r[1],) for r in rows])
-        return [r[2] for r in rows]
+    def _mk(self, fid, tag, rows):       # regroup -> rebuild -> re-hash: the certificate check
+        try:
+            f = fact(tag, *(Atom(k, r, s, (tt, t1, t2)[:1 + (1, 0, 2)[tt]], v, e)
+                            for k, e, r, s, tt, t1, t2, v in rows))
+            return encode(f) if fact_id(f) == fid else None
+        except Exception: return None
 
-    def all(self):                       # full replay: the degenerate demand
-        return [r[0] for r in self.db.execute("SELECT bytes FROM facts")]
+    def fact_bytes(self, fid):           # the derived view: canonical bytes, or a miss
+        rows = self.db.execute("SELECT tag, kind, effect, role, scope, tt, t1, t2, value"
+                               " FROM atoms JOIN facts USING(fid) WHERE fid=?", (fid,)).fetchall()
+        return self._mk(fid, rows[0][0], [r[1:] for r in rows]) if rows else None
 
-    def delete(self, fid):               # cold-path purge: forget a fact's bytes and match rows
-        self.db.execute("DELETE FROM facts WHERE fid=?", (fid,))
-        self.db.execute("DELETE FROM atoms WHERE fid=?", (fid,))
+    def owners(self, n):                 # existence: who offers at this (materialized) need's
+        if n.role == ALL_ROLE:           # key — never standing. Total demand: every stored fact.
+            return [r[0] for r in self.db.execute("SELECT fid FROM facts")]
+        return [r[0] for r in self.db.execute(
+            "SELECT DISTINCT fid FROM atoms WHERE kind=1 AND role=? AND scope=?" + self._COV,
+            (n.role, n.scope, n.target[1], n.target[-1], n.target[0] == EXACT, n.target[1]))]
+
+    def delete(self, fid):               # cold-path purge: forget a fact's rows. The caller
+        self.db.execute("DELETE FROM facts WHERE fid=?", (fid,))     # owns the node-side
+        self.db.execute("DELETE FROM atoms WHERE fid=?", (fid,))     # discipline: refault().
 
     def commit(self): self.db.commit()   # host calls it: durable before the reply
 
@@ -457,12 +463,16 @@ class CleanBucket:
 class Node:
     """One engine over one root projector. Durable authority = self.durable
     (canonical bytes, 'the disk'); memo/clean/slices/frontier are derived.
-    With a store, residency is demand-driven: a stepped fact's needs pull
-    matching cold facts through ordinary admission — replay is the fixpoint
-    of demand, and full replay is the degenerate case (one unbounded need)."""
+    With a store, residency is demand-driven: a stepped fact's needs fault
+    their cold matches resident through ordinary admission — residency is
+    the fixpoint of demand, and boot is the degenerate case (one total
+    need). The store answers existence, never standing: verdicts are
+    computed here, over the resident set, and only here."""
 
     def __init__(self, root, store=None):
         self.root, self.store = root, store
+        self.checked = set()                 # need keys already faulted: existence is monotone
+                                             # (rows enter the store only via resident facts)
         self.facts, self.durable = {}, {}    # id -> Fact ; id -> canonical bytes
         # Match index bucketed by (kind, role, scope): a need only ever matches
         # offers sharing its role+scope, so one bucket is the whole candidate
@@ -532,14 +542,9 @@ class Node:
         for d in self.deps(fid): self.closure(d, out)
         return out
 
-    def missing_needs(self):             # the reserved closure/hydrate need (poc-12 §Hydration):
-        out = {}                         # a parked fact's still-unmet REQUIRE keys — the deps it lacks.
-        for fid, f in self.facts.items():
-            if self.memo.get(fid) != "Parked": continue     # only a parked fact lacks a Require
-            for n in needs_of(f, fid):
-                if n.effect == REQUIRE and not self.valid_offers(n):
-                    out[(n.role, n.scope, n.target)] = n
-        return list(out.values())
+    def refault(self):                   # the relation changed underneath (delete + re-add):
+        self.checked.clear()             # forget the fault memos and re-step every resident
+        for fid in self.facts: self._enqueue(fid)     # fact, so their keys re-check the store
 
     # Engine-answered needs: a reserved index need is answered from the trie / the
     # durable set and injected into ctx as clean-twin-shaped (owner, ts, atom) rows,
@@ -616,9 +621,14 @@ class Node:
     def _step(self, fid):
         if fid not in self.facts: return
         f = self.facts[fid]; ns = needs_of(f, fid)
-        if self.store:                   # demand: needs pull their cold matches
-            for n in ns:                 # resident first; offers never wake cold
-                for b in self.store.pull(n): self.admit(b, checked=True)
+        if self.store and _ALL_KEY not in self.checked:   # a checked total covers every key
+            for n in ns:                                  # the fault leg: each need key is
+                k = (n.role, n.scope, n.target)           # checked once; cold owners re-enter
+                if k in self.checked: continue            # through admission, and their own
+                self.checked.add(k)                       # needs fault in turn — the step
+                for o in self.store.owners(n):            # loop IS the closure walk.
+                    if o not in self.facts and (b := self.store.fact_bytes(o)):
+                        self.admit(b, checked=True)
         # Precedence (ratified): Suppress > Require(Park) > Resolve. Reserved
         # index needs never reach here — decode pins a NUL role to a WATCH need.
         if any(self.valid_offers(n) for n in ns if n.effect == SUPPRESS):
@@ -676,12 +686,8 @@ class Node:
         return list(self.clean.get((role, scope), ()))
 
     # Crash story: derived state is a pure, order-independent function of the
-    # durable set. Volatile facts vanish — completeness, never coherence.
-    def replay(self, order=None):
-        m = Node(self.root)
-        for fid in (order or list(self.durable)): m.admit(self.durable[fid], checked=True)
-        return m.run()
-
+    # durable set — a fresh node over the same store, seeded with one total
+    # demand, rebuilds it. Volatile facts vanish — completeness, never coherence.
     def derived(self):
         return (sorted((o, t, enc_atom(a)) for rs in self.clean.values() for o, t, a in rs),
                 sorted((k, *v) for k, v in self.slices.items()),

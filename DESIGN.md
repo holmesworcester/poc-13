@@ -26,12 +26,19 @@ design.
 - Atoms are asserted until their owner fact validates. Asserted atoms are
   dirty discovery data; only validated offers justify projection state,
   effects, or another fact's validity.
-- The runtime has one durable authority: the flushed canonical facts (the
-  dumb table). Everything else — validity, the clean twin, slices, the
-  frontier — is derived and rebuilt by replay.
-- Replay is demand-driven (hydration): a stepped fact's needs pull their
-  cold matches resident; needs pull, offers never wake cold facts. Gating
-  pulls are exhaustive; Watch pulls may carry a window and budget.
+- The runtime has one durable authority: the persisted atom relation (one
+  row per atom of every durable fact; canonical bytes are derived, never
+  stored). Everything else — validity, the clean twin, slices, the
+  frontier — is derived and rebuilt on demand.
+- Matching looks to the persisted relation: when a resident fact steps,
+  each of its need keys is checked once against the store and the cold
+  owners fault in through ordinary admission — needs fault, offers never
+  wake cold facts. Boot is the degenerate demand: one total hydrate fact.
+- The store answers existence, never standing: it can say who offers at a
+  key and hand back reconstructed bytes; verdicts are computed only in the
+  engine, over the resident set. Standing is never persisted; intrinsic
+  validity (signatures, canonical form) is persisted exactly once — as
+  existence in the store, transferred on read by the re-hash.
 - Needs have three effects: `require` gates validity, `watch` only
   wakes/reprojects, `suppress` flips the owner to Suppressed. Precedence:
   Suppress > Require(Park) > Resolve.
@@ -108,12 +115,15 @@ Durable + LocalOnly + Parked.
 
 ## Runtime State
 
-Durable: the dumb table — sqlite `facts(fid, bytes)`, canonical fact bytes
-and nothing else, no schema beyond id → bytes, no versioning. Its content is
-exactly the durable fact set. Beside it, `atoms` is a derived match index
-(one materialized offer row per atom, rebuildable from `facts`), and a TEMP
-`hot` table is the session's delivered set — sqlite's TEMP scoping is the
-durable/ephemeral boundary stated as schema.
+Durable: the persisted atom relation — sqlite `atoms`, one row per atom of
+every durable fact (both kinds, canonical columns plus match columns
+materialized with SELF rewritten to the owner id), beside a two-column
+`facts(fid, tag)` spine. There is no bytes column: a read regroups a fid's
+rows, rebuilds, re-encodes, and re-hashes, so rows that no longer add up to
+their fid are a miss, never a wrong fact. One write door (`add`, downstream
+of admission) makes existence the persisted certificate: intrinsic checks
+ran once at first admission, and the re-hash transfers them, so a faulted
+fact re-enters checked and a boot re-verifies nothing.
 
 Ephemeral, all rebuilt by replay: resident facts, the asserted match index
 and intake overlay, the validity memo (`Unknown|Parked|Valid|Invalid|
@@ -122,18 +132,20 @@ Suppressed`), the validated offer set (the clean twin, rows stamped
 (last-write-wins by `(ts, owner)`), the frontier, and the sync leaf set with
 its skeleton (see Sync).
 
-Replay is the whole crash story: derived state is a pure, order-independent
-function of the durable fact set. Storage loss shrinks the set — it costs
-completeness, never coherence. Storage is outside the trust boundary;
-bytes enter through checked loads, and wrong bytes are a miss.
+The crash story is one fact: derived state is a pure, order-independent
+function of the durable set, and a fresh node over the same store rebuilds
+it by admitting a single total hydrate demand. There is no load and no
+replay path. Storage loss shrinks the set — it costs completeness, never
+coherence. Storage is outside the trust boundary; faulted bytes re-enter
+through checked admission, and wrong rows are a miss.
 
-With a `Store` — the durable index of cold facts (persisted, not resident)
-under their materialized offer keys — replay is demand-driven (see
-Hydration): a session admits nothing at boot and pays only for what its
-facts and queries ask about. Full replay is the degenerate case.
+With a `Store` attached, a session admits nothing at boot and pays only for
+what its facts and queries ask about (see Hydration); the total demand is
+the degenerate case that faults everything.
 
 When one process at a time stops being enough, `bin/cond.py` is a daemon
-that owns the db exclusively and amortizes replay: it loads once, then runs
+that owns the db exclusively and amortizes boot: one total demand faults
+the whole db resident once, then it runs
 the three-phase host turn in a single-threaded select loop — client verbs
 over a unix socket at `<db>.sock`, peers over TCP. Its reusable core is
 `bin/runtime.py`, a socket-free seam: `cycle` admits an inbox of fact bytes
@@ -149,9 +161,9 @@ outbound. The outbound path tolerates loss up until the receiver admits: a
 frame is fired best-effort when handed to the socket buffer (bounded admits
 per turn, select-gated non-blocking writes), and a dropped or truncated frame
 is healed by the next cadence re-descend, never mis-admitted (it fails
-`aead_open`). The daemon full-loads, deliberately: RBSR fingerprints must
-cover the whole durable set, so a partially-hydrated node must never open a
-round; shipping reads from the store, not from residency. Still deferrable:
+`aead_open`). The daemon demands everything, deliberately: RBSR fingerprints must cover
+the whole durable set, so a partially-hydrated node must never open a
+round (coverage-clipped sync over partial replicas is a later wave). Still deferrable:
 compaction (purge is `DELETE`; `VACUUM` reclaims the bytes).
 
 ## Turn Semantics
@@ -165,10 +177,10 @@ materialized atoms into the intake overlay, put its id on the frontier, and
 flush if durable. Failed gates are inert.
 
 **Engine drain.** Drain the frontier to a bound (overflow parks, never
-drops). For each owner: first, if a store is attached, pull each need's
-cold matches resident through ordinary (checked) admission — hydration's
-whole engine hook; then check suppressors, then requires, against the clean
-twin; build `Context<Validated>` from matching validated offers; call the
+drops). For each owner: first, if a store is attached, the fault leg checks each
+of its need keys once against the persisted relation and admits the cold
+owners (checked admission — the bytes passed the gate once); then check
+suppressors, then requires, against the clean twin; build `Context<Validated>` from matching validated offers; call the
 routed projector `project(fact, ctx, slice) -> Out(verdict, offers,
 slice_delta)`; replace the owner's prior output atomically (owner-scoped:
 never both old and new visible); restamp promoted offers with engine
@@ -218,41 +230,37 @@ flushing moves rows without changing any result.
 
 ## Hydration
 
-One rule: **when a resident fact steps, each of its needs pulls its cold
-matches resident, through ordinary checked admission**. Pulled facts land on
-the frontier; when they step, their needs pull in turn — the frontier is the
-spider, and residency grows to the demand fixpoint. The demanding fact parks
-and wakes through normal fanout; there is no rehydrate path, and idempotent
-admission is the visited set. Demand flows backward through needs only:
-offers never wake cold facts (a fact that wants waking while cold is
-standing demand — a family obligation to stay resident, a later wave).
+One rule: **when a resident fact steps, each of its need keys is checked
+once against the persisted relation, and every cold owner offering at that
+key is admitted** (the fault leg). Faulted facts land on the frontier; when
+they step, their needs fault in turn — the step loop is the spider, and
+residency grows to the demand fixpoint. All three effects fault alike:
+`Require` finds its dependency, `Suppress` finds its tombstone (absence is
+only ever trusted after the key is checked — a cold suppressor bites on its
+target's own step, never waiting for the right demand), `Watch` finds its
+subjects. Verdicts are exact at quiescence; a fact may transiently judge
+before its faults land and is re-woken by normal fanout, exactly as a
+late-arriving wire fact re-judges it. Demand flows backward through needs
+only: offers never wake cold facts (a fact that wants waking while cold is
+standing demand — a pin, a later wave).
 
-Soundness fixes the asymmetry between effects. `Require` and `Suppress`
-pulls are exhaustive — a missed offer could change a verdict (a cold
-tombstone would resurrect its target). `Watch` pulls honor a window riding
-in the need's value — `(ts_lo, ts_hi, budget, order)`, engine-owned bytes
-never read by matching — because Watch never gates. Need values belong to
-the engine: a source-contract test keeps every family SHAPE from
-constructing a valued need (`store.hydrate` is the single exemption). Budget
-counts primary hits in `(ts, FactId)` order; each hit's own pulls complete
-its validation unit uncounted, so a delivered hit is never partial. Budget
-is an amortization knob, never a semantic limit: the store pops delivered
-facts (per-fact dedup), so paging — re-demand from the last delivered ts,
-inclusive — reaches exactly the state one unbudgeted pull reaches.
+The per-key check is memoized (`Node.checked`), and the memo never goes
+stale because existence is monotone: rows enter the store only downstream
+of admission (flush), so a new row's owner is already resident. The one
+reserved key `\x00all` — the total demand — is read by the store as "every
+fact you hold"; once it is checked, faulting is over for the session, since
+nothing cold can appear behind it. The only mutation that breaks
+monotonicity is `delete` + re-add (repair, purge): the caller's discipline
+is `Node.refault()` — forget the memos, re-step every resident fact.
 
-The store itself is outside the trust boundary — an untrusted index; every
-pull re-enters through checked admission, so a wrong or corrupt db row is a
-miss, never a wrong fact. It is sqlite: the pull is one indexed SELECT whose
-WHERE clause is the atom coverage relation, and a property test pins that
-clause to kernel `covers` (the spec) over random target shapes. The
-remaining unification — the resident match rows themselves in TEMP tables,
-one matcher for hot and cold — is open.
-
-**In flight: hydration is becoming just a fact.** The direction is to retire
-the kernel's step-time pull and route all demand through `store.hydrate`
-facts (Part II) — the reserved `summary@range`/`resident@id` needs sync
-already answers from the engine's indexes are the same idea pointed at the
-store. This section describes the hook as built today.
+The store is outside the trust boundary — every faulted fact re-enters
+through admission, its bytes re-derived from rows and re-hashed against the
+fid it claims, so a wrong or corrupt row is a miss, never a wrong fact.
+Matching-side it is two indexed SELECTs: `owners(need)` (whose WHERE clause
+is the atom coverage relation, property-pinned to kernel `covers`) and
+`fact_bytes(fid)`. Windows, budgets, and delivery order died with the store
+spider: a demand is a key, drained whole; bounded working sets come from
+demanding bounded keys.
 
 ## Routing: Projectors Are the Routers
 
@@ -273,7 +281,7 @@ offer at the NOW key; a time-waiting fact carries a Watch need over
 [deadline, ∞) (`now_need`), and when now reaches its deadline the offer falls
 in range and wakes it. There are no tick facts, so nothing accumulates;
 matching stays ordinary (a plain Range need over a plain offer); and durable
-derived state never depends on `now`, so replay with any `now` rebuilds it
+derived state never depends on `now`, so a reboot at any `now` rebuilds it
 identically. The daemon reads the clock each loop and passes it to the turn;
 a `wake@clock` alarm — a cadence fact's next boundary — sets its `select`
 timeout via `runtime.next_wake`, so it sleeps exactly until the earliest
@@ -314,8 +322,9 @@ accepts, the verb path and args go out as one framed request, one framed
 `+ok`/`-err` reply comes back (new durable facts hit the file before the
 reply). With no daemon reachable it exits with a message — the daemon is the
 only writer, which keeps the single-owner story simple (the earlier cold
-crash-and-demand path is gone). The daemon still hydrates on demand internally:
-a verb's facts and queries pull only what they ask about from the store.
+crash-and-demand path is gone). The daemon boots total, so a verb's queries
+read a fully resident node; their demands are no-ops behind the checked
+total.
 
 # Part II — Fact Families
 
@@ -365,9 +374,9 @@ fact. A signed fact Requires the `b"pk"` offer at its own id, so it only
 validates once its signature lands — and the signer key is now in the
 projector's context. The gate proves only that SOME key signed; binding that
 key to workspace authority is a value-compare in the target's PROJECT (see
-Authority). Verification runs exactly once, at first admission; replay loads
-from the trusted durable file with the check skipped — those bytes passed
-already. Tampering with the local file is a local-integrity problem, not a
+Authority). Verification runs exactly once, at first admission; a faulted fact re-enters
+with the check skipped — existence in the store is the certificate, and the
+re-hash on reconstruction transfers it. Tampering with the local file is a local-integrity problem, not a
 protocol one: bytes from outside enter only through the gate.
 
 ## Authority
@@ -422,15 +431,17 @@ reachable through its Require edges, and a peer re-derives every verdict
 itself — a dep rides sync as one of its dependents' closure ids, advertised
 in the range's id list and pulled by id (see Sync).
 
-## Bulk Demand: store.hydrate
+## Demand: store.hydrate
 
-Bulk demand is the `store.hydrate` family: a volatile fact with one Watch
-need (typically a range target), authored by queries before they read.
-Queries may author volatile demand and drain; they still never author
-durable facts. A durable hydrate fact is a pin (later wave, with standing
-demand). The window `(ts_lo, ts_hi, budget, order)` rides in the need's
-value — the one family exempt from the no-valued-needs contract, because
-the window is engine-owned (see Hydration, Part I).
+Hydration is just a fact. A demand is the `store.hydrate` family: a
+volatile fact with one value-free Watch need, authored by queries before
+they read — and the engine answers it exactly the way it answers every
+need, through the fault leg (Hydration, Part I): the family adds no
+machinery, it only names a key. The total demand (the reserved `\x00all`
+key) is the whole boot story — `cond.py` starts by admitting one and
+running. Queries may author volatile demand and drain; they still never
+author durable facts. A durable hydrate fact is a pin (later wave, with
+standing demand).
 
 ## Sync
 
@@ -488,11 +499,11 @@ closure (the Require/suppressor ancestry over the `deps` memo, `closure()` in
 the kernel) — so a below-floor dependency is advertised as one of the range's
 closure ids and pulled by id like any other, convergent because a peer only
 ever requests ids the other side vouched for. The receiver admits every shipped
-fact through the normal gate (the replay-only `checked` path is never used for
+fact through the normal gate (the own-store `checked` path is never used for
 peer input).
 
 The split of labor: `compare`/`need` are volatile families (extract
-`(False, False)`), so replay never resurrects session state and they are
+`(False, False)`), so a reboot never resurrects session state and they are
 excluded from the very leaves they reconcile; a frame crossing the wire IS a
 fact, so facts stay the wire's only payload. `need` ships requested facts by
 reference (fact ids resolved against the durable set at send time) at the

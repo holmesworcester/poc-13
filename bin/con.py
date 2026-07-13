@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """con — the poc-13 CLI.  Usage: con <db> <scope.fact.verb> [args...]
 
-The db is sqlite holding one dumb table — facts(fid, bytes), canonical fact
-bytes and nothing else — plus a derived atom index the kernel Store owns. A
-daemon owns the db exclusively (<db>.sock); con's only job is to proxy the
+The db is sqlite holding the persisted atom relation the kernel Store owns —
+one row per atom, canonical bytes derived on read. A daemon owns the db
+exclusively (<db>.sock); con's only job is to proxy the
 verb to it: one framed request out, one framed +ok/-err reply back. With no
 daemon reachable there is nobody to answer, so con refuses and names the
 daemon to start — it never opens the db itself."""
