@@ -10,7 +10,7 @@ import os, random, sys
 from types import SimpleNamespace
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from kernel import (Atom, Exact, NEED, OFFER, Node, Out, RANGE, REQUIRE, Range,
+from kernel import (Atom, Exact, NEED, OFFER, Node, Out, REQUIRE, Range,
                     Router, SELF, SUPPRESS, Store, WATCH, all_need, covers,
                     decode, encode, fact, fact_id, mat, needs_of, ts_atom)
 from facts import ROOT
@@ -334,7 +334,7 @@ def test_sql_owners_mirrors_covers():
     """Exhaustive mirror: Store.owners == the kernel-covers reference for
     every target-shape pair on a small alphabet, plus the total key."""
     ks = [bytes([b]) for b in range(4)]
-    shapes = [Exact(k) for k in ks] + [(RANGE, a, b) for a in ks for b in ks if a <= b]
+    shapes = [Exact(k) for k in ks] + [Range(a, b) for a in ks for b in ks if a <= b]
     s, fids = Store(), {}
     for i, ot in enumerate(shapes):
         f = fact(b"no.such", ts_atom(250 + 7 * i), Atom(OFFER, b"r", b"s", ot))

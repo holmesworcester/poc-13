@@ -29,7 +29,7 @@ def extract(f): return True, False
 def check(f):
     v = {a.role: (a.target, a.value) for a in f.atoms}
     (tgt, secret) = v.get(b"invite_secret", (None, None))
-    return bool(secret) and tgt[0] == 0 and tgt[1] == bootstrap_hash(secret)
+    return bool(secret) and tgt == Exact(bootstrap_hash(secret))
 
 # PROJECT — publish acceptance + the bootstrap context.
 def project(f, ctx, sl):

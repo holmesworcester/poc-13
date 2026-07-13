@@ -29,7 +29,7 @@ HI = b"\xff" * 41                        # an upper bound above every 40-byte ke
 _tgt = lambda f, r: next((a.target[1] for a in f.atoms if a.role == r), b"")
 _send = lambda cid, blob: Atom(OFFER, b"send", b"outbox", Exact(cid), blob)
 def sorted_claims(S):                    # my split claims (cfp|cids) as wire claims, sorted by low key
-    return sorted((a.target[1], a.target[2], b"fp" if a.role == b"cfp" else b"ids", a.value)
+    return sorted((*a.target, b"fp" if a.role == b"cfp" else b"ids", a.value)
                   for _, _, a in S if a.role in (b"cfp", b"cids"))
 def claims_within(claims, los, lo, hi):  # the claims fully inside [lo,hi), by bisect (claims are disjoint)
     out, i = [], bisect_left(los, lo)    # first claim with low >= lo; scan forward while still below hi
@@ -58,14 +58,14 @@ def project(f, ctx, sl):
     cid = _tgt(f, b"cid")
     floor = next((a.value for a in f.atoms if a.role == b"floor"), b"")   # the window floor rides for re-threading
     S = by(ctx, SUM_ROLE)                                            # my view of each claimed range
-    myfp   = {(a.target[1], a.target[2]): a.value for _, _, a in S if a.role == b"fp"}
-    mycids = {(a.target[1], a.target[2]): a.value for _, _, a in S if a.role == b"cids"}
+    myfp   = {a.target: a.value for _, _, a in S if a.role == b"fp"}
+    mycids = {a.target: a.value for _, _, a in S if a.role == b"cids"}
     claims = sorted_claims(S); los = [c[0] for c in claims]         # sorted once, range-restricted by bisect
     within = lambda R: claims_within(claims, los, R[0], R[1])       # my claims inside a range, as wire claims
     out, want, seen = [], [], set()                                 # out: claims to descend; want: ids to pull
     for a in f.atoms:
         if a.role not in (b"fp", b"ids"): continue                  # a peer claim
-        R = (a.target[1], a.target[2])
+        R = a.target
         if a.role == b"fp":
             if myfp.get(R) == a.value: continue                     # ranges agree: prune
             out += within(R)                                        # differ: descend / advertise my side

@@ -47,10 +47,10 @@ def unframe(b):                          # the dual of frame: every length-frame
 # --- Canonical data -----------------------------------------------------------
 NEED, OFFER = 0, 1
 NONE, REQUIRE, WATCH, SUPPRESS = 0, 1, 2, 3
-EXACT, SELF_T, RANGE = 0, 1, 2
-SELF = (SELF_T,)                         # "this fact's eventual FactId"
-Exact = lambda b: (EXACT, b)
-Range = lambda lo, hi: (RANGE, lo, hi)
+EXACT, SELF_T, RANGE = 0, 1, 2           # wire tags only; in memory a target is (lo, hi) or SELF
+SELF = ()                                # "this fact's eventual FactId"
+Exact = lambda b: (b, b)                 # a point is the degenerate range
+Range = lambda lo, hi: (lo, hi)
 
 @dataclass(frozen=True)
 class Atom:
@@ -58,8 +58,10 @@ class Atom:
     value: bytes = None; effect: int = NONE   # effect: needs only
 
 def enc_atom(a):                         # the atom as one frame sequence: header ‖ role ‖ scope ‖ target-tail ‖ value?
-    return frame(bytes([a.kind, a.effect, a.target[0]]), a.role, a.scope,
-                 *a.target[1:], *(() if a.value is None else (a.value,)))
+    tt, tail = ((SELF_T, ()) if a.target == SELF else            # a point keeps the compact EXACT wire form
+                (EXACT, a.target[:1]) if a.target[0] == a.target[1] else (RANGE, a.target))
+    return frame(bytes([a.kind, a.effect, tt]), a.role, a.scope,
+                 *tail, *(() if a.value is None else (a.value,)))
 
 def dec_atom(b):                         # strict: parse leniently, then the re-encode must match byte-for-byte
     hdr, role, scope, *rest = unframe(b)
@@ -68,9 +70,11 @@ def dec_atom(b):                         # strict: parse leniently, then the re-
     if kind == OFFER and eff != NONE: raise ValueError("effect on offer")
     if role[:1] == b"\x00" and (kind, eff) != (NEED, WATCH): raise ValueError("reserved role")
     n = (1, 0, 2)[tt]                     # target parts after the tag: EXACT 1, SELF 0, RANGE 2
-    a = Atom(kind, role, scope, (tt, *rest[:n]), rest[n] if len(rest) > n else None, eff)
+    if len(rest) < n: raise ValueError("short target")
+    a = Atom(kind, role, scope, SELF if not n else (rest[0], rest[n - 1]),
+             rest[n] if len(rest) > n else None, eff)
     if enc_atom(a) != b: raise ValueError("non-canonical atom")   # extra/misplaced frames re-encode differently
-    return a
+    return a                              # (RANGE-form (v,v) re-encodes EXACT: rejected as non-canonical)
 
 @dataclass(frozen=True)
 class Fact:
@@ -95,13 +99,10 @@ ts_of = lambda f: next((int.from_bytes(a.value, "little")
                         for a in f.atoms if a.kind == OFFER and a.role == b"ts"), 0)
 
 # --- Matching -------------------------------------------------------------------
-def covers(off_t, need_t):               # SELF never matches; range↔range never matches
-    if need_t[0] == EXACT:
-        return (off_t == need_t or
-                (off_t[0] == RANGE and off_t[1] <= need_t[1] <= off_t[2]))
-    if need_t[0] == RANGE:               # range need: demand over exact offers
-        return off_t[0] == EXACT and need_t[1] <= off_t[1] <= need_t[2]
-    return False
+def covers(off_t, need_t):               # one side is a point lying inside the other; SELF and span↔span never match
+    if SELF in (off_t, need_t): return False
+    return (need_t[0] == need_t[1] and off_t[0] <= need_t[0] <= off_t[1] or
+            off_t[0] == off_t[1] and need_t[0] <= off_t[0] <= need_t[1])
 
 # Materialization rule: every derived row rewrites SELF to the owner id.
 mat = lambda a, fid: replace(a, target=Exact(fid)) if a.target == SELF else a
@@ -211,40 +212,38 @@ class Store:
         self.db.executescript("""
           CREATE TABLE IF NOT EXISTS facts(fid BLOB PRIMARY KEY, tag BLOB) WITHOUT ROWID;
           CREATE TABLE IF NOT EXISTS atoms(fid BLOB, kind INT, effect INT, role BLOB, scope BLOB,
-                                           tt INT, t1 BLOB, t2 BLOB, value BLOB,
-                                           ex INT, lo BLOB, hi BLOB);
+                                           value BLOB, ex INT, lo BLOB, hi BLOB);
           CREATE INDEX IF NOT EXISTS match_ix ON atoms(kind, role, scope, ex, lo);
           CREATE INDEX IF NOT EXISTS owner_ix ON atoms(fid);""")
 
     def add(self, fb):                   # checked write: decode + derive EVERY row before the
         try:                             # first insert — bad BYTES are a miss...
             f = decode(fb); fid = fact_id(f)
-            rows = [(fid, a.kind, a.effect, a.role, a.scope,
-                     *(a.target + (None, None))[:3], a.value,
-                     m.target[0] == EXACT, m.target[1], m.target[-1])
-                    for a in f.atoms for m in (mat(a, fid),)]
+            rows = [(fid, a.kind, a.effect, a.role, a.scope, a.value,
+                     t[0] == t[1], t[0], t[1])
+                    for a in f.atoms for t in (mat(a, fid).target,)]
         except Exception: return
         if not self.db.in_transaction: self.db.execute("BEGIN")   # one transaction per host
         self.db.execute("SAVEPOINT a")                            # turn: commit() ends it
         try:
             if self.db.execute("INSERT OR IGNORE INTO facts VALUES(?,?)", (fid, f.type_tag)).rowcount:
-                self.db.executemany("INSERT INTO atoms VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+                self.db.executemany("INSERT INTO atoms VALUES(?,?,?,?,?,?,?,?,?)", rows)
             self.db.execute("RELEASE a")
         except BaseException:            # ...but a failed WRITE (SystemExit included) tears
             try: self.db.execute("ROLLBACK TO a"); self.db.execute("RELEASE a")
             except sqlite3.Error: pass   # (the tx may have auto-rolled-back beneath us)
             raise                        # propagate whole: the caller keeps it unflushed, retries
 
-    def _mk(self, fid, tag, rows):       # regroup -> rebuild -> re-hash: the certificate check
-        try:
-            f = fact(tag, *(Atom(k, r, s, (tt, t1, t2)[:1 + (1, 0, 2)[tt]], v, e)
-                            for k, e, r, s, tt, t1, t2, v in rows))
-            return encode(f) if fact_id(f) == fid else None
+    def _mk(self, fid, tag, rows):       # regroup -> rebuild -> re-hash: the certificate check.
+        try:                             # A fact never targets its own id (a hash fixpoint), so a
+            f = fact(tag, *(Atom(k, r, s, SELF if lo == fid else (lo, hi), v, e)   # row at the owner id
+                            for k, e, r, s, lo, hi, v in rows))                    # can only be SELF —
+            return encode(f) if fact_id(f) == fid else None                        # and the re-hash certifies it
         except Exception: return None
 
     def fact_bytes(self, fid):           # the derived view: canonical bytes, or a miss
         t = self.db.execute("SELECT tag FROM facts WHERE fid=?", (fid,)).fetchone()
-        rows = self.db.execute("SELECT kind, effect, role, scope, tt, t1, t2, value"
+        rows = self.db.execute("SELECT kind, effect, role, scope, lo, hi, value"
                                " FROM atoms WHERE fid=?", (fid,)).fetchall()
         return self._mk(fid, t[0], rows) if t else None    # zero atom rows is legal: hash decides
 
@@ -253,7 +252,7 @@ class Store:
             return [r[0] for r in self.db.execute("SELECT fid FROM facts")]
         return [r[0] for r in self.db.execute(
             "SELECT DISTINCT fid FROM atoms WHERE kind=1 AND role=? AND scope=?" + self._COV,
-            (n.role, n.scope, n.target[1], n.target[-1], n.target[0] == EXACT, n.target[1]))]
+            (n.role, n.scope, *n.target, n.target[0] == n.target[1], n.target[0]))]
 
     def delete(self, fid):               # cold-path purge: forget a fact's rows. The caller
         self.db.execute("DELETE FROM facts WHERE fid=?", (fid,))     # owns the node-side
@@ -400,36 +399,36 @@ class Treap:
 
 # --- The match index ---------------------------------------------------------------
 class Bucket:
-    """One match bucket over atom-LAST rows — (owner, atom) in the asserted index,
-    (owner, ts, atom) in the clean twin; the same class serves both. Exact-target
-    rows live in a dict keyed by target value (the common case: a point query is
-    an O(1) lookup, not a scan of every same-role atom); the few range-target rows
-    sit in a short list. covers() reduces, in BOTH match directions, to the same
-    function of the query target — a point hits `exact[v]` plus any range that
-    spans v; a range hits the exact values inside it (range-vs-range never
-    matches) — so one `match` serves offers_for, needs_for and valid_offers alike.
-    Iterable — `for row in bucket` yields every row — for watched()/derived()."""
+    """One match bucket over rows whose LAST element is the atom: (owner, atom)
+    in the asserted index (keyed by kind, role, scope), (owner, ts, atom) in the
+    clean twin (keyed by role, scope). Point-target rows live in a dict keyed by
+    the point (the common case: an O(1) lookup, not a scan of every same-key
+    atom); the few span-target rows sit in a short list. covers() reduces, in
+    BOTH match directions, to the same function of the query target — a point
+    hits its bin plus any span over it; a span hits the points inside it — so
+    one `match` serves offers_for, needs_for, and valid_offers alike. Iterable —
+    `for o,t,a in bucket` — so watched() and derived() read it unchanged."""
     __slots__ = ("exact", "ranges")
-    def __init__(self): self.exact, self.ranges = {}, []      # value -> [row] ; [row]
+    def __init__(self): self.exact, self.ranges = {}, []      # point -> [row] ; [row]
 
     def add(self, r):
-        (self.exact.setdefault(r[-1].target[1], []) if r[-1].target[0] == EXACT
-         else self.ranges).append(r)
+        t = r[-1].target
+        (self.exact.setdefault(t[0], []) if t[0] == t[1] else self.ranges).append(r)
     def remove(self, r):
-        if r[-1].target[0] == EXACT:
-            lst = self.exact.get(r[-1].target[1])
+        t = r[-1].target
+        if t[0] == t[1]:
+            lst = self.exact.get(t[0])
             if lst and r in lst:
                 lst.remove(r)
-                if not lst: del self.exact[r[-1].target[1]]
+                if not lst: del self.exact[t[0]]
         elif r in self.ranges: self.ranges.remove(r)
 
     def match(self, t):                  # the rows a query target `t` covers-matches (either direction)
-        if t[0] == EXACT:                # a point: the exact bin at v, plus every range that spans v
-            v = t[1]
-            return (list(self.exact.get(v, ()))
-                    + [r for r in self.ranges if r[-1].target[1] <= v <= r[-1].target[2]])
-        lo, hi = t[1], t[2]              # a range: the exact values inside it (ranges never match ranges;
-        return [r for v, rs in self.exact.items() if lo <= v <= hi for r in rs]   # a SELF query raises)
+        lo, hi = t                       # (query targets are materialized: never SELF)
+        if lo == hi:                     # a point: its bin, plus every span that covers it
+            return (list(self.exact.get(lo, ()))
+                    + [r for r in self.ranges if r[-1].target[0] <= lo <= r[-1].target[1]])
+        return [r for v, rs in self.exact.items() if lo <= v <= hi for r in rs]
     def __iter__(self):                  # every row, in no particular order — for watched() and derived()
         return iter([r for rs in self.exact.values() for r in rs] + self.ranges)
     def __len__(self):
@@ -532,7 +531,7 @@ class Node:
         return self.valid_offers(n)
 
     def _summary_rows(self, n):          # RBSR: my fingerprint for the range + my reconciliation claims for it.
-        lo, hi = n.target[1], n.target[2]; floor = n.value or b""
+        lo, hi = n.target; floor = n.value or b""
         if floor > lo: lo = floor        # clip the range to the window floor
         # A summary is a pure function of the leaf set + the durable closure graph;
         # both are held fixed while only volatile sync facts churn, so a peer that

@@ -24,7 +24,7 @@ def extract(f): return True, False
 def check(f):
     v = {a.role: (a.target, a.value) for a in f.atoms}
     (tgt, sk) = v.get(b"ephsk", (None, None))
-    return bool(sk) and tgt[0] == 0 and x25519_pk(sk) == tgt[1]
+    return bool(sk) and tgt == Exact(x25519_pk(sk))
 
 # PROJECT — the only place this family's meaning lives.
 def project(f, ctx, sl):

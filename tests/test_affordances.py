@@ -56,7 +56,7 @@ def test_summary_large_range_splits_by_equal_count():
     rows = n._answer(summary_need(b"", HI))
     claims = _role(rows, b"cfp") + _role(rows, b"cids")
     assert 1 < len(claims) <= 16                           # a B-way (<= 16) partition, not one giant blob
-    rngs = sorted((a.target[1], a.target[2]) for a in claims)
+    rngs = sorted(a.target for a in claims)
     assert all(rngs[i][1] <= rngs[i + 1][0] for i in range(len(rngs) - 1))   # disjoint, ordered: a partition
 
 def test_resident_present_and_absent():

@@ -10,7 +10,7 @@ fact, so signing it covers everything. Wrong math is falsy at the gate — an
 inert miss, never a bad fact, and replay never re-verifies. Durable and
 shareable: a signature must travel with what it signs, and being a Require
 dep it ships automatically under dep-aware sync."""
-from kernel import Atom, EXACT, Exact, OFFER, Out, encode, fact, now, ts_atom
+from kernel import Atom, Exact, OFFER, Out, encode, fact, now, ts_atom
 from crypto import ed25519_sign as sign, ed25519_verify as verify
 from facts.store import hydrate
 
@@ -31,7 +31,7 @@ def check(f):                            # verify over the sig offer's own targe
     pk = sig = tgt = None                # exactly the id a Require will match on
     for a in f.atoms:
         if a.role == b"pk": pk = a.value
-        elif a.role == b"sig" and a.target[0] == EXACT: sig, tgt = a.value, a.target[1]
+        elif a.role == b"sig" and a.target and a.target[0] == a.target[1]: sig, tgt = a.value, a.target[1]
     return bool(pk and sig and tgt and verify(pk, tgt, sig))
 
 # PROJECT — the only place this family's meaning lives.
