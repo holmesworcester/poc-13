@@ -457,7 +457,6 @@ class Node:
         self.memo, self.clean = {}, {}       # id -> verdict ; (role,scope) -> [(owner, ts, atom)]
         self.owned = {}                      # id -> its clean rows, for owner-scoped replacement
         self.slices = {}                     # key -> (owner, ts, value), LWW by (ts, owner)
-        self._deps = {}                      # id -> direct Require/suppress edge owners: the dependency memo
         self._sumcache = {}                  # (lo,hi) -> summary rows: reused while the leaf/durable set holds still
         self.leaf_ver = 0                    # monotonic set-version, bumped on every leaf delta: a hash-free change signal
         self.tree = Treap()                  # the reconciliation set: a clamping-invariant treap (O(log n) range fp)
@@ -481,7 +480,6 @@ class Node:
         for a in f.atoms:
             self.rows.setdefault((a.kind, a.role, a.scope), Bucket()).add((fid, mat(a, fid)))
         self._enqueue(fid)
-        self._deps.clear()                   # the graph changed: rebuild the validated-edge memo lazily
         return fid
 
     # A shared role+scope is the whole precondition for a match, so it keys the
@@ -502,13 +500,10 @@ class Node:
             if o != skip: self._enqueue(o)
 
     def deps(self, fid):                 # fid's direct Require/suppress edge owners: its dependency spine.
-        d = self._deps.get(fid)          # STRUCTURAL/asserted (from offers_for), NOT validity-gated — validity is
-        if d is None:                    # decided in _step. Rebuildable derived state, cleared when a fact admits.
-            f = self.facts.get(fid)
-            d = self._deps[fid] = frozenset() if f is None else frozenset(
-                o for n in needs_of(f, fid) if n.effect in (REQUIRE, SUPPRESS)
-                for o, _ in self.offers_for(n))
-        return d
+        f = self.facts.get(fid)          # STRUCTURAL/asserted (from offers_for), NOT validity-gated — decided in _step
+        return frozenset() if f is None else frozenset(
+            o for n in needs_of(f, fid) if n.effect in (REQUIRE, SUPPRESS)
+            for o, _ in self.offers_for(n))
 
     def closure(self, fid, out=None):    # transitive deps (requires + suppressors), incl fid — the sync spine.
         out = set() if out is None else out          # a shared visited-set across leaves dedups the union closure
