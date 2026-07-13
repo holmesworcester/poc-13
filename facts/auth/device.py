@@ -10,13 +10,12 @@ key). It publishes `endpoint_shared@auth` — the frame(endpoint, signing_pk, wi
 the sealed request opens a membership handshake against — and `endpoint_key` for
 the reverse endpoint->member lookup peers() shows."""
 from kernel import (Atom, Exact, NEED, OFFER, Out, REQUIRE, SELF, by, encode,
-                    fact, frame, now, ts_atom, _rd)
+                    fact, frame, now, ts_atom, unframe)
 from facts.auth import endpoint, local_signer_secret, signature
 from facts.store import hydrate
 
 TAG = b"auth.device"
 
-def _split3(v): a, i = _rd(v, 0); b, i = _rd(v, i); c, _ = _rd(v, i); return a, b, c
 
 # SHAPE — the canonical atom set; the only place atoms are chosen. The endpoint
 # and signing pk are machine-wide; workspace_id scopes the binding.
@@ -56,7 +55,7 @@ def own(node, workspace_id):             # this node's own device (endpoint_shar
     if not e: return None
     _, epk = e
     return next((o for o, _, a in node.watched(b"endpoint_shared", b"auth")
-                 if _split3(a.value)[0] == epk and _split3(a.value)[2] == workspace_id), None)
+                 if unframe(a.value)[0] == epk and unframe(a.value)[2] == workspace_id), None)
 
 def devices(node, workspace_id):
     hydrate.demand(node, b"device", workspace_id)

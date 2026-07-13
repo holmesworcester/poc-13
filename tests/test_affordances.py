@@ -7,8 +7,8 @@ call the engine's answer methods directly, the way _step injects them into ctx."
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import crypto as _c
-from kernel import (Node, SUM_ROLE, RES_ROLE, RESERVED, summary_need,
-                    resident_need, encode, fact_id, _rd, Atom, Exact,
+from kernel import (Node, SUM_ROLE, RES_ROLE, RESERVED, summary_need, unframe,
+                    resident_need, encode, fact_id, Atom, Exact,
                     dec_atom, enc_atom, NEED, OFFER, WATCH, REQUIRE)
 from facts import ROOT
 from facts.auth.workspace import workspace
@@ -29,10 +29,6 @@ def node(*fs):
     for f in fs: n.admit(encode(f))
     n.run(); return n
 
-def _unframe(v):
-    out, i = [], 0
-    while i < len(v): x, i = _rd(v, i); out.append(x)
-    return out
 def _role(rows, r): return [a for _, _, a in rows if a.role == r]
 
 def test_closure_includes_self_and_spine():
@@ -51,7 +47,7 @@ def test_summary_small_range_is_one_id_list_with_closure():
     assert len(_role(rows, b"fp")) == 1                    # one prune-check fingerprint for the range
     cids = _role(rows, b"cids")
     assert len(cids) == 1 and not _role(rows, b"cfp")      # small: a single id list, no split
-    ids = set(_unframe(cids[0].value))
+    ids = set(unframe(cids[0].value))
     assert {mid, WID, fact_id(WS_SIG)} <= ids              # leaves + below-window spine, by id, deduped
 
 def test_summary_large_range_splits_by_equal_count():

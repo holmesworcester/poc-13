@@ -152,7 +152,8 @@ SUM_ROLE, RES_ROLE, _SUM, _RES = b"\x00summary", b"\x00resident", b"\x00sum", b"
 # the fault leg reads as "every stored fact". Once checked, faulting is over —
 # facts enter the store only via admission, so nothing cold appears behind it.
 ALL_ROLE = b"\x00all"
-all_need = Atom(NEED, ALL_ROLE, b"store", Range(b"", b"\xff" * 64), effect=WATCH)
+FULL = Range(b"", b"\xff" * 64)         # the full-domain range Watch: covers any exact key
+all_need = Atom(NEED, ALL_ROLE, b"store", FULL, effect=WATCH)
 _ALL_KEY = (ALL_ROLE, b"store", all_need.target)
 
 RESERVED = frozenset((SUM_ROLE, RES_ROLE, ALL_ROLE))

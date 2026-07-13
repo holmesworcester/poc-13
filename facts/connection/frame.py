@@ -11,7 +11,7 @@ poisons its siblings. Volatile, unshareable, never in leaves: pure transport.
 Handshake facts (the sealed request and connection) travel as bare facts before
 a secret exists — they carry their own X25519 envelopes; frames seal everything
 after."""
-from kernel import Atom, OFFER, Out, SELF, _rd, encode, fact, frame
+from kernel import Out, _rd, fact, frame
 from crypto import aead_open, aead_seal
 
 TAG = b"connection.frame"
@@ -20,9 +20,7 @@ TARGET = 48 << 10                        # pack up to ~48 KiB of inner fact byte
 VERSION = 1
 PURPOSE = b"poc13 connection frame v1"
 
-# SHAPE — the canonical atom set; a frame is opened by the daemon, never admitted.
-def marker(cid):                         # a vestigial shape: frames live on the wire, not the db
-    return fact(TAG, Atom(OFFER, b"frame", SC, SELF, cid))
+# SHAPE — none: a frame is sealed onto the wire, never admitted as a fact.
 
 # EXTRACT — content-pure: volatile + unshareable. Transport, never stored.
 def extract(f): return False, False
@@ -41,9 +39,6 @@ def pack_counts(items):                  # group into ~TARGET blobs, each with t
     if cur: out.append((frame(*cur), len(cur)))
     return out
 
-def pack(items):                         # group fact frames into ~TARGET-sized plaintext blobs
-    return [blob for blob, _ in pack_counts(items)]
-
 def seal(blob, cid, secret, nonce):      # one plaintext blob -> one sealed wire message
     aad = frame(PURPOSE, cid, nonce)
     return frame(bytes([VERSION]), cid, nonce, aead_seal(secret, nonce, aad, blob))
@@ -61,11 +56,6 @@ def frame_cid(wire):                     # peek the connection id a sealed frame
         _v, i = _rd(wire, 0); cid, _ = _rd(wire, i); return cid
     except Exception:
         return None
-
-def unframe(blob):                       # a plaintext blob -> its inner fact byte-frames
-    out, i = [], 0
-    while i < len(blob): b, i = _rd(blob, i); out.append(b)
-    return out
 
 # CLI — no human surface.
 CLI = {}

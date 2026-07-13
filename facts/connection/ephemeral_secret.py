@@ -15,7 +15,6 @@ SC = b"conn"
 def ephemeral(eph_sk, eph_pk, t):
     return fact(TAG, ts_atom(t, SC),
                 Atom(OFFER, b"ephsk", SC, Exact(eph_pk), eph_sk),  # keyed by its own pub
-                Atom(OFFER, b"eph", SC, SELF, eph_pk),
                 Atom(NEED, b"closed", SC, SELF, effect=SUPPRESS))
 
 # EXTRACT — content-pure: (durable, LocalOnly). A handshake secret never syncs.
@@ -29,7 +28,7 @@ def check(f):
 
 # PROJECT — the only place this family's meaning lives.
 def project(f, ctx, sl):
-    return Out(offers=tuple(a for a in f.atoms if a.role in (b"ephsk", b"eph")))
+    return Out(offers=tuple(a for a in f.atoms if a.role == b"ephsk"))
 
 # COMMANDS — build a fact, admit it, stop; returns the fact id (the eph secret id).
 def mint(node, eph_sk, eph_pk, t):

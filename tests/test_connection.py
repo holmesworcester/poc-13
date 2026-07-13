@@ -5,7 +5,7 @@ the batch). The end-to-end handshake, sync, restart, and ciphertext properties
 live in test_transport.py and test_pair.py."""
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from kernel import Node, encode, fact_id
+from kernel import Node, encode, fact_id, unframe
 from facts import ROOT
 from facts.connection import frame as frames
 from facts.auth.workspace import workspace
@@ -13,7 +13,7 @@ from facts.content.message import message, feed
 
 def test_tampered_frame_opens_to_nothing():
     secret, cid = os.urandom(32), os.urandom(32)
-    [blob] = frames.pack([b"one", b"two"])
+    [(blob, _)] = frames.pack_counts([b"one", b"two"])
     wire = frames.seal(blob, cid, secret, os.urandom(24))
     assert frames.open_frame(wire, secret) == blob            # honest frame opens
     bad = bytearray(wire); bad[-1] ^= 0xff                    # flip a ciphertext byte
@@ -25,11 +25,11 @@ def test_corrupt_inner_fact_misses_siblings_land():
     msgs = [message(wid, b"g", b"al", b"m%d" % i, i + 2) for i in range(4)]
     items = [encode(m) for m in msgs]
     items[2] += b"\x00"                                        # a trailing byte: msgs[2] no longer decodes
-    [blob] = frames.pack(items)
+    [(blob, _)] = frames.pack_counts(items)
     secret, cid = os.urandom(32), os.urandom(32)
     wire = frames.seal(blob, cid, secret, os.urandom(24))
     n = Node(ROOT)
-    for inner in frames.unframe(frames.open_frame(wire, secret)):   # exactly what the daemon does per frame
+    for inner in unframe(frames.open_frame(wire, secret)):   # exactly what the daemon does per frame
         try: n.admit(inner)
         except Exception: pass
     landed = {fid for fid, f in n.facts.items() if f.type_tag == b"content.message"}

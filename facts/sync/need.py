@@ -6,15 +6,11 @@ key. Batched (one need, many ids) so a fresh peer pulls in O(1) request frames, 
 one per fact. Volatile session state (extract -> False, False): it reaps when its
 shipment flushes, and the next cadence re-descends whatever still differs."""
 from kernel import (Atom, Exact, OFFER, Out, by, fact, frame, shipped_need,
-                    ts_atom, _rd)
+                    ts_atom, unframe)
 
 TAG = b"sync.need"
 SC = b"sync"
 _tgt = lambda f, r: next((a.target[1] for a in f.atoms if a.role == r), b"")
-def _unframe(v):
-    out, i = [], 0
-    while i < len(v): x, i = _rd(v, i); out.append(x)
-    return out
 
 # SHAPE — cid in the target, the wanted ids length-framed in one atom's value.
 def need(cid, fids):
@@ -30,7 +26,7 @@ def extract(f): return False, False
 def project(f, ctx, sl):
     if by(ctx, b"shipped"): return Out("Reap")
     cid = _tgt(f, b"cid")
-    ids = _unframe(next((a.value for a in f.atoms if a.role == b"ids"), b""))
+    ids = unframe(next((a.value for a in f.atoms if a.role == b"ids"), b""))
     return Out(offers=(Atom(OFFER, b"ship", b"outbox", Exact(cid), frame(*ids)),))
 
 # COMMANDS — none: a need is authored only by compare's projector.

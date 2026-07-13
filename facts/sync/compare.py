@@ -20,7 +20,7 @@ at the connection's outbox key, and a dropped frame just re-descends next cadenc
 Volatile (extract -> False, False): session state, never itself a leaf."""
 from bisect import bisect_left
 from kernel import (Atom, Exact, OFFER, Out, Range, SUM_ROLE, by, encode, fact,
-                    summary_need, shipped_need, ts_atom, _rd)
+                    summary_need, shipped_need, ts_atom, unframe)
 from facts.sync.need import need
 
 TAG = b"sync.compare"
@@ -28,10 +28,6 @@ SC = b"sync"
 HI = b"\xff" * 41                        # an upper bound above every 40-byte key (half-open domain end)
 _tgt = lambda f, r: next((a.target[1] for a in f.atoms if a.role == r), b"")
 _send = lambda cid, blob: Atom(OFFER, b"send", b"outbox", Exact(cid), blob)
-def _unframe(v):
-    out, i = [], 0
-    while i < len(v): x, i = _rd(v, i); out.append(x)
-    return out
 def sorted_claims(S):                    # my split claims (cfp|cids) as wire claims, sorted by low key
     return sorted((a.target[1], a.target[2], b"fp" if a.role == b"cfp" else b"ids", a.value)
                   for _, _, a in S if a.role in (b"cfp", b"cids"))
@@ -74,7 +70,7 @@ def project(f, ctx, sl):
             if myfp.get(R) == a.value: continue                     # ranges agree: prune
             out += within(R)                                        # differ: descend / advertise my side
         elif R in mycids:                                           # peer id list, small on my side too: diff
-            mset, pids = set(_unframe(mycids[R])), _unframe(a.value)
+            mset, pids = set(unframe(mycids[R])), unframe(a.value)
             for x in pids:                                          # accumulate what I lack (deduped, ordered)
                 if x not in mset and x not in seen: seen.add(x); want.append(x)
             if mset - set(pids): out.append((b"ids", R[0], R[1], mycids[R]))   # I hold extras: re-advertise

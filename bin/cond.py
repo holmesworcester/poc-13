@@ -34,7 +34,7 @@ so a reconnect re-ships (the connection id outlives the socket)."""
 import errno, os, select, signal, socket, sys, time
 BIN = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [BIN, os.path.dirname(BIN)]
-from kernel import Node, Store, _rd, decode, fact_id, frame
+from kernel import Node, Store, _rd, decode, fact_id, frame, unframe
 from facts import ROOT
 from facts.sync import cadence
 from facts.auth import local_signer_secret, endpoint
@@ -240,7 +240,7 @@ def _open_frame(node, body):             # a sealed data frame -> its inner fact
     r = conn.route(node, cid) if cid else None
     if not r: return []                  # no session secret yet: drop (sync re-descends next cadence)
     blob = frames.open_frame(body, r[1])
-    return list(frames.unframe(blob)) if blob is not None else []   # tamper/wrong key -> whole-frame miss
+    return unframe(blob) if blob is not None else []   # tamper/wrong key -> whole-frame miss
 
 if __name__ == "__main__":
     main(*sys.argv[1:])

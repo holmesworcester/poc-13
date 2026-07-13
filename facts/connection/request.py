@@ -16,8 +16,8 @@ publishes the decrypted plaintext as `req_open` (the connection fact's transcrip
 input), re-offers the wire bytes as a `send` while the initiator is unanswered
 (the resend loop the pump dials), and — on the addressee, once a receipt proves
 the request arrived — a host-watched `respond` naming the reply route."""
-from kernel import (Atom, Exact, NEED, OFFER, Out, Range, SELF, SUPPRESS, WATCH,
-                    by, encode, fact, frame, now, ts_atom, _rd)
+from kernel import (Atom, Exact, FULL, NEED, OFFER, Out, SELF, SUPPRESS, WATCH,
+                    by, encode, fact, frame, now, ts_atom, unframe)
 from crypto import open_x25519
 from crypto import ed25519_keygen as keygen, ed25519_sign as sign, ed25519_verify as verify
 from facts.auth import endpoint, invite_accepted as ish
@@ -27,8 +27,6 @@ SC = b"conn"
 SEAL_VERSION = 1
 REQUEST_PURPOSE = b"poc13-sealed-connection-request-v2"
 BOOTSTRAP, MEMBERSHIP = 1, 2
-LOCAL_FULL = Range(b"", b"\xff" * 64)    # a range Watch that covers any Exact key
-AUTH_FULL = Range(b"", b"\xff" * 64)
 
 # --- plaintext codec (shared with connection.py) --------------------------------
 _F = ("mode", "from_ep", "to_ep", "nonce", "dialed_addr", "init_addr", "invite_id",
@@ -39,11 +37,10 @@ def encode_pt(**k):
                  k["dialed_addr"], k["init_addr"], k["invite_id"], k["bootstrap_hash"],
                  k["esid"], k["sig"], k["init_eph_id"], k["init_eph_pk"])
 
-def decode_pt(pt):
-    out, i = {}, 0
-    for name in _F:
-        v, i = _rd(pt, i); out[name] = v
-    out["mode"] = out["mode"][0]
+def decode_pt(pt):                       # strict: exactly the named fields
+    parts = unframe(pt)
+    if len(parts) != len(_F): raise ValueError("bad request plaintext")
+    out = dict(zip(_F, parts)); out["mode"] = out["mode"][0]
     return out
 
 def sig_bytes(F):                        # the plaintext the branch signature covers
@@ -51,9 +48,7 @@ def sig_bytes(F):                        # the plaintext the branch signature co
 
 _env = lambda ct, eph, to, nc: frame(bytes([SEAL_VERSION]), eph, to, nc, ct)
 def _unenv(env):
-    ver, i = _rd(env, 0); eph, i = _rd(env, i); to, i = _rd(env, i)
-    nc, i = _rd(env, i); ct, i = _rd(env, i)
-    return ver[0], eph, to, nc, ct
+    ver, eph, to, nc, ct = unframe(env); return ver[0], eph, to, nc, ct
 _header = lambda eph, to, nc: frame(bytes([SEAL_VERSION]), eph, to, nc)
 
 # SHAPE — the canonical atom set; the only place atoms are chosen.
@@ -62,9 +57,9 @@ def request(env, to_ep, init_eph_pk, t):
                 Atom(OFFER, b"sreq", SC, SELF, env),
                 Atom(NEED, b"esk", b"local", Exact(to_ep), effect=WATCH),        # responder opens
                 Atom(NEED, b"ephsk", SC, Exact(init_eph_pk), effect=WATCH),      # initiator opens
-                Atom(NEED, b"invite_secret", b"local", LOCAL_FULL, effect=WATCH),
-                Atom(NEED, b"endpoint_shared", b"auth", AUTH_FULL, effect=WATCH),
-                Atom(NEED, b"endpoint", b"local", LOCAL_FULL, effect=WATCH),     # am I addressee?
+                Atom(NEED, b"invite_secret", b"local", FULL, effect=WATCH),
+                Atom(NEED, b"endpoint_shared", b"auth", FULL, effect=WATCH),
+                Atom(NEED, b"endpoint", b"local", FULL, effect=WATCH),     # am I addressee?
                 Atom(NEED, b"answered", SC, SELF, effect=WATCH),                 # retire resend
                 Atom(NEED, b"closed", SC, SELF, effect=SUPPRESS))
 
@@ -102,7 +97,7 @@ def project(f, ctx, sl):
     elif F["mode"] == MEMBERSHIP:
         share = {r[2].target[1]: r[2].value for r in by(ctx, b"endpoint_shared")}.get(F["esid"])
         if share is None: return Out("Parked")
-        ep, spk, _wid = _split3(share)   # device's endpoint_shared: frame(endpoint, signing_pk, wid)
+        ep, spk, _wid = unframe(share)   # device's endpoint_shared: frame(endpoint, signing_pk, wid)
         if ep != F["from_ep"] or not verify(spk, sig_bytes(F), F["sig"]): return Out("Invalid")
     else: return Out("Invalid")
     offers = [Atom(OFFER, b"req_open", SC, SELF, pt)]
@@ -112,9 +107,6 @@ def project(f, ctx, sl):
     elif not by(ctx, b"answered") and F["dialed_addr"]:   # initiator: (re)dial until answered
         offers.append(Atom(OFFER, b"dial", SC, Exact(F["dialed_addr"]), encode(f)))
     return Out(offers=tuple(offers))
-
-def _split2(v): a, i = _rd(v, 0); b, _ = _rd(v, i); return a, b
-def _split3(v): a, i = _rd(v, 0); b, i = _rd(v, i); c, _ = _rd(v, i); return a, b, c
 
 # COMMANDS — author the sealed first-contact fact (+ its ephemeral). Bootstrap and
 # membership differ only in which proof/signature fills the branch fields.

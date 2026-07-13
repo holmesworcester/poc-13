@@ -18,7 +18,7 @@ import os, signal, socket, subprocess, sys, tempfile, time
 BENCH = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(BENCH)
 sys.path.insert(0, ROOT_DIR)
-from kernel import Node, Store, encode, decode, fact_id, frame, _rd
+from kernel import Node, Store, encode, decode, fact_id, frame, unframe, _rd
 from facts import ROOT
 from facts.auth.workspace import workspace
 from facts.content.message import message, feed
@@ -165,10 +165,6 @@ def _node(bs):
 
 _CID = b"\x22" * 32                      # a fixed connection id for the in-process pair
 
-def _ids(v):                             # a ship offer's value: length-framed fact ids
-    out, i = [], 0
-    while i < len(v): x, i = _rd(v, i); out.append(x)
-    return out
 
 def leaves(n): return set(n.tree.keys)   # the reconciliation set as 40-byte (ts‖FactId) keys
 
@@ -186,7 +182,7 @@ def _reconcile(a, b, maxr=100_000):      # the daemon's exact wire discipline, i
         for role in (b"send", b"ship"):
             for o, _, at in me.watched(role, b"outbox"):
                 blobs = ([at.value] if role == b"send"
-                         else [me.durable[x] for x in _ids(at.value) if x in me.durable])
+                         else [me.durable[x] for x in unframe(at.value) if x in me.durable])
                 inbox[other] += blobs; frames[0] += 1; wire[0] += sum(len(x) for x in blobs)
                 if o not in fired[me]: fired[me].append(o)
                 did = True

@@ -16,8 +16,8 @@ the request's resend loop. respond() is the responder's authoring command: a
 deterministic ephemeral and seal nonce derived from the static secret over the
 request id make re-performance byte-identical, so a replayed or duplicated
 request produces one and the same connection."""
-from kernel import (Atom, Exact, H, NEED, OFFER, Out, Range, REQUIRE, SELF,
-                    SUPPRESS, WATCH, by, encode, fact, frame, ts_of, _rd)
+from kernel import (Atom, Exact, FULL, H, NEED, OFFER, Out, REQUIRE, SELF,
+                    SUPPRESS, WATCH, by, encode, fact, frame, ts_of, unframe)
 from crypto import dh, hkdf_sha256, keyed_hash, open_x25519, seal_x25519, x25519_pk
 from facts.auth import endpoint, invite_accepted as ish
 from facts.connection import ephemeral_secret as eph
@@ -34,8 +34,6 @@ SECRET_PURPOSE = b"poc13-connection-secret-v2"
 TRANSCRIPT_LABEL = b"poc13-connection-handshake-transcript-v2"
 RESP_EPH_LABEL = b"poc13:create-connection:responder-ephemeral:v1"
 NONCE_LABEL = b"poc13:create-connection:seal-nonce:v1"
-LOCAL_FULL = Range(b"", b"\xff" * 64)
-CONN_FULL = Range(b"", b"\xff" * 64)
 
 # --- connection plaintext codec + handshake math --------------------------------
 _C = ("from_ep", "to_ep", "request_id", "resp_addr", "init_addr", "init_eph_id",
@@ -43,16 +41,13 @@ _C = ("from_ep", "to_ep", "request_id", "resp_addr", "init_addr", "init_eph_id",
 
 def _encode_cpt(**k): return frame(*(k[n] for n in _C))
 def _decode_cpt(pt):
-    out, i = {}, 0
-    for n in _C:
-        v, i = _rd(pt, i); out[n] = v
-    return out
+    parts = unframe(pt)
+    if len(parts) != len(_C): raise ValueError("bad connection plaintext")
+    return dict(zip(_C, parts))
 
 _cenv = lambda ct, eph_pk, to, rid, nc: frame(bytes([SEAL_VERSION]), eph_pk, to, rid, nc, ct)
 def _uncenv(env):
-    ver, i = _rd(env, 0); ep, i = _rd(env, i); to, i = _rd(env, i)
-    rid, i = _rd(env, i); nc, i = _rd(env, i); ct, i = _rd(env, i)
-    return ver[0], ep, to, rid, nc, ct
+    ver, ep, to, rid, nc, ct = unframe(env); return ver[0], ep, to, rid, nc, ct
 _cheader = lambda eph_pk, to, rid, nc: frame(bytes([SEAL_VERSION]), eph_pk, to, rid, nc)
 
 def _transcript(req_pt, resp_eph_pk, resp_addr, init_addr):
@@ -73,9 +68,9 @@ def connection(env, request_id):
     return fact(TAG,
                 Atom(OFFER, b"sconn", SC, Exact(request_id), env),
                 Atom(NEED, b"req_open", SC, Exact(request_id), effect=REQUIRE),
-                Atom(NEED, b"esk", b"local", LOCAL_FULL, effect=WATCH),
-                Atom(NEED, b"ephsk", SC, CONN_FULL, effect=WATCH),
-                Atom(NEED, b"invite_secret", b"local", LOCAL_FULL, effect=WATCH),
+                Atom(NEED, b"esk", b"local", FULL, effect=WATCH),
+                Atom(NEED, b"ephsk", SC, FULL, effect=WATCH),
+                Atom(NEED, b"invite_secret", b"local", FULL, effect=WATCH),
                 Atom(NEED, b"closed", SC, SELF, effect=SUPPRESS))
 
 # EXTRACT — content-pure: volatile + LocalOnly. A session dies with the process.
@@ -158,14 +153,14 @@ def peers(node):                         # (peer endpoint, addr, connection id, 
     binds = _bindings(node)              # endpoint -> member name | b"auth", from synced device facts
     out = []
     for o, _, a in node.watched(b"connection", SC):
-        ep, addr = req._split2(a.value)
+        ep, addr = unframe(a.value)
         out.append((ep, addr, o, binds.get(ep, b"anon")))
     return sorted(out, key=lambda r: r[:3])
 
 def _bindings(node):                     # endpoint pk -> the member it belongs to (auth), via device facts
     out = {}
     for _, _, a in node.watched(b"endpoint_shared", b"auth"):
-        ep, spk, wid = req._split3(a.value)
+        ep, spk, wid = unframe(a.value)
         uid = next((o for o, _, k in node.watched(b"key", wid) if k.value == spk), None)
         name = next((m.value for o, _, m in node.watched(b"member", wid) if o == uid), None)
         out[ep] = name or b"auth"
@@ -174,7 +169,7 @@ def _bindings(node):                     # endpoint pk -> the member it belongs 
 def route(node, cid):                    # (peer addr, session secret) for a live connection | None
     for o, _, a in node.watched(b"connection", SC):
         if o == cid:
-            _ep, addr = req._split2(a.value); s = secret(node, cid)
+            _ep, addr = unframe(a.value); s = secret(node, cid)
             return (addr, s) if s else None
     return None
 

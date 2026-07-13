@@ -9,7 +9,7 @@ fact's closure; a below-window dependency rides in as a closure id, pulled by id
 import os, random, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import crypto as _c
-from kernel import Node, decode, encode, fact_id, _rd, summary_need
+from kernel import Node, decode, encode, fact_id, summary_need, unframe
 from facts import ROOT
 from facts.sync import compare as cmp, need as _need
 from facts.sync.compare import HI
@@ -34,10 +34,6 @@ def node(*facts):
     for f in facts: n.admit(encode(f))
     n.run(); return n
 
-def _ids(v):                                          # a ship offer's value: length-framed fact ids
-    out, i = [], 0
-    while i < len(v): x, i = _rd(v, i); out.append(x)
-    return out
 
 def reconcile(a, b, maxr=6000, lo=0):
     """Drive two nodes to convergence over the decomposed wire. Each side opens a
@@ -58,7 +54,7 @@ def reconcile(a, b, maxr=6000, lo=0):
         for role in (b"send", b"ship"):
             for o, _, at in me.watched(role, b"outbox"):
                 if role == b"send": inbox[other].append(at.value); frames[0] += 1
-                else: inbox[other] += [me.durable[x] for x in _ids(at.value) if x in me.durable]
+                else: inbox[other] += [me.durable[x] for x in unframe(at.value) if x in me.durable]
                 if o not in fired[me]: fired[me].append(o)
                 did = True
         return did or bool(got)
@@ -68,12 +64,11 @@ def reconcile(a, b, maxr=6000, lo=0):
 
 def leaves(n): return {(int.from_bytes(k[:8], "big"), k[8:]) for k in n.tree.keys}  # (ts, fid) per leaf
 
-def cids_ids(n, lo, hi, floor):      # the fact ids a summary advertises as cids over [lo,hi) at this floor
+def cidsunframe(n, lo, hi, floor):      # the fact ids a summary advertises as cids over [lo,hi) at this floor
     out = set()
     for _, _, a in n._summary_rows(summary_need(lo, hi, floor)):
         if a.role != b"cids": continue
-        v, i = a.value, 0
-        while i < len(v): x, i = _rd(v, i); out.add(x)
+        out.update(unframe(a.value))
     return out
 
 # --- The algorithm, in-process --------------------------------------------------
@@ -146,9 +141,9 @@ def test_full_range_advertises_leaves_only_windowed_carries_the_spine():
     a = node(WS, WS_SIG, recent)                                 # node() also holds a local invite_accepted (_ACCEPT)
     lo = (T0 + 29 * DAY).to_bytes(8, "big") + b"\x00" * 32       # a range starting after the T0-founded spine
     rid = fact_id(recent)
-    assert cids_ids(a, lo, HI, b"") == {rid}                     # full: just the in-range leaf, no deps repeated
-    assert cids_ids(a, lo, HI, lo) == {rid, WID, fact_id(WS_SIG)}   # windowed: + shareable below-floor spine
-    assert fact_id(_ACCEPT) not in cids_ids(a, lo, HI, lo)       # local-only invite_accepted never rides
+    assert cidsunframe(a, lo, HI, b"") == {rid}                     # full: just the in-range leaf, no deps repeated
+    assert cidsunframe(a, lo, HI, lo) == {rid, WID, fact_id(WS_SIG)}   # windowed: + shareable below-floor spine
+    assert fact_id(_ACCEPT) not in cidsunframe(a, lo, HI, lo)       # local-only invite_accepted never rides
 
 def test_windowed_in_range_facts_and_their_deps_reconcile():
     """In range: a fact at/after the window floor reconciles, and its below-floor
