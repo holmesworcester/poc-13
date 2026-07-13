@@ -400,66 +400,36 @@ class Treap:
 
 # --- The match index ---------------------------------------------------------------
 class Bucket:
-    """One (kind, role, scope) match bucket. Exact-target atoms live in a dict
-    keyed by target value (the common case: a point need/offer is an O(1) lookup,
-    not a scan of every same-role atom); the few range-target atoms sit in a short
-    list. covers() reduces, in BOTH match directions, to the same function of the
-    query target — a point hits `exact[v]` plus any range that spans v; a range
-    hits the exact values inside it (range-vs-range never matches) — so one
-    `match` serves offers_for and needs_for alike."""
+    """One match bucket over atom-LAST rows — (owner, atom) in the asserted index,
+    (owner, ts, atom) in the clean twin; the same class serves both. Exact-target
+    rows live in a dict keyed by target value (the common case: a point query is
+    an O(1) lookup, not a scan of every same-role atom); the few range-target rows
+    sit in a short list. covers() reduces, in BOTH match directions, to the same
+    function of the query target — a point hits `exact[v]` plus any range that
+    spans v; a range hits the exact values inside it (range-vs-range never
+    matches) — so one `match` serves offers_for, needs_for and valid_offers alike.
+    Iterable — `for row in bucket` yields every row — for watched()/derived()."""
     __slots__ = ("exact", "ranges")
-    def __init__(self): self.exact, self.ranges = {}, []      # value -> [(owner,atom)] ; [(owner,atom)]
+    def __init__(self): self.exact, self.ranges = {}, []      # value -> [row] ; [row]
 
-    def add(self, owner, a):
-        (self.exact.setdefault(a.target[1], []) if a.target[0] == EXACT
-         else self.ranges).append((owner, a))
-    def discard(self, owner, a):
-        if a.target[0] == EXACT:
-            lst = self.exact.get(a.target[1])
-            if lst and (owner, a) in lst:
-                lst.remove((owner, a))
-                if not lst: del self.exact[a.target[1]]
-        elif (owner, a) in self.ranges: self.ranges.remove((owner, a))
+    def add(self, r):
+        (self.exact.setdefault(r[-1].target[1], []) if r[-1].target[0] == EXACT
+         else self.ranges).append(r)
+    def remove(self, r):
+        if r[-1].target[0] == EXACT:
+            lst = self.exact.get(r[-1].target[1])
+            if lst and r in lst:
+                lst.remove(r)
+                if not lst: del self.exact[r[-1].target[1]]
+        elif r in self.ranges: self.ranges.remove(r)
 
-    def match(self, t):                  # the atoms a query target `t` covers-matches (either direction)
+    def match(self, t):                  # the rows a query target `t` covers-matches (either direction)
         if t[0] == EXACT:                # a point: the exact bin at v, plus every range that spans v
             v = t[1]
             return (list(self.exact.get(v, ()))
-                    + [r for r in self.ranges if r[1].target[1] <= v <= r[1].target[2]])
-        if t[0] == RANGE:                # a range: the exact values inside it (ranges never match ranges)
-            lo, hi = t[1], t[2]
-            return [r for v, rs in self.exact.items() if lo <= v <= hi for r in rs]
-        return []
-
-class CleanBucket:
-    """The clean-twin index for one (role, scope): the SAME exact/range split as
-    Bucket, but over validated `(owner, ts, atom)` rows, so `valid_offers` is a
-    point/range lookup and not a scan of every same-key offer (the last linear
-    scan in the match path). Iterable — `list(bucket)` / `for o,t,a in bucket`
-    yield every row — so watched() and derived() read it unchanged."""
-    __slots__ = ("exact", "ranges")
-    def __init__(self): self.exact, self.ranges = {}, []      # value -> [row] ; [row]  (row = (owner, ts, atom))
-
-    def add(self, r):
-        (self.exact.setdefault(r[2].target[1], []) if r[2].target[0] == EXACT
-         else self.ranges).append(r)
-    def remove(self, r):
-        if r[2].target[0] == EXACT:
-            lst = self.exact.get(r[2].target[1])
-            if lst and r in lst:
-                lst.remove(r)
-                if not lst: del self.exact[r[2].target[1]]
-        elif r in self.ranges: self.ranges.remove(r)
-
-    def match(self, nt):                 # rows whose OFFER target covers the NEED target nt (the covers() relation)
-        if nt[0] == EXACT:               # need a point: exact offers at v, plus every range offer spanning v
-            v = nt[1]
-            return (list(self.exact.get(v, ()))
-                    + [r for r in self.ranges if r[2].target[1] <= v <= r[2].target[2]])
-        if nt[0] == RANGE:               # need a range: the exact offers inside it (SELF/range-range never match)
-            lo, hi = nt[1], nt[2]
-            return [r for v, rs in self.exact.items() if lo <= v <= hi for r in rs]
-        return []
+                    + [r for r in self.ranges if r[-1].target[1] <= v <= r[-1].target[2]])
+        lo, hi = t[1], t[2]              # a range: the exact values inside it (ranges never match ranges;
+        return [r for v, rs in self.exact.items() if lo <= v <= hi for r in rs]   # a SELF query raises)
     def __iter__(self):                  # every row, in no particular order — for watched() and derived()
         return iter([r for rs in self.exact.values() for r in rs] + self.ranges)
     def __len__(self):
@@ -510,7 +480,7 @@ class Node:
         self.facts[fid], self.memo[fid] = f, "Unknown"
         if durable: self.durable[fid] = b; self._sumcache.clear()   # the closure graph grew: drop the memo
         for a in f.atoms:
-            self.rows.setdefault((a.kind, a.role, a.scope), Bucket()).add(fid, mat(a, fid))
+            self.rows.setdefault((a.kind, a.role, a.scope), Bucket()).add((fid, mat(a, fid)))
         self._enqueue(fid)
         self._deps.clear()                   # the graph changed: rebuild the validated-edge memo lazily
         return fid
@@ -597,7 +567,7 @@ class Node:
     # `shipped` is the daemon's flush reports at the SHIPPED key, waking a sender
     # Watching shipped@SELF to decide its own retirement.
     def _present(self, role, scope, rows):
-        b = CleanBucket()
+        b = Bucket()
         for r in rows: b.add(r)
         self.clean[(role, scope)] = b
         for _, _, off in rows: self._wake(off)
@@ -668,7 +638,7 @@ class Node:
         for r in old: self.clean[(r[2].role, r[2].scope)].remove(r)
         new = ([(fid, ts_of(f), mat(a, fid)) for a in out.offers]
                if out.verdict == "Valid" else [])
-        for r in new: self.clean.setdefault((r[2].role, r[2].scope), CleanBucket()).add(r)
+        for r in new: self.clean.setdefault((r[2].role, r[2].scope), Bucket()).add(r)
         if new: self.owned[fid] = new
         self.slices = {k: v for k, v in self.slices.items() if v[0] != fid}
         if out.verdict == "Valid":
@@ -684,7 +654,7 @@ class Node:
                     assert o == fid or na.effect not in (REQUIRE, SUPPRESS), "reap of a gating offer"
             self.facts.pop(fid, None); self.memo.pop(fid, None)
             for a in f.atoms:                # drop its asserted rows so nothing re-wakes it
-                if bk := self.rows.get((a.kind, a.role, a.scope)): bk.discard(fid, mat(a, fid))
+                if bk := self.rows.get((a.kind, a.role, a.scope)): bk.remove((fid, mat(a, fid)))
 
     # Host out — the host drains validated offers at keys it watches, performs
     # external work, and admits facts reporting what happened. It never writes.
