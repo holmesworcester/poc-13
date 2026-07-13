@@ -9,9 +9,10 @@ fact's closure; a below-window dependency rides in as a closure id, pulled by id
 import os, random, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import crypto as _c
-from kernel import Node, decode, encode, fact_id, summary_need, unframe
+from kernel import Node, decode, encode, fact_id, unframe
 from facts import ROOT
-from facts.sync import compare as cmp, need as _need
+from facts.sync import compare as cmp, index as sidx, need as _need
+from facts.sync.index import summary_need
 from facts.sync.compare import HI
 from facts.auth.workspace import workspace
 from facts.auth.invite_accepted import invite_accepted
@@ -50,8 +51,8 @@ def reconcile(a, b, maxr=6000, lo=0):
         got, inbox[me] = inbox[me], []
         for blob in got: me.admit(blob)                         # admit what the peer sent
         me.run()
-        if me.leaf_ver != ver[me]:                              # leaf set moved: open a fresh round
-            cmp.open_round(me, CID, floor); ver[me] = me.leaf_ver; me.run()
+        if sidx.ver(me) != ver[me]:                             # leaf set moved: open a fresh round
+            cmp.open_round(me, CID, floor); ver[me] = sidx.ver(me); me.run()
         did = False                                             # pump: deliver offers, fire owners
         for role in (b"send", b"ship"):
             for o, _, at in me.watched(role, b"outbox"):
@@ -66,11 +67,11 @@ def reconcile(a, b, maxr=6000, lo=0):
             t[0] += 50; n.turn(now=t[0], shipped=tuple(fired[n])); n.run()
     return frames[0]
 
-def leaves(n): return {(int.from_bytes(k[:8], "big"), k[8:]) for k in n.tree.keys}  # (ts, fid) per leaf
+def leaves(n): return {(int.from_bytes(k[:8], "big"), k[8:]) for k in sidx.tree(n).keys}  # (ts, fid) per leaf
 
 def cidsunframe(n, lo, hi, floor):      # the fact ids a summary advertises as cids over [lo,hi) at this floor
     out = set()
-    for _, _, a in n._summary_rows(summary_need(lo, hi, floor)):
+    for _, _, a in sidx.summary(n, summary_need(lo, hi, floor)):
         if a.role != b"cids": continue
         out.update(unframe(a.value))
     return out

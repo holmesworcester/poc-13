@@ -32,7 +32,7 @@ import crypto as _c
 from kernel import Node, decode, encode, fact_id
 from facts import ROOT
 from facts.sync import cadence
-from facts.sync import compare as cmp, need as _need
+from facts.sync import compare as cmp, index as _sidx, need as _need
 from runtime import cycle, outbox, pump, TTLSet, SENT_TTL
 from facts.auth.workspace import workspace
 from facts.auth.invite_accepted import invite_accepted
@@ -55,7 +55,7 @@ def node(*fs):
 def msgs(author, t0, k):
     return [message(WID, b"g", author, b"m%d" % i, t0 + i) for i in range(k)]
 
-def leaves(n): return set(n.tree.keys)
+def leaves(n): return set(_sidx.tree(n).keys)
 
 class World:
     """Two nodes on a faulty duplex channel, stepped on a simulated clock. Mirrors

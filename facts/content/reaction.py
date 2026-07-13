@@ -18,6 +18,7 @@ def reaction(workspace_id, message_id, emoji, t):
 
 # EXTRACT — content-pure: (durable, shareable).
 def extract(f): return True, True
+from facts.sync.index import promote     # opt in: these facts replicate (one line is the whole choice)
 
 # PROJECT — the only place this family's meaning lives.
 def project(f, ctx):

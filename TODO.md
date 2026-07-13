@@ -210,5 +210,6 @@ audit proposals overlapped, so the sum of their verified deltas overstates
 the union). Perf: bench all
 budgets met (targets change measured noise-level; covers() itself is slower
 but has no production call sites — it is the tested spec of the bucket/SQL).
-Known gap left deliberately: leaf_ver is polled by bench/tests only; the
-daemon relies on the cadence (DESIGN.md prose softened to match).
+Known gap left deliberately: the set-moved counter (leaf_ver, now
+facts.sync.index.ver) is polled by bench/tests only; the daemon relies on
+the cadence (DESIGN.md prose softened to match).

@@ -28,17 +28,32 @@ def test_fact_contract():
         assert "CLI = {" in part["# CLI"], p                      # explicit verb table
 
 def test_needs_carry_no_values():
-    """Needs carry no values — a need is a key, and matching reads nothing
-    else. No exemptions: the hydration window died with the store spider
-    (a demand is one value-free Watch need; the total demand is a reserved
-    key the fault leg reads as 'every stored fact')."""
+    """Needs carry no values — a need is a key, and MATCHING reads nothing
+    else (the hydration window died with the store spider: a demand is one
+    value-free Watch need). One carve-out, exactly as wide as the mechanism:
+    a RESERVED need (NUL-prefixed role) is answered by an index, never
+    matched against offers, so its value is the query argument — the summary
+    need's window floor. The role must resolve to a reserved constant."""
     for p in FACTS.rglob("*.py"):
         if p.name == "__init__.py":
             continue
-        for node in ast.walk(ast.parse(p.read_text())):
+        tree = ast.parse(p.read_text())
+        consts = {t.id: v.value                                   # module-level Name -> bytes
+                  for node in ast.walk(tree) if isinstance(node, ast.Assign)
+                  for t, v in zip((node.targets[0].elts if isinstance(node.targets[0], ast.Tuple)
+                                   else [node.targets[0]]),
+                                  (node.value.elts if isinstance(node.value, ast.Tuple)
+                                   else [node.value]))
+                  if isinstance(t, ast.Name) and isinstance(v, ast.Constant)
+                  and isinstance(v.value, bytes)}
+        def reserved(r):
+            v = r.value if isinstance(r, ast.Constant) else consts.get(getattr(r, "id", None))
+            return isinstance(v, bytes) and v[:1] == b"\x00"
+        for node in ast.walk(tree):
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                     and node.func.id == "Atom" and node.args
-                    and isinstance(node.args[0], ast.Name) and node.args[0].id == "NEED"):
+                    and isinstance(node.args[0], ast.Name) and node.args[0].id == "NEED"
+                    and not (len(node.args) > 1 and reserved(node.args[1]))):
                 assert len(node.args) <= 4, (p, node.lineno)      # no positional value
                 assert all(k.arg != "value" for k in node.keywords), (p, node.lineno)
 

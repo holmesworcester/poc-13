@@ -3,8 +3,10 @@ families. `compare` bundles fingerprint/id claims over key ranges and descends b
 equal-count split; a small range's id list that names ids the peer lacks is pulled
 by one batched `need`, which ships those facts. Both are unshareable session state,
 excluded from the leaves they reconcile, and target responses at the connection's
-outbox key — so sync has no daemon reaction, only projectors on the one send path."""
+outbox key — so sync has no daemon reaction, only projectors on the one send path.
+`index` holds the set they reconcile: the treap in the b"sync" register, fed by
+the promote hook each replicating family aliases, read via the `summary` need."""
 from kernel import Router
-from . import compare, need, cadence
+from . import index, compare, need, cadence
 
 SCOPE = Router({b"compare": compare, b"need": need, b"cadence": cadence}, depth=1)

@@ -26,9 +26,9 @@ attests my last opener (`conf = sent`) only while my current split still hashes 
 it — `synced` is then a locally provable predicate: someone matched fingerprints
 over exactly the split I hold now. SUPPRESS on `closed@conn` tears both tiers down;
 being volatile, a reconnect re-arms them."""
-from kernel import (Atom, Exact, H, NEED, OFFER, Out, SELF, SUM_ROLE, SUPPRESS,
-                    WATCH, by, encode, fact, frame, now_need, now_of, summary_need,
-                    ts_atom, unframe)
+from kernel import (Atom, Exact, H, NEED, OFFER, Out, SELF, SUPPRESS, WATCH,
+                    by, encode, fact, frame, now_need, now_of, ts_atom, unframe)
+from facts.sync.index import SUM_ROLE, summary, summary_need
 from facts.sync.compare import compare, sorted_claims, HI
 
 TAG = b"sync.cadence"
@@ -106,7 +106,7 @@ def arm(node, cid, tiers=TIERS):
 # QUERIES — the certificate, read back: synced iff some tier's confirmed opener hash
 # still matches the opener my CURRENT split would produce.
 def synced(node, cid, floor=b""):
-    rows = node._summary_rows(summary_need(floor or b"", HI, floor))
+    rows = summary(node, summary_need(floor or b"", HI, floor))
     claims = [(role, lo, hi, v) for lo, hi, role, v in sorted_claims(rows)]
     if not claims: return False
     h = H(encode(compare(cid, claims, floor)))

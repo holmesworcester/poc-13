@@ -13,6 +13,7 @@ def deletion(workspace_id, target_id, t):
 
 # EXTRACT — content-pure: (durable, shareable). Deletions must travel.
 def extract(f): return True, True
+from facts.sync.index import promote     # opt in: these facts replicate (one line is the whole choice)
 
 # PROJECT — the only place this family's meaning lives.
 def project(f, ctx):

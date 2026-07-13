@@ -452,19 +452,30 @@ standing demand).
 
 ## Sync
 
-Sync reconciles facts, never atoms. The protocol lives in `facts/sync/`; the
-kernel's contribution is engine state, not policy: every validity delta
-incrementally maintains the leaf set — `(ts, FactId) -> leaf hash` over every
-fact that is durable, shareable, and `Valid|Suppressed` — in `kernel.Treap`, plus
-`leaf_ver`, a monotonic counter (never a hash) a host can cheaply poll for
-"my set moved" (bench and the sync tests do; the daemon today relies on the
-cadence alone). Suppressed facts stay in the leaf set, which is how deletions reconcile. A
+Sync reconciles facts, never atoms — and the whole of it, set included, lives
+in `facts/sync/`. The kernel's contribution is two GENERIC seams, not state:
+the promote hook (a family that declares `promote()` sees every verdict its
+facts settle to — including `Suppressed` and `Parked`, which never reach
+`project()` — and maintains derived group state in its shared register) and
+`answer()` (a family claims a reserved role and serves the need from its own
+index). A family opts its facts into replication with one line — `from
+facts.sync.index import promote` — and `facts/sync/index.py` folds each
+verdict into the leaf set: `(ts, FactId) -> leaf hash` over every fact that is
+durable, shareable, and `Valid|Suppressed`, held in a treap in the `b"sync"`
+register, plus `ver`, a monotonic counter (never a hash) a host can cheaply
+poll for "my set moved" (bench and the sync tests do; the daemon today relies
+on the cadence alone). What replicates is thus a FAMILY decision, made
+identically on every peer because every peer runs the same family code over
+the same fact. Suppressed facts stay in the leaf set, which is how deletions
+reconcile — and why the hook rides promotion, not projection: a tombstone's
+verdict never reaches its projector. Replay needs no second path: hydration
+re-steps every durable fact and each re-promotion re-inserts its leaf. A
 leaf hash is `H(FactId ‖ ts ‖ H(bytes))` — bytes-only, so the tree stores only
 `key -> leaf hash`, never fact bodies. That body-independence is the seam for a
 later residency/sync split (sync the full leaf set, hydrate a recent subset).
 
 **Range-based set reconciliation (RBSR; Meyer & Scherer, rbsr_nonhomomorphic).**
-The reconciliation set is a `kernel.Treap` — a search tree on the `ts‖FactId` key
+The reconciliation set is a treap (`facts/sync/index.py`) — a search tree on the `ts‖FactId` key
 AND a heap on a priority (the leaf hash), so the tree SHAPE is a function of the
 set alone (history-independence) and two peers holding the same set build the same
 tree. Each node caches its subtree size and a Merkle label
@@ -516,9 +527,11 @@ excluded from the very leaves they reconcile; a frame crossing the wire IS a
 fact, so facts stay the wire's only payload. `need` ships requested facts by
 reference (fact ids resolved against the durable set at send time) at the
 host-watched outbox keys, reaping on the flush (`shipped@SELF`, see The Clock).
-The affordance seam — `summary@range` and `resident@id` — is answered by the
-engine from its indexes, injected into ctx exactly as validated offers are, so
-the families read a peer's view uniformly.
+The affordance seam — `summary@range` and `resident@id` — is answered into
+ctx exactly as validated offers are, so the families read a peer's view
+uniformly; `resident` by the engine from the durable set, `summary` by the
+index family itself through `answer()` (the engine dispatches the reserved
+role to its registered answerer — the kernel never reads the treap).
 
 **Cadence is a fact, not a daemon marker.** A `sync.cadence` fact per
 (connection, tier) Watches the clock and opens a fresh round once per period

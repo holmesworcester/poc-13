@@ -26,9 +26,9 @@ reaction: convergence is fingerprint agreement, every response is a projector of
 at the connection's outbox key, and a dropped frame just re-descends next cadence.
 Volatile (extract -> False, False): session state, never itself a leaf."""
 from bisect import bisect_left
-from kernel import (Atom, Exact, NEED, OFFER, Out, Range, SUM_ROLE, WATCH, by,
-                    encode, fact, now_need, summary_need, shipped_need, ts_atom,
-                    unframe)
+from kernel import (Atom, Exact, NEED, OFFER, Out, Range, WATCH, by, encode,
+                    fact, now_need, shipped_need, ts_atom, unframe)
+from facts.sync.index import SUM_ROLE, summary_need
 from facts.sync.need import need
 
 TAG = b"sync.compare"

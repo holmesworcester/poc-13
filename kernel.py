@@ -5,6 +5,9 @@ are the whole fact language. The kernel owns exactly four things: canonical
 identity, admission, matching, and the turn loop (which the host feeds `now`).
 Everything else — sync, queues, effects, content, retention — is a fact family
 under facts/; time alone is a turn primitive, not a family (see turn/now_need).
+Two generic seams let a family own an index the kernel never reads: a group
+REGISTER (regs; consumed by REG projectors and promote hooks, rebuilt by
+replay) and answer() (a family claims a reserved role and serves it itself).
 
 Projectors ARE the routers: the kernel runs one root projector, and a Router
 is just a projector that dispatches on the next type-tag segment. Extraction
@@ -135,18 +138,17 @@ now_of = lambda ctx: next((int.from_bytes(r[2].target[1], "big") for r in by(ctx
 SHIPPED_ROLE, SHIPPED_SCOPE, _SHIP = b"shipped", b"wire", b"\x00ship"
 shipped_need = Atom(NEED, SHIPPED_ROLE, SHIPPED_SCOPE, SELF, effect=WATCH)
 
-# Two further needs are answered the same transient way, but from the engine's
-# own indexes rather than the OS clock: a `summary` need over a key RANGE is
-# answered with my fingerprint for that range, plus my reconciliation claims (a
-# B-way equal-count split, or the range's id list and its deduped dependency
-# closure ids when the range is small); a `resident` need over a fact id is
-# answered iff I already hold it. Both are the seam the decomposed sync families
-# read to descend (summary) and to pull by id (resident); the closure ids are how
-# a below-window dependency travels. Reserved roles: the leading NUL cannot occur
-# in a family role, so no family can author or collide with them; both are always
-# WATCH and never gate. _answer (in _step) injects their rows into ctx exactly as
-# valid_offers would, so `by(ctx, role)` reads them uniformly.
-SUM_ROLE, RES_ROLE, _SUM, _RES = b"\x00summary", b"\x00resident", b"\x00sum", b"\x00res"
+# Reserved needs are answered the same transient way, but from indexes rather
+# than the OS clock. The kernel itself answers two: `resident` (a fact id I
+# already hold — the have/need pull seam) and the boot total below. A FAMILY
+# claims any further reserved role via answer() — e.g. sync's `summary`
+# (facts/sync/index.py) — so a family-owned index is read through the same seam
+# without the kernel knowing its semantics. Reserved roles: the leading NUL
+# cannot occur in a family role, so no family can author or collide with them;
+# a reserved need is always WATCH and never gates. _answer (in _step) injects
+# the rows into ctx exactly as valid_offers would, so `by(ctx, role)` reads
+# them uniformly.
+RES_ROLE, _RES = b"\x00resident", b"\x00res"
 
 # The total demand is the whole boot story: one reserved Watch need whose key
 # the fault leg reads as "every stored fact". Once checked, faulting is over —
@@ -156,10 +158,13 @@ FULL = Range(b"", b"\xff" * 64)         # the full-domain range Watch: covers an
 all_need = Atom(NEED, ALL_ROLE, b"store", FULL, effect=WATCH)
 _ALL_KEY = (ALL_ROLE, b"store", all_need.target)
 
-RESERVED = frozenset((SUM_ROLE, RES_ROLE, ALL_ROLE))
-CLOSURE_CAP = 4096                       # generous safety valve on unique closure ids per summary answer
-_kb = lambda ts, fid: ts.to_bytes(8, "big") + fid            # (ts, fid) -> the 40-byte reconciliation key
-summary_need = lambda lo, hi, floor=b"": Atom(NEED, SUM_ROLE, b"sync", Range(lo, hi), floor, effect=WATCH)
+RESERVED = {RES_ROLE, ALL_ROLE}          # grows via answer(): registration is the census
+ANSWERERS = {}                           # reserved role -> fn(node, need) -> ctx rows
+
+def answer(role, fn):                    # a family claims a reserved role at import time
+    assert role[:1] == b"\x00" and role not in (RES_ROLE, ALL_ROLE)
+    ANSWERERS[role] = fn; RESERVED.add(role)
+
 resident_need = lambda fid: Atom(NEED, RES_ROLE, b"sync", Exact(fid), effect=WATCH)
 
 class Router:
@@ -259,143 +264,6 @@ class Store:
 
     def commit(self): self.db.commit()   # host calls it: durable before the reply
 
-# --- The sync skeleton: a clamping-invariant treap ---------------------------------
-# Range-based set reconciliation (Meyer & Scherer, rbsr_nonhomomorphic) over the
-# 40-byte (ts‖FactId) leaf keys. The reconciliation set is a TREAP — a binary search
-# tree on the key AND a heap on a priority. The priority is the leaf hash: a pure
-# function of the key, so the tree SHAPE is a function of the set alone (history-
-# independence) and two peers holding the same set build the same tree. Each node
-# caches its subtree size and a Merkle label lb = H(left.lb ‖ leaf_hash ‖ right.lb).
-# A range fingerprint is the CLAMPED label — the label of the tree with all out-of-
-# range items discarded — computed by walking only the two boundary spines (reading
-# precomputed labels for fully-in subtrees), O(log n) whp. Clamping-invariance makes
-# that label a canonical function of the in-range SET (independent of tree shape and
-# of out-of-range items), so peers agree using an ORDINARY hash — no homomorphic/xor
-# fold. A mismatched range is split into B parts of EQUAL COUNT (an order-statistic
-# select, not a key-prefix split), so fanout is B and depth is log_B(n) regardless of
-# key distribution. A range of <= T leaves is listed by id instead, ending the
-# recursion. (A maliciously degenerate set costs O(n) local compute; the paper shows
-# communication, roundtrips, and censorship-resistance stay immune.)
-_TREAP_EMPTY = H(b"")                         # the Merkle label of the empty tree
-
-class _Nd:
-    # Two axes: the SEARCH key k = ts‖FactId orders the BST (so a ts-range is just a
-    # key-range — rbsr's arbitrary ranges are preserved), and the PRIORITY (the leaf
-    # hash lh) orders the heap that fixes the shape. lh is uniform and uncorrelated
-    # with the ts-major key, so even a run of same-ts facts balances.
-    __slots__ = ("k", "lh", "l", "r", "c", "lb")
-    def __init__(self, k, lh):
-        self.k, self.lh, self.l, self.r = k, lh, None, None
-        self.fix()
-    def fix(self):                           # recompute subtree count + Merkle label from the children
-        l, r = self.l, self.r
-        self.c = (l.c if l else 0) + (r.c if r else 0) + 1
-        self.lb = H((l.lb if l else _TREAP_EMPTY) + self.lh + (r.lb if r else _TREAP_EMPTY))
-
-def _rot_r(t): x = t.l; t.l = x.r; x.r = t; t.fix(); x.fix(); return x
-def _rot_l(t): x = t.r; t.r = x.l; x.l = t; t.fix(); x.fix(); return x
-
-def _t_ins(t, k, lh):                         # insert/update, keeping the (lh, k) max-heap
-    if t is None: return _Nd(k, lh)
-    if k == t.k:                              # already present: same content => same lh, so a no-op
-        return t if lh == t.lh else _t_ins(_t_del(t, k), k, lh)   # (a priority change would re-heapify)
-    if k < t.k:
-        t.l = _t_ins(t.l, k, lh)
-        if (t.l.lh, t.l.k) > (t.lh, t.k): t = _rot_r(t)
-    else:
-        t.r = _t_ins(t.r, k, lh)
-        if (t.r.lh, t.r.k) > (t.lh, t.k): t = _rot_l(t)
-    t.fix(); return t
-
-def _t_del(t, k):                             # rotate the target down to a leaf, then drop it
-    if t is None: return None
-    if k < t.k: t.l = _t_del(t.l, k)
-    elif k > t.k: t.r = _t_del(t.r, k)
-    else:
-        if t.l is None: return t.r
-        if t.r is None: return t.l
-        if (t.l.lh, t.l.k) > (t.r.lh, t.r.k): t = _rot_r(t); t.r = _t_del(t.r, k)
-        else: t = _rot_l(t); t.l = _t_del(t.l, k)
-    t.fix(); return t
-
-# The clamped-label walks are ITERATIVE (an explicit spine list, not recursion): honest
-# leaf-hash priorities keep height O(log n), but a maliciously degenerate spine must cost
-# O(n) time, never a stack overflow.
-_lb = lambda t: t.lb if t else _TREAP_EMPTY
-def _clamp_lo(t, lo):                         # label of t restricted to keys >= lo — fold the low boundary spine
-    spine = []
-    while t is not None:
-        if t.k < lo: t = t.r                  # t and its left are below lo: drop them, follow the boundary right
-        else: spine.append((t.lh, _lb(t.r))); t = t.l   # t in: its left clamps low, its right is wholly in
-    acc = _TREAP_EMPTY
-    for lh, rlb in reversed(spine): acc = H(acc + lh + rlb)   # fold deepest-first: innermost clamp outward
-    return acc
-def _clamp_hi(t, hi):                         # label of t restricted to keys < hi — fold the high boundary spine
-    spine = []
-    while t is not None:
-        if t.k >= hi: t = t.l
-        else: spine.append((_lb(t.l), t.lh)); t = t.r
-    acc = _TREAP_EMPTY
-    for llb, lh in reversed(spine): acc = H(llb + lh + acc)
-    return acc
-def _clamp(t, lo, hi):                        # label of t restricted to [lo, hi) — the range fingerprint
-    while t is not None:                      # descend to the split node (the first in-range key)
-        if t.k < lo: t = t.r
-        elif t.k >= hi: t = t.l
-        else: return H(_clamp_lo(t.l, lo) + t.lh + _clamp_hi(t.r, hi))
-    return _TREAP_EMPTY
-
-class Treap:
-    B, T = 16, 8                              # split fanout ; list-not-fingerprint threshold
-    EMPTY = _TREAP_EMPTY
-    def __init__(self): self.root = None
-
-    def insert(self, kb, lh): self.root = _t_ins(self.root, kb, lh)
-    def remove(self, kb): self.root = _t_del(self.root, kb)
-
-    def _rank(self, x):                       # number of keys < x
-        t, r = self.root, 0
-        while t:
-            if t.k < x: r += (t.l.c if t.l else 0) + 1; t = t.r
-            else: t = t.l
-        return r
-    def _select(self, i):                     # the 0-based i-th smallest key
-        t = self.root
-        while t:
-            lc = t.l.c if t.l else 0
-            if i < lc: t = t.l
-            elif i == lc: return t.k
-            else: i -= lc + 1; t = t.r
-        return None
-
-    def count(self, lo, hi): return self._rank(hi) - self._rank(lo)
-    def small(self, lo, hi): return self.count(lo, hi) <= self.T
-    def fp(self, lo, hi): return _clamp(self.root, lo, hi)
-    def parts(self, lo, hi):                  # <= B sub-ranges of equal COUNT (order-statistic select)
-        n = self.count(lo, hi)
-        if not n: return []                   # empty range: nothing to split (the caller guards via small(); stay total)
-        r0 = self._rank(lo)
-        bounds = [lo] + [self._select(r0 + (p * n) // self.B) for p in range(1, self.B)] + [hi]
-        return [(a, b) for a, b in zip(bounds, bounds[1:]) if a != b]
-    def fids(self, lo, hi):                   # the 32-byte FactIds of my leaves in [lo, hi), in key order (iterative)
-        out, stack, t = [], [], self.root
-        while stack or t is not None:
-            if t is not None:
-                if t.k < lo: t = t.r          # t and its left subtree are below lo
-                else: stack.append(t); t = t.l
-            else:
-                t = stack.pop()
-                if t.k >= hi: break           # in-order is ascending: nothing more is in range
-                out.append(t.k[8:]); t = t.r  # lo <= t.k < hi
-        return out
-    @property
-    def keys(self):                           # every 40-byte key in order (iterative; the caller flushes pending first)
-        out, stack, t = [], [], self.root
-        while stack or t is not None:
-            if t is not None: stack.append(t); t = t.l
-            else: t = stack.pop(); out.append(t.k); t = t.r
-        return out
-
 # --- The match index ---------------------------------------------------------------
 class Bucket:
     """One match bucket over rows whose LAST element is the atom: (owner, atom)
@@ -455,10 +323,8 @@ class Node:
         self.rows = {}                       # (kind,role,scope) -> Bucket: the asserted match index
         self.memo, self.clean = {}, {}       # id -> verdict ; (role,scope) -> [(owner, ts, atom)]
         self.owned = {}                      # id -> its clean rows, for owner-scoped replacement
-        self._sumcache = {}                  # (lo,hi) -> summary rows: reused while the leaf/durable set holds still
-        self.leaf_ver = 0                    # monotonic set-version, bumped on every leaf delta: a hash-free change signal
-        self.tree = Treap()                  # the reconciliation set: a clamping-invariant treap (O(log n) range fp)
-        self._leaves = set()                 # fids currently in the leaf set: membership, to detect a no-op delta
+        self.regs = {}                       # scope -> one shared mutable register per REG family group;
+                                             # volatile derived state, rebuilt through the same hooks by replay
         self.frontier = deque()              # FIFO of fids to (re)step
         self._queued = set()                 # membership mirror of the frontier: O(1) dedup ('in' on a deque is O(n))
 
@@ -474,7 +340,7 @@ class Node:
         if chk and not chk(f): return None   # per-family self-check: falsy = inert miss
         durable, _shareable = self.root.extract(f)
         self.facts[fid], self.memo[fid] = f, "Unknown"
-        if durable: self.durable[fid] = b; self._sumcache.clear()   # the closure graph grew: drop the memo
+        if durable: self.durable[fid] = b
         for a in f.atoms:
             self.rows.setdefault((a.kind, a.role, a.scope), Bucket()).add((fid, mat(a, fid)))
         self._enqueue(fid)
@@ -514,40 +380,15 @@ class Node:
         self.checked.clear()             # forget the fault memos and re-step every resident
         for fid in self.facts: self._enqueue(fid)     # fact, so their keys re-check the store
 
-    # Engine-answered needs: a reserved index need is answered from the trie / the
-    # durable set and injected into ctx as clean-twin-shaped (owner, ts, atom) rows,
-    # exactly the way valid_offers answers an ordinary need, so `by(ctx, role)` reads
-    # them uniformly. Everything else falls through to the real clean twin.
+    # Engine-answered needs: a reserved index need is answered from an index and
+    # injected into ctx as clean-twin-shaped (owner, ts, atom) rows, exactly the
+    # way valid_offers answers an ordinary need, so `by(ctx, role)` reads them
+    # uniformly. The kernel answers its own (resident); a registered family
+    # answerer serves the rest. Everything else falls through to the clean twin.
     def _answer(self, n):
-        if n.role == SUM_ROLE: return self._summary_rows(n)
         if n.role == RES_ROLE: return self._resident_rows(n)
+        if (fn := ANSWERERS.get(n.role)): return fn(self, n)
         return self.valid_offers(n)
-
-    def _summary_rows(self, n):          # RBSR: my fingerprint for the range + my reconciliation claims for it.
-        lo, hi = n.target; floor = n.value or b""
-        if floor > lo: lo = floor        # clip the range to the window floor
-        # A summary is a pure function of the leaf set + the durable closure graph;
-        # both are held fixed while only volatile sync facts churn, so a peer that
-        # re-opens the same round every quiescence answers from this memo instead of
-        # re-fingerprinting and re-walking closures. Cleared on any leaf/durable change.
-        cached = self._sumcache.get((lo, hi, floor))    # floor keys the memo: it selects which deps ride in cids
-        if cached is not None: return cached
-        t = self.tree; R = lambda a: (_SUM, 0, a)
-        rows = [R(Atom(OFFER, b"fp", b"sync", Range(lo, hi), t.fp(lo, hi)))]   # the prune-check fingerprint
-        def claim(a, b):                 # my claim for [a,b): the leaves (+ windowed: their below-floor deps), else a fp
-            if t.small(a, b):
-                ids = list(t.fids(a, b))                            # my leaves in range: always advertised (enumerate)
-                if floor:                                           # a windowed round: a leaf's below-floor deps won't
-                    seen = set()                                    # enumerate as leaves of their own, so they ride here
-                    for d in ids: self.closure(d, seen)             # as closure ids — only the shareable, below-floor ones
-                    ids += [d for d in seen if d in self.facts and _kb(ts_of(self.facts[d]), d) < floor
-                            and self.root.extract(self.facts[d])[1]]
-                blob = frame(*ids[:CLOSURE_CAP])                    # full round (floor==b""): leaves only — none below b""
-                return R(Atom(OFFER, b"cids", b"sync", Range(a, b), blob))
-            return R(Atom(OFFER, b"cfp", b"sync", Range(a, b), t.fp(a, b)))
-        rows += [claim(lo, hi)] if t.small(lo, hi) else [claim(a, b) for a, b in t.parts(lo, hi)]
-        self._sumcache[(lo, hi, floor)] = rows
-        return rows
 
     def _resident_rows(self, n):         # answered iff I already hold the fact — the have/need pull seam
         fid = n.target[1]
@@ -594,31 +435,30 @@ class Node:
                         self.admit(b, checked=True)
         # Precedence (ratified): Suppress > Require(Park) > Resolve. Reserved
         # index needs never reach here — decode pins a NUL role to a WATCH need.
+        fam = self.root.resolve(f.type_tag.split(b"."))
         if any(self.valid_offers(n) for n in ns if n.effect == SUPPRESS):
             out = Out("Suppressed")
         elif any(not self.valid_offers(n) for n in ns if n.effect == REQUIRE):
             out = Out("Parked")
         else:                            # Context<Validated>; Watch never gates. Reserved index needs are
             ctx = {n: self._answer(n) for n in ns if n.effect in (REQUIRE, WATCH)}   # answered from the engine
-            out = self.root.project(f, ctx) or Out("Parked")
-        self._promote(fid, f, out)
+            if fam is not None and (R := getattr(fam, "REG", None)) is not None:
+                # A REG family's projector also consumes the group's shared mutable
+                # register (one dict per scope, across every family declaring it).
+                # Direct dispatch equals the routed run: routing is neutral.
+                out = fam.project(f, ctx, self.regs.setdefault(R, {})) or Out("Parked")
+            else:
+                out = self.root.project(f, ctx) or Out("Parked")
+        self._promote(fid, f, out, fam)
 
-    def _leafset_update(self, fid, f):   # keep the reconciliation treap current with this fact's leaf membership.
-        # A fact is a leaf iff durable, shareable, and Valid|Suppressed (tombstones stay, so deletions reconcile).
-        # Its leaf hash is a constant per fid (fid/ts/bytes are all fixed), so membership is the only thing that
-        # changes; a fid set detects the no-op so a re-promotion neither re-hashes nor spuriously bumps leaf_ver.
-        should = (fid in self.durable and self.memo.get(fid) in ("Valid", "Suppressed")
-                  and self.root.extract(f)[1])
-        if should == (fid in self._leaves): return          # membership unchanged: no delta
-        kb = _kb(ts_of(f), fid)
-        if should: self._leaves.add(fid); self.tree.insert(kb, H(frame(fid, kb[:8], H(self.durable[fid]))))
-        else: self._leaves.discard(fid); self.tree.remove(kb)
-        self.leaf_ver += 1               # a cheap "my set moved" signal for the daemon (a counter, never a hash)
-        self._sumcache.clear()           # the leaf set moved: the memoised summaries are stale
-
-    def _promote(self, fid, f, out):
+    def _promote(self, fid, f, out, fam=None):
         self.memo[fid] = out.verdict
-        self._leafset_update(fid, f)
+        # The family lifecycle hook: a family that declares promote() sees every
+        # verdict its fact settles to — including Suppressed and Parked, which
+        # never reach project() — and maintains derived group state from it
+        # (e.g. sync's leaf membership, where tombstones require the verdict).
+        if fam is not None and (hook := getattr(fam, "promote", None)):
+            hook(self, fid, f, out.verdict)
         # Owner-scoped replacement: pull this fact's current rows from their
         # buckets, add the new ones — old and new output are never both visible.
         old = self.owned.pop(fid, [])

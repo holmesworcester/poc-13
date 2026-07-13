@@ -1,10 +1,11 @@
-"""The reconciliation treap (kernel.Treap): a clamping-invariant, history-independent
+"""The reconciliation treap (facts.sync.index.Treap): a clamping-invariant, history-independent
 range fingerprint. These pin the properties peers depend on — a range fingerprint is a
 canonical function of the in-range SET alone (so two peers agree with an ordinary hash),
 and every set-derived op matches a brute force over that set."""
 import os, random, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from kernel import Treap, H
+from kernel import H
+from facts.sync.index import Treap
 
 R = random.Random(4242)
 DOM = (b"", b"\xff" * 41)                                # below all / above all 40-byte keys

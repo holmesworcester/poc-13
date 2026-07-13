@@ -7,9 +7,10 @@ call the engine's answer methods directly, the way _step injects them into ctx."
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import crypto as _c
-from kernel import (Node, SUM_ROLE, RES_ROLE, RESERVED, summary_need, unframe,
+from kernel import (Node, RES_ROLE, RESERVED, unframe,
                     resident_need, encode, fact_id, Atom, Exact,
                     dec_atom, enc_atom, NEED, OFFER, WATCH, REQUIRE)
+from facts.sync.index import SUM_ROLE, summary_need
 from facts import ROOT
 from facts.auth.workspace import workspace
 from facts.auth.invite_accepted import invite_accepted
