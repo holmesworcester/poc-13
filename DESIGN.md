@@ -144,8 +144,11 @@ what its facts and queries ask about (see Hydration); the total demand is
 the degenerate case that faults everything.
 
 When one process at a time stops being enough, `bin/cond.py` is a daemon
-that owns the db exclusively and amortizes boot: one total demand faults
-the whole db resident once, then it runs
+that owns the db exclusively and boots COLD: it loads nothing and decides
+no residency policy. Residency is demanded — a verb's queries fault their
+keys, and hydration at any scale is a client verb (`store.hydrate.pull`
+with no key faults everything: the operator's first verb on a full
+replica). It runs
 the three-phase host turn in a single-threaded select loop — client verbs
 over a unix socket at `<db>.sock`, peers over TCP. Its reusable core is
 `bin/runtime.py`, a socket-free seam: `cycle` admits an inbox of fact bytes
@@ -161,9 +164,10 @@ outbound. The outbound path tolerates loss up until the receiver admits: a
 frame is fired best-effort when handed to the socket buffer (bounded admits
 per turn, select-gated non-blocking writes), and a dropped or truncated frame
 is healed by the next cadence re-descend, never mis-admitted (it fails
-`aead_open`). The daemon demands everything, deliberately: RBSR fingerprints must cover
-the whole durable set, so a partially-hydrated node must never open a
-round (coverage-clipped sync over partial replicas is a later wave). Still deferrable:
+`aead_open`). Sync reconciles the RESIDENT set, and the daemon never decides coverage:
+the operator's total pull makes RBSR fingerprints cover the whole durable
+set; a partially-hydrated node reconciles only what it holds resident
+(coverage-clipped claims over partial replicas are a later wave). Still deferrable:
 compaction (purge is `DELETE`; `VACUUM` reclaims the bytes).
 
 ## Turn Semantics
@@ -322,9 +326,9 @@ accepts, the verb path and args go out as one framed request, one framed
 `+ok`/`-err` reply comes back (new durable facts hit the file before the
 reply). With no daemon reachable it exits with a message — the daemon is the
 only writer, which keeps the single-owner story simple (the earlier cold
-crash-and-demand path is gone). The daemon boots total, so a verb's queries
-read a fully resident node; their demands are no-ops behind the checked
-total.
+crash-and-demand path is gone). The daemon boots cold; a verb's queries
+demand the keys they read, and after an operator's `store.hydrate.pull`
+every later demand is a no-op behind the checked total.
 
 # Part II — Fact Families
 
@@ -438,8 +442,9 @@ volatile fact with one value-free Watch need, authored by queries before
 they read — and the engine answers it exactly the way it answers every
 need, through the fault leg (Hydration, Part I): the family adds no
 machinery, it only names a key. The total demand (the reserved `\x00all`
-key) is the whole boot story — `cond.py` starts by admitting one and
-running. Queries may author volatile demand and drain; they still never
+key) is the whole boot story — and the daemon itself doesn't even author
+it: it boots cold, and `con <db> store.hydrate.pull` (one verb, one fact)
+makes a full replica. Queries may author volatile demand and drain; they still never
 author durable facts. A durable hydrate fact is a pin (later wave, with
 standing demand).
 

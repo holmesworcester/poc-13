@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """cond — the poc-13 daemon.  Usage: cond <db> [--listen HOST:PORT]
 
-Owns the db exclusively. Boot is a fact: one total hydrate demand faults the
-whole db resident (there is no load), then serve verbs over a
-unix socket at <db>.sock (con.py proxies to it) and reconcile facts with peers
-over TCP. One single-threaded select loop over the runtime seam (bin/runtime.py):
+Owns the db exclusively and boots COLD: it loads nothing and decides no
+residency policy. Residency is demanded — a verb's queries fault the keys
+they read, and hydration at any scale is a client verb like any other
+(`con <db> store.hydrate.pull` faults everything; sync reconciles the
+resident set, so pull before expecting full coverage). It serves verbs over
+a unix socket at <db>.sock (con.py proxies to it) and reconciles facts with
+peers over TCP. One single-threaded select loop over the runtime seam (bin/runtime.py):
 each iteration collects an inbox, `cycle`s it (HOST IN admit + ENGINE DRAIN one
 turn), then `pump`s the validated outbox offers (HOST OUT). The daemon decides no
 authority and authors nothing outbound — every inbound fact enters through the
@@ -36,7 +39,6 @@ from facts import ROOT
 from facts.sync import cadence
 from facts.auth import local_signer_secret, endpoint
 from facts.connection import request, connection as conn, frame as frames
-from facts.store import hydrate
 from runtime import cycle, outbox, pump, next_wake, flush, BOUND
 
 OUTCAP = 32 << 20                        # per-address outbox byte cap: overflow parks (healed by re-descend).
@@ -114,8 +116,8 @@ def main(db, *argv):
     for a in it:
         if a == "--listen": listen = next(it)
         else: sys.exit(f"unknown arg: {a}")
-    store = Store(db); node = Node(ROOT, store)      # boot IS a fact: the total demand
-    hydrate.demand(node); flushed = set(node.durable)
+    store = Store(db); node = Node(ROOT, store)      # cold: residency is demanded, never loaded
+    flushed = set(node.durable)
     if not local_signer_secret.current(node): local_signer_secret.keygen(node, int(time.time()))
     if not endpoint.current(node): endpoint.keygen(node, int(time.time()))
     node.run(); flush(node, store, flushed)

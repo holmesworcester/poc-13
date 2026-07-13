@@ -26,12 +26,13 @@ def reboot(node, seed=0):
     hydrate.demand(m)
     return m
 
-def spawn(db, *args):                    # -> (proc, announced addr)
+def spawn(db, *args, pull=True):         # -> (proc, announced addr)
     p = subprocess.Popen([sys.executable, os.path.join(BIN, "cond.py"), db, *args],
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     line = p.stdout.readline()
     assert line.startswith("listening:"), (line, p.poll() and p.stderr.read())
-    return p, line.split()[1]
+    if pull: sock(db, "store.hydrate.pull")   # the operator's first verb: the daemon boots
+    return p, line.split()[1]                 # cold, so full coverage is demanded, not loaded
 
 def stop(p):
     try: p.send_signal(signal.SIGTERM); p.wait(5)

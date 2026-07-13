@@ -102,13 +102,44 @@ def bench_engine():
     report("boot (one total demand)", rp, "s", 2.6)   # MEASURED ~1.1-1.3s (reconstruct + re-hash)
     return n
 
+# --- 1b. deep Require chain: author it, then fault it back through one demand -
+def bench_chain(depth=100):
+    section("1b. deep Require chain (depth %d)" % depth)
+    from types import SimpleNamespace
+    from kernel import Atom, Exact, SELF, NEED, OFFER, REQUIRE, Out, Router, fact, ts_atom
+    from facts.store import hydrate
+    fam = SimpleNamespace(extract=lambda f: (True, False),
+                          project=lambda f, ctx, sl: Out(offers=tuple(a for a in f.atoms if a.kind == OFFER)))
+    root = Router({b"chain": fam, b"store": hydrate})
+    fbs, prev = [], None
+    for i in range(depth):                # each fact Requires its predecessor: one 100-deep spine
+        atoms = [ts_atom(1000 + i, b"w"), Atom(OFFER, b"doc", b"w", SELF)]
+        if prev is not None: atoms.append(Atom(NEED, b"doc", b"w", Exact(prev), effect=REQUIRE))
+        f = fact(b"chain.doc", *atoms); fbs.append(encode(f)); prev = fact_id(f)
+    t = time.time()
+    n = Node(root)
+    for b in fbs: n.admit(b, checked=True)
+    n.run()
+    report("admit+run the chain", (time.time() - t) * 1e3, "ms", 10)      # MEASURED ~4ms
+    st = Store()
+    for b in fbs: st.add(b)
+    st.commit()
+    m = Node(root, st)
+    t = time.time()
+    hydrate.demand(m, b"doc", b"w", Exact(prev))      # ONE demand at the head faults the spine
+    dt = (time.time() - t) * 1e3
+    assert all(m.memo[fact_id(decode(b))] == "Valid" for b in fbs), "the whole spine validates"
+    report("fault the spine (one keyed demand)", dt, "ms", 25)            # MEASURED ~10ms
+    report("  per hop", dt / depth * 1e3, "us", None)
+
 # --- 2. daemon cold-load, then one proxied verb against a big db --------------
 def bench_cli(db):
-    section("2. daemon boot + one verb against a %d-fact db" % N)
-    t = time.time(); p, _ = spawn(db)     # cond faults the whole db resident before "listening:"
-    report("daemon cold boot (one total demand)", time.time() - t, "s", 3.5)
+    section("2. daemon boot + hydrate verb against a %d-fact db" % N)
+    t = time.time(); p, _ = spawn(db)     # cold: the daemon loads nothing before "listening:"
+    report("daemon cold boot (loads nothing)", time.time() - t, "s", 0.5)
     try:
-        uverb(db + ".sock", "content.message.feed", WID.hex(), "c0")      # warm the loaded node
+        t = time.time(); uverb(db + ".sock", "store.hydrate.pull")        # residency is a verb
+        report("hydrate everything (one verb)", time.time() - t, "s", 3.5)
         t = time.time(); cli(db, "content.message.send", WID.hex(), "c0", "al", "warm", "98")
         report("daemon-proxy con.py (one verb)", time.time() - t, "s", 0.2)
     finally: stop(p)
@@ -302,6 +333,7 @@ def bench_crypto():
 def main():
     print("poc-13 bench  |  python", sys.version.split()[0], " facts:", N)
     n = bench_engine()
+    bench_chain()
     with tempfile.TemporaryDirectory() as d:
         db = os.path.join(d, "big.facts")
         st = Store(db)

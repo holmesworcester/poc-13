@@ -158,7 +158,9 @@ The store hook, hydration windows/budget, `missing_needs`, `Store.pull/all`,
 relation (bytes derived: reconstruct → re-encode → re-hash); the engine's
 fault leg checks each stepped need key once against it and admits cold owners
 (`Node.checked` memo; the reserved `\x00all` total demand ends faulting for
-the session). Boot — daemon included — is the insertion of ONE hydrate fact.
+the session). Boot is the insertion of ONE hydrate fact — and the daemon
+doesn't even author it: cond boots cold, and `store.hydrate.pull` (a client
+verb) makes a full replica; sync reconciles the resident set.
 Existence in the store is the persisted certificate: boot re-verifies 0
 signatures (benched). Standing (verdicts) is never persisted.
 

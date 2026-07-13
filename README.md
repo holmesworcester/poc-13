@@ -17,8 +17,9 @@ were proven.
   running daemon at `<db>.sock`; with no daemon reachable it refuses and
   names the daemon to start.
 - `bin/cond.py` — `cond <db> [--listen HOST:PORT]`. The daemon: owns the db,
-  boots by one total hydrate fact (there is no load or replay path), serves
-  con over the unix socket, reconciles facts (the wire's
+  boots cold — residency is demanded, and `con <db> store.hydrate.pull`
+  (one verb, one fact) makes a full replica; there is no load or replay
+  path. Serves con over the unix socket, reconciles facts (the wire's
   only message) with TCP peers via the sync family. A peer is dialed by a durable
   sealed `connection.request` fact (the `connect` verb authors one); shipments ride
   `connection.frame` bundles. Backpressure everywhere is the frontier's rule: park,
@@ -61,8 +62,10 @@ real regression. Headline numbers over a 10,000-fact workspace (one laptop core)
 |---|---|
 | admit + run 10k facts | ~0.47s (0.047 ms/fact) |
 | boot 10k facts from rows (one total demand) | ~1.0s |
-| daemon cold boot, 10k-fact db | ~1.0s |
-| one verb via the daemon (boot amortized) | ~0.02s |
+| daemon cold boot (loads nothing) | ~0.03s |
+| hydrate a 10k-fact db (one verb) | ~1.2s |
+| one verb via the daemon (hydrated) | ~0.02s |
+| fault a 100-deep Require spine (one keyed demand) | ~6ms (~58 us/hop) |
 | `feed()` query over 10k messages | ~1 ms |
 | sync a 1-fact diff into a 10k set | 28 rounds, ~9 KiB, ~0.35s |
 | two daemons over TCP, sustained | ~395 authored facts/s converged, query stays low-ms |
@@ -74,10 +77,10 @@ the persisted atom relation (one row per atom; canonical bytes derived on
 read — reconstruct, re-encode, re-hash), WAL-journaled. A session with a
 store is demand-driven — a stepped fact's needs fault only what they ask
 about resident, so a bounded working set costs its own size, not the db's.
-Boot and every sync `leaves()` remain linear over the resident set — the
-daemon demands everything deliberately, because sync fingerprints must cover
-the whole durable set (a partially-hydrated node must never initiate compare
-rounds; coverage-clipped partial sync is a later wave). If a single db
+Hydration and every sync `leaves()` remain linear over the resident set —
+sync reconciles what is resident, so the operator's total pull is what makes
+fingerprints cover the whole durable set (coverage-clipped partial sync is a
+later wave). If a single db
 ever outgrows the daemon's resident set, the next step is teaching the sync
 family to ship from the Store rather than from residency — a family change,
 not a kernel one. Linear is accepted and measured, not hidden.
