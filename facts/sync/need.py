@@ -23,7 +23,7 @@ def need(cid, fids):
 def extract(f): return False, False
 
 # PROJECT — ship the requested ids, then reap when the shipment flushes.
-def project(f, ctx, sl):
+def project(f, ctx):
     if by(ctx, b"shipped"): return Out("Reap")
     cid = _tgt(f, b"cid")
     ids = unframe(next((a.value for a in f.atoms if a.role == b"ids"), b""))

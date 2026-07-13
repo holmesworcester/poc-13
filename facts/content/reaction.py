@@ -20,7 +20,7 @@ def reaction(workspace_id, message_id, emoji, t):
 def extract(f): return True, True
 
 # PROJECT — the only place this family's meaning lives.
-def project(f, ctx, sl):
+def project(f, ctx):
     return Out(offers=tuple(a for a in f.atoms if a.role == b"reaction"))
 
 # COMMANDS — build a fact, admit it, stop.

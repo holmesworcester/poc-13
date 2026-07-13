@@ -53,7 +53,7 @@ def compare(cid, claims, floor=b""):     # claims: list of (role, lo, hi, payloa
 def extract(f): return False, False
 
 # PROJECT — reconcile each peer claim against my summary; emit my claims + pulls.
-def project(f, ctx, sl):
+def project(f, ctx):
     if by(ctx, b"shipped"): return Out("Reap")
     cid = _tgt(f, b"cid")
     floor = next((a.value for a in f.atoms if a.role == b"floor"), b"")   # the window floor rides for re-threading

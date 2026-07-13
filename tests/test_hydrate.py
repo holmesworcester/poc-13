@@ -85,7 +85,7 @@ def test_boot_is_one_fact():
     assert all(n.durable[fid] == FULL.durable[fid] for fid in FULL.durable)
     assert all(n.memo[fid] == FULL.memo[fid] for fid in FULL.durable)
     assert set(n.memo) == set(FULL.durable) | {seed}   # residency = the durable set + the seed
-    assert n.derived()[:2] == FULL.derived()[:2]       # clean twin + slices bit-identical
+    assert n.derived()[0] == FULL.derived()[0]         # the clean twin, bit-identical
     assert feed(n, WID, CH) == [b"m0", b"m1", b"m3", b"m4"]
 
 def test_the_seed_is_the_only_boot():
@@ -124,7 +124,7 @@ def test_a_flushed_key_is_already_resident():
 # --- the relation is version-neutral: closures cross vocabulary eras ------------
 S = b"s"
 _epoch = SimpleNamespace(extract=lambda f: (True, False),   # a minimal always-valid family:
-                         project=lambda f, ctx, sl:         # promote every offer, gate on needs
+                         project=lambda f, ctx:             # promote every offer, gate on needs
                              Out(offers=tuple(a for a in f.atoms if a.kind == OFFER)))
 EPOCHS = Router({b"v1": _epoch, b"v2": _epoch, b"v3": _epoch})
 

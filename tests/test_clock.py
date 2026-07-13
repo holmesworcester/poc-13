@@ -12,7 +12,7 @@ from kernel import (Atom, NEED, Node, OFFER, Out, Router, SELF, WATCH, encode,
 # A toy family: Watches now over [deadline, ∞), offers `fired` = the now it saw
 # once the deadline passes. The observable is whether/when it fired.
 def _toy_family():
-    def project(f, ctx, sl):
+    def project(f, ctx):
         n = now_of(ctx)
         deadline = int.from_bytes(next(a.value for a in f.atoms if a.role == b"d"), "big")
         if n is None or n < deadline: return Out(offers=())      # not due yet

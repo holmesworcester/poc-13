@@ -18,7 +18,7 @@ def send(dest, payload, t):
 def extract(f): return False, False
 
 # PROJECT — offer the payload until the flush report, then reap with no residue.
-def project(f, ctx, sl):
+def project(f, ctx):
     if by(ctx, b"shipped"): return Out("Reap")   # flushed: vanish
     return Out(offers=tuple(a for a in f.atoms if a.role == b"send"))
 

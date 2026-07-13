@@ -32,7 +32,7 @@ def check(f):
     return bool(secret) and tgt == Exact(bootstrap_hash(secret))
 
 # PROJECT — publish acceptance + the bootstrap context.
-def project(f, ctx, sl):
+def project(f, ctx):
     return Out(offers=tuple(a for a in f.atoms
                             if a.role in (b"workspace_accepted", b"invite_secret", b"invite_ref")))
 

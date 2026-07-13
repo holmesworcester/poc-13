@@ -35,7 +35,7 @@ def check(f):                            # verify over the sig offer's own targe
     return bool(pk and sig and tgt and verify(pk, tgt, sig))
 
 # PROJECT — the only place this family's meaning lives.
-def project(f, ctx, sl):                 # publish both the signer pk and the sig:
+def project(f, ctx):                 # publish both the signer pk and the sig:
     return Out(offers=tuple(a for a in f.atoms if a.role in (b"pk", b"sig")))
 # a fact Requires b"pk" at its own id to pull WHO signed it into ctx, then a
 # projector value-compares that pk against the pk its authority chain blessed.

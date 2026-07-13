@@ -26,7 +26,7 @@ PURPOSE = b"poc13 connection frame v1"
 def extract(f): return False, False
 
 # PROJECT — inert: a frame is unpacked by the daemon, never projected.
-def project(f, ctx, sl): return Out()
+def project(f, ctx): return Out()
 
 # COMMANDS — none: a frame is sealed onto the wire, not into the db.
 

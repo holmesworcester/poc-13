@@ -21,7 +21,7 @@ def message(workspace_id, channel, author, body, t):
 def extract(f): return True, True
 
 # PROJECT — the only place this family's meaning lives.
-def project(f, ctx, sl):
+def project(f, ctx):
     return Out(offers=tuple(a for a in f.atoms if a.role in (b"msg", b"posted")))
 
 # COMMANDS — build a fact, admit it, stop.

@@ -27,7 +27,7 @@ def check(f):
     return bool(sk) and tgt == Exact(x25519_pk(sk))
 
 # PROJECT — the only place this family's meaning lives.
-def project(f, ctx, sl):
+def project(f, ctx):
     return Out(offers=tuple(a for a in f.atoms if a.role == b"ephsk"))
 
 # COMMANDS — build a fact, admit it, stop; returns the fact id (the eph secret id).

@@ -23,7 +23,7 @@ def close(targets, t):
 def extract(f): return True, False
 
 # PROJECT — the only place this family's meaning lives.
-def project(f, ctx, sl):
+def project(f, ctx):
     return Out(offers=tuple(a for a in f.atoms if a.role == b"closed"))
 
 # COMMANDS — build a fact, admit it, stop.

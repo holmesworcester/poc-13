@@ -1,7 +1,8 @@
 """facts/content/retention_policy.py — the retention window for a workspace,
-as an LWW slice entry: latest (ts, owner) wins by kernel rule, replacement is
-free. Recording only — the purge machinery that enforces the window is a
-later family (DESIGN.md, Retention and purge)."""
+as an ordinary validated offer: the query takes the latest (ts, owner) row,
+so last-write-wins is a read-side fold, not kernel state. Recording only —
+the purge machinery that enforces the window is a later family (DESIGN.md,
+Retention and purge)."""
 from kernel import Atom, Exact, NEED, OFFER, Out, REQUIRE, encode, fact, now, ts_atom
 from facts.store import hydrate
 
@@ -18,19 +19,18 @@ def policy(workspace_id, ttl, t):
 def extract(f): return True, True
 
 # PROJECT — the only place this family's meaning lives.
-def project(f, ctx, sl):
-    a = next(a for a in f.atoms if a.role == b"retention")
-    return Out(slice_delta={("retention", a.scope): a.value})
+def project(f, ctx):
+    return Out(offers=tuple(a for a in f.atoms if a.role == b"retention"))
 
 # COMMANDS — build a fact, admit it, stop.
 def set_window(node, workspace_id, ttl, t):
     return node.admit(encode(policy(workspace_id, ttl, t)))
 
-# QUERIES — observations over validated state only (here: the LWW slice).
-def window(node, workspace_id):
+# QUERIES — observations over validated state only. LWW at read time:
+def window(node, workspace_id):                       # the latest (ts, owner) row wins
     hydrate.demand(node, b"retention", workspace_id)
-    row = node.slices.get(("retention", workspace_id))
-    return int.from_bytes(row[1], "little") if row else None
+    row = max(node.watched(b"retention", workspace_id), key=lambda r: (r[1], r[0]), default=None)
+    return int.from_bytes(row[2].value, "little") if row else None
 
 # CLI — string boundary over COMMANDS/QUERIES.
 CLI = {"set": lambda n, wid, ttl, t=None:

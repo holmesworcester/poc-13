@@ -29,7 +29,7 @@ def admin(workspace_id, user_id, t):
 def extract(f): return True, True
 
 # PROJECT — the only place this family's meaning lives.
-def project(f, ctx, sl):                 # the granter's signer key must be the founder root
+def project(f, ctx):                 # the granter's signer key must be the founder root
     blessed = {r[2].value for r in by(ctx, b"root")}
     if not blessed & {r[2].value for r in by(ctx, b"pk")}: return Out("Invalid")
     return Out(offers=tuple(a for a in f.atoms if a.role == b"admin"))

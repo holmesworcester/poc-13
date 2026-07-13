@@ -32,7 +32,7 @@ def device(workspace_id, label, endpoint_pk, signing_pk, t):
 def extract(f): return True, True
 
 # PROJECT — the signer must be an enrolled member (its key is a published key).
-def project(f, ctx, sl):
+def project(f, ctx):
     signer = {r[2].value for r in by(ctx, b"pk")}
     members = {r[2].value for r in by(ctx, b"key")}
     if not (signer & members): return Out("Invalid")

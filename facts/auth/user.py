@@ -33,7 +33,7 @@ def user(workspace_id, name, pk, invite_id, t):
 def extract(f): return True, True
 
 # PROJECT — the only place this family's meaning lives.
-def project(f, ctx, sl):                 # signer must equal the pk the named invite blessed
+def project(f, ctx):                 # signer must equal the pk the named invite blessed
     blessed = {r[2].value for r in by(ctx, b"invite")}
     if not blessed & {r[2].value for r in by(ctx, b"pk")}: return Out("Invalid")
     return Out(offers=tuple(a for a in f.atoms if a.role in (b"member", b"key")))

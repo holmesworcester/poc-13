@@ -10,7 +10,7 @@ Projectors ARE the routers: the kernel runs one root projector, and a Router
 is just a projector that dispatches on the next type-tag segment. Extraction
 routes through the same tree.
 
-Derived state (validity memo, clean twin, slices, frontier) is rebuildable
+Derived state (validity memo, clean twin, frontier) is rebuildable
 from the durable fact set alone. There is no replay: a stepped fact's needs
 fault their cold matches resident from the Store (the persisted atom
 relation), so boot is one total demand and a session pays for what it asks
@@ -19,7 +19,7 @@ about. The store answers existence, never standing.
 Hash: BLAKE3-256 (the `blake3` package; stdlib has none).
 """
 from collections import deque
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 import sqlite3, time
 
 try:
@@ -113,7 +113,6 @@ needs_of = lambda f, fid: [mat(a, fid) for a in f.atoms if a.kind == NEED]
 class Out:                               # project() -> verdict + all it may emit
     verdict: str = "Valid"               # Valid | Invalid
     offers: tuple = ()                   # engine restamps provenance regardless
-    slice_delta: dict = field(default_factory=dict)
 
 by = lambda ctx, role: [r for n, rs in ctx.items() if n.role == role for r in rs]
 
@@ -184,9 +183,9 @@ class Router:
         c = self._child(f)
         return c.extract(f) if c else (True, False)
 
-    def project(self, f, ctx, sl):       # -> Out | None (None: no family, park)
+    def project(self, f, ctx):           # -> Out | None (None: no family, park)
         c = self._child(f)
-        return c.project(f, ctx, sl) if c else None
+        return c.project(f, ctx) if c else None
 
 # --- The durable store --------------------------------------------------------------
 class Store:
@@ -437,7 +436,7 @@ class Bucket:
 # --- The engine --------------------------------------------------------------------
 class Node:
     """One engine over one root projector. Durable authority = self.durable
-    (canonical bytes, 'the disk'); memo/clean/slices/frontier are derived.
+    (canonical bytes, 'the disk'); memo/clean/frontier are derived.
     With a store, residency is demand-driven: a stepped fact's needs fault
     their cold matches resident through ordinary admission — residency is
     the fixpoint of demand, and boot is the degenerate case (one total
@@ -456,7 +455,6 @@ class Node:
         self.rows = {}                       # (kind,role,scope) -> Bucket: the asserted match index
         self.memo, self.clean = {}, {}       # id -> verdict ; (role,scope) -> [(owner, ts, atom)]
         self.owned = {}                      # id -> its clean rows, for owner-scoped replacement
-        self.slices = {}                     # key -> (owner, ts, value), LWW by (ts, owner)
         self._sumcache = {}                  # (lo,hi) -> summary rows: reused while the leaf/durable set holds still
         self.leaf_ver = 0                    # monotonic set-version, bumped on every leaf delta: a hash-free change signal
         self.tree = Treap()                  # the reconciliation set: a clamping-invariant treap (O(log n) range fp)
@@ -602,7 +600,7 @@ class Node:
             out = Out("Parked")
         else:                            # Context<Validated>; Watch never gates. Reserved index needs are
             ctx = {n: self._answer(n) for n in ns if n.effect in (REQUIRE, WATCH)}   # answered from the engine
-            out = self.root.project(f, ctx, dict(self.slices)) or Out("Parked")
+            out = self.root.project(f, ctx) or Out("Parked")
         self._promote(fid, f, out)
 
     def _leafset_update(self, fid, f):   # keep the reconciliation treap current with this fact's leaf membership.
@@ -629,12 +627,6 @@ class Node:
                if out.verdict == "Valid" else [])
         for r in new: self.clean.setdefault((r[2].role, r[2].scope), Bucket()).add(r)
         if new: self.owned[fid] = new
-        self.slices = {k: v for k, v in self.slices.items() if v[0] != fid}
-        if out.verdict == "Valid":
-            for k, v in out.slice_delta.items():
-                cur = self.slices.get(k)
-                if not cur or (cur[2], cur[0]) <= (ts_of(f), fid):
-                    self.slices[k] = (fid, v, ts_of(f))
         for _, _, a in set(old) ^ set(new):   # wake fanout on every changed offer (never re-wake self)
             self._wake(a, fid)
         if out.verdict == "Reap":            # terminal: evict the body, leaving no residue
@@ -655,5 +647,4 @@ class Node:
     # demand, rebuilds it. Volatile facts vanish — completeness, never coherence.
     def derived(self):
         return (sorted((o, t, enc_atom(a)) for rs in self.clean.values() for o, t, a in rs),
-                sorted((k, *v) for k, v in self.slices.items()),
                 sorted(self.memo.items()))

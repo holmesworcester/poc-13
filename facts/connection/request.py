@@ -75,7 +75,7 @@ def check(f):
     return ver == SEAL_VERSION and len(eph) == 32 and len(to) == 32 and len(nc) == 24 and len(ct) >= 16
 
 # PROJECT — decrypt, verify authority, then publish. Pure given ctx; replay-safe.
-def project(f, ctx, sl):
+def project(f, ctx):
     env = next(a.value for a in f.atoms if a.role == b"sreq")
     ver, init_eph_pk, to_ep, nonce, ct = _unenv(env)
     hdr = _header(init_eph_pk, to_ep, nonce)

@@ -28,7 +28,7 @@ def check(f):
     return bool(esk) and tgt == Exact(x25519_pk(esk))
 
 # PROJECT — the only place this family's meaning lives.
-def project(f, ctx, sl):
+def project(f, ctx):
     return Out(offers=tuple(a for a in f.atoms if a.role in (b"esk", b"endpoint")))
 
 # COMMANDS — build a fact, admit it, stop.

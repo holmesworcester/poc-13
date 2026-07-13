@@ -19,7 +19,7 @@ def hydrate(role=None, scope=None, target=ALL):
 def extract(f): return False, False
 
 # PROJECT — demand is inert: valid, offers nothing, changes nothing.
-def project(f, ctx, sl): return Out()
+def project(f, ctx): return Out()
 
 # COMMANDS — admit the demand and drain; the fault leg does the rest.
 # Content-addressed, so the same demand twice is one fact, one check.

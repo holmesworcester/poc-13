@@ -77,7 +77,7 @@ def connection(env, request_id):
 def extract(f): return False, False
 
 # PROJECT — open, recompute, verify, publish. Pure over ctx; rebuilt by replay.
-def project(f, ctx, sl):
+def project(f, ctx):
     env = next(a.value for a in f.atoms if a.role == b"sconn")
     ver, resp_eph_pk, to_ep_conn, request_id, nonce, ct = _uncenv(env)
     hdr = _cheader(resp_eph_pk, to_ep_conn, request_id, nonce)

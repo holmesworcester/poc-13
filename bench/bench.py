@@ -109,7 +109,7 @@ def bench_chain(depth=100):
     from kernel import Atom, Exact, SELF, NEED, OFFER, REQUIRE, Out, Router, fact, ts_atom
     from facts.store import hydrate
     fam = SimpleNamespace(extract=lambda f: (True, False),
-                          project=lambda f, ctx, sl: Out(offers=tuple(a for a in f.atoms if a.kind == OFFER)))
+                          project=lambda f, ctx: Out(offers=tuple(a for a in f.atoms if a.kind == OFFER)))
     root = Router({b"chain": fam, b"store": hydrate})
     fbs, prev = [], None
     for i in range(depth):                # each fact Requires its predecessor: one 100-deep spine

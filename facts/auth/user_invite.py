@@ -28,7 +28,7 @@ def user_invite(workspace_id, invite_pk, t):
 def extract(f): return True, True
 
 # PROJECT — the only place this family's meaning lives.
-def project(f, ctx, sl):                 # the inviter's signer key must be root or a member key
+def project(f, ctx):                 # the inviter's signer key must be root or a member key
     blessed = {r[2].value for r in by(ctx, b"root") + by(ctx, b"key")}
     if not blessed & {r[2].value for r in by(ctx, b"pk")}: return Out("Invalid")
     return Out(offers=tuple(a for a in f.atoms if a.role == b"invite"))

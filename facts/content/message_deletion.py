@@ -15,7 +15,7 @@ def deletion(workspace_id, target_id, t):
 def extract(f): return True, True
 
 # PROJECT — the only place this family's meaning lives.
-def project(f, ctx, sl):
+def project(f, ctx):
     return Out(offers=tuple(a for a in f.atoms if a.role == b"dead"))
 
 # COMMANDS — build a fact, admit it, stop.

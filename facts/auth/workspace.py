@@ -29,7 +29,7 @@ def workspace(name, root_pk, t):
 def extract(f): return True, True
 
 # PROJECT — valid only if the embedded root key signed it (and it is accepted).
-def project(f, ctx, sl):
+def project(f, ctx):
     root_pk = {a.value for a in f.atoms if a.role == b"root"}
     if not root_pk & {r[2].value for r in by(ctx, b"pk")}: return Out("Invalid")
     return Out(offers=tuple(a for a in f.atoms if a.role in (b"workspace", b"root")))
