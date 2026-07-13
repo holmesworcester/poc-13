@@ -124,7 +124,7 @@ def main(db, *argv):
     links, inbound = {}, []              # links: addr -> outbound socket; inbound: read sources
     redial = {}                                       # redial: addr -> last dial
     to_ship = set()                                   # flushed senders awaiting their reap
-    sent = {}                                         # cid -> set of what was sent this session: a shipped fact by id
+    sent = {}                                         # cid -> TTLSet (runtime.SENT_TTL < the anchor period): a shipped fact by id
                                                       # AND a sync compare by content hash (both 32-byte digests). The
                                                       # pump skips a repeat, so a re-descend re-asks the still-missing
                                                       # diff but ships each fact once, and a static source re-authoring
@@ -203,7 +203,7 @@ def main(db, *argv):
                         if pending(p) > OUTCAP: break
                         enqueue(p, BARE, inner); n += 1
                 return n
-            fired = pump(node, lambda cid: conn.route(node, cid) or (cid, None), deliver, to_ship, sent)
+            fired = pump(node, lambda cid: conn.route(node, cid) or (cid, None), deliver, to_ship, sent, now_ms())
             to_ship |= fired; work |= bool(fired)          # flushed: next turn presents shipped@o and it reaps
             if not node.frontier:
                 for _ep, _addr, cid, _who in conn.peers(node):     # a live connection: arm its periodic sync cadence

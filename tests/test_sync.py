@@ -43,8 +43,10 @@ def reconcile(a, b, maxr=6000, lo=0):
     Returns the count of wire frames (compares + haves + needs) that crossed."""
     floor = b"" if lo <= 0 else lo.to_bytes(8, "big") + b"\x00" * 32
     inbox = {a: [], b: []}; ver = {a: None, b: None}; fired = {a: [], b: []}; frames = [0]
+    t = [0]
     def step(me, other):
-        me.turn(shipped=tuple(fired[me])); fired[me] = []       # present last cycle's flush reports
+        t[0] += 50                                              # a clock: confirm pulses reap on their
+        me.turn(now=t[0], shipped=tuple(fired[me])); fired[me] = []   # next tick, as under the daemon
         got, inbox[me] = inbox[me], []
         for blob in got: me.admit(blob)                         # admit what the peer sent
         me.run()
@@ -59,7 +61,9 @@ def reconcile(a, b, maxr=6000, lo=0):
                 did = True
         return did or bool(got)
     while (step(a, b) | step(b, a)) and frames[0] < maxr: pass
-    for n in (a, b): n.turn(shipped=tuple(fired[n])); n.run()   # final flush so the last couriers reap
+    for n in (a, b):                                            # final flushes + ticks so the last
+        for _ in range(2):                                      # couriers (and confirm pulses) reap
+            t[0] += 50; n.turn(now=t[0], shipped=tuple(fired[n])); n.run()
     return frames[0]
 
 def leaves(n): return {(int.from_bytes(k[:8], "big"), k[8:]) for k in n.tree.keys}  # (ts, fid) per leaf

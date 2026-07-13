@@ -23,6 +23,7 @@ WS_SIG = signature(b"auth", RPK, WID, _c.ed25519_sign(RK, WID), T0)
 ACCEPT = invite_accepted(WID, bytes(32), bytes(32), b"", RPK, T0)
 CID = b"\x22" * 32
 PERIOD = 500
+ONE = ((b"", PERIOD, cadence.ANCHOR),)   # a single unconditional tier: the old semantics
 
 def node():
     n = Node(ROOT); n.admit(encode(ACCEPT))
@@ -35,7 +36,7 @@ def _compares(n):                                       # send offers carrying a
 
 def test_cadence_opens_a_round_once_per_period():
     n = node()
-    cadence.arm(n, CID)                               # first clock sight anchors the boundary
+    cadence.arm(n, CID, ONE)                               # first clock sight anchors the boundary
     n.turn(now=0); n.run()
     assert not _compares(n)                              # before the boundary: no round, only an alarm
     ds = [int.from_bytes(a.target[1], "big") for _, _, a in n.watched(b"wake", b"clock")]
@@ -50,12 +51,12 @@ def test_cadence_opens_a_round_once_per_period():
     assert len(_compares(n)) == 1                        # next period: fires once more
 
 def test_next_wake_reads_the_alarm():
-    n = node(); cadence.arm(n, CID); n.turn(now=100); n.run()
+    n = node(); cadence.arm(n, CID, ONE); n.turn(now=100); n.run()
     assert abs(next_wake(n, 200, 1.0) - (PERIOD - 100) / 1000.0) < 1e-6   # sleep exactly until 100 + PERIOD
     assert next_wake(Node(ROOT), 0, 0.5) == 0.5         # no alarms -> the cap
 
 def test_closed_conn_tears_it_down():
-    n = node(); cadence.arm(n, CID); n.turn(now=0); n.turn(now=PERIOD); n.run()
+    n = node(); cadence.arm(n, CID, ONE); n.turn(now=0); n.turn(now=PERIOD); n.run()
     assert _compares(n)
     n.admit(encode(fact(b"connection.close", ts_atom(1, b"conn"),
                         Atom(OFFER, b"closed", b"conn", Exact(CID)))))   # a close for this connection
@@ -63,12 +64,38 @@ def test_closed_conn_tears_it_down():
     assert not _compares(n)                              # suppressed: the cadence stops opening rounds
     assert not n.watched(b"wake", b"clock")             # and stops arming alarms
 
+def test_tier_pair_registers_do_not_collide():
+    """Two tiers over one (cid, floor): the tick key includes period and mode, so
+    the anchor's memory survives the fast tier's — a collision here silently
+    disables the anchor (found by test on the anchor branch, pinned ever since)."""
+    n = node(); cadence.arm(n, CID)                      # the default TIER PAIR
+    n.turn(now=0); n.run()
+    W = cadence.ANCHOR_W
+    for t in range(500, 3 * W + 1, 500): n.turn(now=t); n.run()
+    ticks = {a.target[0] for _, _, a in n.watched(b"tick", b"sync")}
+    assert len(ticks) == 2                               # one register per tier, distinct keys
+
+def test_anchor_fires_every_period_gated_goes_silent():
+    n = node(); cadence.arm(n, CID)
+    n.turn(now=0); n.run()
+    opened = []
+    W = cadence.ANCHOR_W
+    for t in range(500, 3 * W + 1, 500):
+        n.turn(now=t); n.run()
+        opened += [(t, a.value) for a in _compares(n)]
+        n.turn(now=t, shipped=tuple({o for o, _, a in n.watched(b"send", b"outbox")})); n.run()
+    gated_fires = [t for t, _ in opened if t % W != 0]
+    anchor_fires = [t for t, _ in opened if t % W == 0]
+    assert len(anchor_fires) == 3                        # every anchor boundary, unconditionally
+    assert len(gated_fires) <= 1                         # the gated tier fired once, then held (unchanged)
+
 def test_cadence_is_volatile():
-    n = node(); cadence.arm(n, CID); n.turn(now=0); n.turn(now=PERIOD); n.run()
+    n = node(); cadence.arm(n, CID, ONE); n.turn(now=0); n.turn(now=PERIOD); n.run()
     syn = [fid for fid, f in n.facts.items() if f.type_tag == cadence.TAG]
     assert syn and not any(fid in n.durable for fid in syn)   # session state, never flushed
 
 if __name__ == "__main__":
     for t in (test_cadence_opens_a_round_once_per_period, test_next_wake_reads_the_alarm,
-              test_closed_conn_tears_it_down, test_cadence_is_volatile):
+              test_closed_conn_tears_it_down, test_tier_pair_registers_do_not_collide,
+              test_anchor_fires_every_period_gated_goes_silent, test_cadence_is_volatile):
         t(); print("ok ", t.__name__)
