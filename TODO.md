@@ -179,3 +179,36 @@ confirmed 4 distinct bugs, all fixed + pinned as tests:
   one-transaction-per-turn → explicit BEGIN; commit() ends the turn.
 Plus two surviving mutants killed with new pins (savepoint removal,
 DISTINCT drop in owners()).
+
+## simplification pass (2026-07-13, on fault-in)
+
+An ultracode audit (5 lenses, 13 adversarially-verified proposals) then applied
+in nine commits, each suite-green:
+
+- one frame dual: kernel.unframe everywhere (six byte-identical copies died);
+  envelope readers/_splitN became unframe one-liners (now strict on field
+  count); LOCAL_FULL/AUTH_FULL/CONN_FULL/inline → kernel.FULL.
+- one Bucket class: rows end in the atom (r[-1]); the clean twin is the same
+  index over (owner, ts, atom).
+- targets are spans: Exact(v) = (v, v), SELF = () until mat; the 3-tag form
+  survives only as wire tags in enc/dec_atom (bytes unchanged, no DOMAIN
+  bump). Store 12 → 9 columns; _mk rebuilds SELF from lo == fid (a fact
+  cannot target its own id; the re-hash certifies). covers() is point-in-span.
+- deps() is pure (the _deps memo cleared whole on every admit — worthless).
+- turn() presents now/shipped directly (wrappers inlined).
+- cond: phantom RETAIN_FLOOR knob deleted; bare-message peek deleted (admit
+  is the only door for wire bytes).
+- cadence: idempotent (no first field, no daemon armed marker) and FIXED —
+  the not-due branch used to wipe its tick slice and re-fire off the stale
+  first boundary (a round every other busy cycle instead of every 500ms).
+  test_cadence now probes two intermediate wakes; the forgetting mutant dies.
+- slices left the kernel: one read-model; project(f, ctx); retention's LWW is
+  a read-side max; cadence's memory is its own self-Watched tick offer.
+
+kernel.py 699 → 650; code (kernel+bin+facts) net −87, tests −11 (several
+audit proposals overlapped, so the sum of their verified deltas overstates
+the union). Perf: bench all
+budgets met (targets change measured noise-level; covers() itself is slower
+but has no production call sites — it is the tested spec of the bucket/SQL).
+Known gap left deliberately: leaf_ver is polled by bench/tests only; the
+daemon relies on the cadence (DESIGN.md prose softened to match).

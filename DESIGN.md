@@ -28,8 +28,8 @@ design.
   effects, or another fact's validity.
 - The runtime has one durable authority: the persisted atom relation (one
   row per atom of every durable fact; canonical bytes are derived, never
-  stored). Everything else — validity, the clean twin, slices, the
-  frontier — is derived and rebuilt on demand.
+  stored). Everything else — validity, the clean twin, the frontier —
+  is derived and rebuilt on demand.
 - Matching looks to the persisted relation: when a resident fact steps,
   each of its need keys is checked once against the store and the cold
   owners fault in through ordinary admission — needs fault, offers never
@@ -61,6 +61,8 @@ design.
 ```text
 Atom { kind: Need|Offer, effect: None|Require|Watch|Suppress,
        role, scope, target: Exact(bytes)|SELF|Range{lo,hi}, value? }
+       # wire grammar; in memory a target is a span (lo, hi) — a point is
+       # lo == hi — and SELF until materialization rewrites it to the owner
 ```
 
 `effect` is meaningful only on needs and must be `None` on offers. `role`,
@@ -128,9 +130,10 @@ fact re-enters checked and a boot re-verifies nothing.
 Ephemeral, all rebuilt by replay: resident facts, the asserted match index
 and intake overlay, the validity memo (`Unknown|Parked|Valid|Invalid|
 Suppressed`), the validated offer set (the clean twin, rows stamped
-`(owner, ts, atom)` with engine-stamped provenance), read-model slices
-(last-write-wins by `(ts, owner)`), the frontier, and the sync leaf set with
-its skeleton (see Sync).
+`(owner, ts, atom)` with engine-stamped provenance), the frontier, and the
+sync leaf set with its skeleton (see Sync). A family that needs a register
+(last-write-wins, a timer's memory) reads it off its own validated offers —
+there is no second read-model.
 
 The crash story is one fact: derived state is a pure, order-independent
 function of the durable set, and a fresh node over the same store rebuilds
@@ -185,8 +188,8 @@ drops). For each owner: first, if a store is attached, the fault leg checks each
 of its need keys once against the persisted relation and admits the cold
 owners (checked admission — the bytes passed the gate once); then check
 suppressors, then requires, against the clean twin; build `Context<Validated>` from matching validated offers; call the
-routed projector `project(fact, ctx, slice) -> Out(verdict, offers,
-slice_delta)`; replace the owner's prior output atomically (owner-scoped:
+routed projector `project(fact, ctx) -> Out(verdict, offers)`; replace
+the owner's prior output atomically (owner-scoped:
 never both old and new visible); restamp promoted offers with engine
 provenance regardless of projector claims; wake every owner whose needs
 match a changed offer, over index ∪ intake.
@@ -350,15 +353,14 @@ order, enforced by a source-contract test:
 - **EXTRACT** — content-pure `(durable, shareable)`.
 - **CHECK** — optional, self-verification at the admission gate; pure
   function of the fact's own bytes; runs once, never on replay.
-- **PROJECT** — the only place the family's meaning lives: validity,
-  promoted offers, slice deltas. Pure function of `(fact, ctx, slice)`;
-  never touches the node.
+- **PROJECT** — the only place the family's meaning lives: validity and
+  promoted offers. Pure function of `(fact, ctx)`; never touches the node.
 - **COMMANDS** — local authoring: `(node, params) -> fact id`. Build a
   fact, admit it, stop. Commands may call queries to choose parameters and
   write only through admission. Anything multi-step or retryable is more
   facts (the outbox pattern), not a fancier command.
 - **QUERIES** — observations: `(node, params) -> data`, read only from
-  validated state (the clean twin, slices, watched keys) — never asserted
+  validated state (the clean twin, watched keys) — never asserted
   rows, never authority for anything.
 - **CLI** — the string boundary: a `CLI = {verb: fn}` dict mapping names to
   thin wrappers over COMMANDS/QUERIES that coerce strings in and out.
@@ -454,8 +456,9 @@ Sync reconciles facts, never atoms. The protocol lives in `facts/sync/`; the
 kernel's contribution is engine state, not policy: every validity delta
 incrementally maintains the leaf set — `(ts, FactId) -> leaf hash` over every
 fact that is durable, shareable, and `Valid|Suppressed` — in `kernel.Treap`, plus
-`leaf_ver`, a monotonic counter (never a hash) the daemon watches for "my set
-moved". Suppressed facts stay in the leaf set, which is how deletions reconcile. A
+`leaf_ver`, a monotonic counter (never a hash) a host can cheaply poll for
+"my set moved" (bench and the sync tests do; the daemon today relies on the
+cadence alone). Suppressed facts stay in the leaf set, which is how deletions reconcile. A
 leaf hash is `H(FactId ‖ ts ‖ H(bytes))` — bytes-only, so the tree stores only
 `key -> leaf hash`, never fact bodies. That body-independence is the seam for a
 later residency/sync split (sync the full leaf set, hydrate a recent subset).
@@ -519,15 +522,17 @@ the families read a peer's view uniformly.
 
 **Cadence is a fact, not a daemon marker.** A `sync.cadence` fact per
 (connection, tier) Watches the clock and opens a fresh round once per period
-(emitting my domain claims), a slice remembering the last boundary so it fires
-at most once per period though the clock re-wakes it every turn. It offers a
+(emitting my domain claims); its own self-Watched `tick` offer — re-emitted
+by every branch that saw a clock, or the memory is lost — remembers the last
+boundary, so it fires at most once per period though the clock re-wakes it
+every turn. It offers a
 `wake@clock` alarm at its next boundary, which `runtime.next_wake` reads for the
 select timeout — an idle daemon sleeps until the next boundary, not on a fixed
 poll. A `closed@conn` Suppress tears it down; being volatile, a reconnect
-re-arms it (tiers — narrow+frequent … wide+rare — are several of these,
-staggered). The daemon keeps only an immediate open on its own leaf-set change
-(sub-cadence latency for a fresh fact) and the connection's re-dial cadence; no
-settle marker, no round bookkeeping. A lost frame needs no retry state; the next
+re-arms it (tiers — narrow+frequent … wide+rare — are several of these; arming
+is idempotent, so the daemon just arms every live connection each loop). The
+daemon keeps only the connection's re-dial cadence; no armed marker, no settle
+marker, no round bookkeeping. A lost frame needs no retry state; the next
 cadence compare repairs it. Every peer link is full-duplex, and reconciliation
 is what a fact authored on one side rides to reach the others.
 
@@ -623,7 +628,8 @@ facts/s and MB/s.
 `facts/content/` is the messaging surface: `message` (a text message in a
 channel), `reaction` and `message_deletion` (each carrying its target's
 death keys per the suppression-closure discipline), and `retention_policy`
-(records the retention window as a last-write-wins slice; the purge
+(records the retention window as an ordinary offer — last-write-wins is a
+read-side fold; the purge
 machinery that enforces it is a later family). The poc-12 blob content
 spec — descriptor/outboard/chunk facts with `chunk -> outboard ->
 descriptor -> anchor` arrows, anchors never requiring chunks, validity
