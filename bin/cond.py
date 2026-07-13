@@ -46,16 +46,9 @@ OUTCAP = 32 << 20                        # per-address outbox byte cap: overflow
                                          # bounded by the memory a stalled peer may hold. The buffer is a
                                          # bytearray drained by offset, so a big cap stays O(1)-amortized.
 CADENCE = 0.5                            # s between redials / periodic root compares per peer
-RETAIN_FLOOR = 0                         # sync reconciles [RETAIN_FLOOR, inf) of (ts, FactId); the reserved
-                                         # closure need pulls deps below it. The floor IS the retention horizon
-                                         # — poc-13 has no retention/purge yet (Further Work), so it is 0
-                                         # (reconcile all). A recent frontier-anchored floor is the armed form
-                                         # once a coherent fact clock + purge land; test_sync proves the closure
-                                         # need still carries below-floor deps into a windowed peer.
 BARE, SEALED = 0, 1                      # wire discriminators
 now_ms = lambda: int(time.time() * 1000)
 now_s = lambda: int(time.time())         # fact-ts unit (kernel now())
-_floor_key = lambda ts: b"" if ts <= 0 else ts.to_bytes(8, "big") + b"\x00" * 32   # window floor -> radix key
 
 def serve(node, s, store, flushed):      # one framed verb request per unix connection
     try:
