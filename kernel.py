@@ -566,18 +566,13 @@ class Node:
         self.clean[(role, scope)] = b
         for _, _, off in rows: self._wake(off)
 
-    def _present_now(self, now):
-        off = Atom(OFFER, NOW_ROLE, NOW_SCOPE, Exact(now.to_bytes(8, "big")))
-        self._present(NOW_ROLE, NOW_SCOPE, [(_NOW, now, off)])
-
-    def _present_shipped(self, fids):
-        self._present(SHIPPED_ROLE, SHIPPED_SCOPE,
-                      [(_SHIP, 0, Atom(OFFER, SHIPPED_ROLE, SHIPPED_SCOPE, Exact(fid))) for fid in fids])
-
     # Engine drain — bounded; overflow parks on the frontier, never drops.
     def turn(self, now=None, shipped=(), bound=64):
-        if now is not None: self._present_now(now)   # the host hands time to the turn
-        self._present_shipped(shipped)               # and the wire hands back its flush reports
+        if now is not None:                          # the host hands time to the turn
+            self._present(NOW_ROLE, NOW_SCOPE, [(_NOW, now,
+                          Atom(OFFER, NOW_ROLE, NOW_SCOPE, Exact(now.to_bytes(8, "big"))))])
+        self._present(SHIPPED_ROLE, SHIPPED_SCOPE,   # and the wire hands back its flush reports
+                      [(_SHIP, 0, Atom(OFFER, SHIPPED_ROLE, SHIPPED_SCOPE, Exact(fid))) for fid in shipped])
         for _ in range(min(bound, len(self.frontier))):
             fid = self.frontier.popleft(); self._queued.discard(fid)
             self._step(fid)
