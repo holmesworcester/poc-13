@@ -150,3 +150,30 @@ appends every daemon's stderr tail to any failure).
   three_node_relay.
 - `bench.py` 5c — newest-message-visible mid catch-up, budgeted (ports poc-7
   `daemon_tiered_window_perf_test.rs:479` distilled).
+
+# fault-in branch: matching faults from the persisted relation
+
+The store hook, hydration windows/budget, `missing_needs`, `Store.pull/all`,
+`Node.replay`, and `runtime.load` are gone. The Store is a rows-only atom
+relation (bytes derived: reconstruct → re-encode → re-hash); the engine's
+fault leg checks each stepped need key once against it and admits cold owners
+(`Node.checked` memo; the reserved `\x00all` total demand ends faulting for
+the session). Boot — daemon included — is the insertion of ONE hydrate fact.
+Existence in the store is the persisted certificate: boot re-verifies 0
+signatures (benched). Standing (verdicts) is never persisted.
+
+Adversarial review (5 finder lenses, refute-first verify pairs, 53 agents)
+confirmed 4 distinct bugs, all fixed + pinned as tests:
+- add() swallowed transient sqlite write errors while flush marked the fact
+  flushed → silent permanent loss with a false `+ok` (regression vs main).
+  Write errors now propagate whole; bad BYTES remain a miss.
+- cond's signal handler raises SystemExit; landing between add()'s two
+  inserts it escaped `except Exception` and RELEASE committed a torn
+  half-fact that INSERT OR IGNORE then refused to heal → BaseException.
+- A canonical zero-atom durable fact was stored but unreadable
+  (`fact_bytes` required atom rows) → lost at every reboot; zero rows is
+  now legal, the re-hash decides.
+- Every add() self-committed (SAVEPOINT outside a transaction), voiding
+  one-transaction-per-turn → explicit BEGIN; commit() ends the turn.
+Plus two surviving mutants killed with new pins (savepoint removal,
+DISTINCT drop in owners()).

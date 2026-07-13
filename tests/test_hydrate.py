@@ -204,6 +204,54 @@ def test_a_cold_suppressor_bites_without_a_demand():
     assert fact_id(D) in n.facts and n.memo[bid] == "Suppressed"
 
 # --- existence is the certificate: reconstruction, damage, repair ---------------
+class _Flaky:
+    """A connection proxy whose next executemany raises — a transient write
+    fault (or a signal handler's SystemExit) landing between the two inserts."""
+    def __init__(self, db, exc): self._db, self._exc = db, exc
+    def __getattr__(self, k): return getattr(self._db, k)
+    def executemany(self, *a):
+        if self._exc: e, self._exc = self._exc, None; raise e
+        return self._db.executemany(*a)
+
+def test_a_failed_write_propagates_and_tears_nothing():
+    """Bad bytes are a miss, but a failed WRITE propagates whole: the caller
+    keeps the fact unflushed (never a silent +ok over nothing) and no torn
+    half-fact blocks the retry — SystemExit (cond's signal handler) included."""
+    import sqlite3
+    for exc in (sqlite3.OperationalError("disk I/O error"), SystemExit(0)):
+        s = Store()
+        b = CORPUS[0]; fid = fact_id(decode(b))
+        s.db = _Flaky(s.db, exc)
+        try:
+            s.add(b); assert False, "the write error must propagate"
+        except type(exc): pass
+        assert s.db.execute("SELECT count(*) FROM facts WHERE fid=?", (fid,)).fetchone() == (0,)
+        s.add(b)                                       # the retry heals completely
+        assert s.fact_bytes(fid) == b
+
+def test_adds_are_durable_only_at_commit():
+    """One transaction per host turn: a second connection sees nothing until
+    commit() — durable before the reply, never before."""
+    import sqlite3, tempfile
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "t.facts")
+        s = Store(path); s.add(CORPUS[0])
+        other = sqlite3.connect(path)
+        assert other.execute("SELECT count(*) FROM facts").fetchone() == (0,)
+        s.commit()
+        assert other.execute("SELECT count(*) FROM facts").fetchone() == (1,)
+        other.close(); s.db.close()
+
+def test_a_zero_atom_fact_survives_the_reboot():
+    """A canonical fact with no atoms at all (legal: decode round-trips it,
+    unknown tags extract durable) reconstructs from its spine row alone."""
+    f = fact(b"no.such")
+    s = Store(); s.add(encode(f))
+    assert s.fact_bytes(fact_id(f)) == encode(f)
+    n = Node(Router({}), s)
+    n.admit(encode(hydrate.hydrate())); n.run()        # the total demand faults it resident
+    assert fact_id(f) in n.durable
+
 def test_rows_rebuild_the_exact_bytes():
     """The relation is the store: reconstruction re-derives byte-identical
     canonical facts — every target shape, and the None vs b"" value
@@ -295,6 +343,11 @@ def test_sql_owners_mirrors_covers():
         need = Atom(NEED, b"r", b"s", nt, effect=REQUIRE)
         assert set(s.owners(need)) == {fid for fid, ot in fids.items() if covers(ot, nt)}, nt
     assert set(s.owners(all_need)) == set(fids)        # the total demand: every stored fact
+    dup = fact(b"no.such", ts_atom(999), Atom(OFFER, b"r", b"s", Exact(ks[0])),
+               Atom(OFFER, b"r", b"s", Range(ks[0], ks[1])))
+    s.add(encode(dup))                                 # two rows cover the same point...
+    got = s.owners(Atom(NEED, b"r", b"s", Exact(ks[0]), effect=REQUIRE))
+    assert got.count(fact_id(dup)) == 1                # ...but an owner faults once
 
 if __name__ == "__main__":
     for t in (test_demand_agrees_with_the_fully_resident_node,
@@ -307,7 +360,8 @@ if __name__ == "__main__":
               test_a_tombstone_rides_the_closure_across_eras,
               test_needs_fault_their_own_deps, test_a_cold_suppressor_bites_without_a_demand,
               test_rows_rebuild_the_exact_bytes, test_a_damaged_row_is_a_miss_never_a_wrong_fact,
-              test_repair_after_damage_redelivers, test_fault_fixpoint_mirrors_kernel_covers,
-              test_sql_owners_mirrors_covers):
+              test_repair_after_damage_redelivers, test_a_failed_write_propagates_and_tears_nothing,
+              test_adds_are_durable_only_at_commit, test_a_zero_atom_fact_survives_the_reboot,
+              test_fault_fixpoint_mirrors_kernel_covers, test_sql_owners_mirrors_covers):
         t(); print(f"ok  {t.__name__}")
     print("\nall tests passed")

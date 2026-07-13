@@ -216,19 +216,23 @@ class Store:
           CREATE INDEX IF NOT EXISTS owner_ix ON atoms(fid);""")
 
     def add(self, fb):                   # checked write: decode + derive EVERY row before the
-        try:                             # first insert, inside a savepoint — no torn facts
+        try:                             # first insert — bad BYTES are a miss...
             f = decode(fb); fid = fact_id(f)
             rows = [(fid, a.kind, a.effect, a.role, a.scope,
                      *(a.target + (None, None))[:3], a.value,
                      m.target[0] == EXACT, m.target[1], m.target[-1])
                     for a in f.atoms for m in (mat(a, fid),)]
         except Exception: return
-        self.db.execute("SAVEPOINT a")
+        if not self.db.in_transaction: self.db.execute("BEGIN")   # one transaction per host
+        self.db.execute("SAVEPOINT a")                            # turn: commit() ends it
         try:
             if self.db.execute("INSERT OR IGNORE INTO facts VALUES(?,?)", (fid, f.type_tag)).rowcount:
                 self.db.executemany("INSERT INTO atoms VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", rows)
-        except Exception: self.db.execute("ROLLBACK TO a")
-        finally: self.db.execute("RELEASE a")
+            self.db.execute("RELEASE a")
+        except BaseException:            # ...but a failed WRITE (SystemExit included) tears
+            try: self.db.execute("ROLLBACK TO a"); self.db.execute("RELEASE a")
+            except sqlite3.Error: pass   # (the tx may have auto-rolled-back beneath us)
+            raise                        # propagate whole: the caller keeps it unflushed, retries
 
     def _mk(self, fid, tag, rows):       # regroup -> rebuild -> re-hash: the certificate check
         try:
@@ -238,9 +242,10 @@ class Store:
         except Exception: return None
 
     def fact_bytes(self, fid):           # the derived view: canonical bytes, or a miss
-        rows = self.db.execute("SELECT tag, kind, effect, role, scope, tt, t1, t2, value"
-                               " FROM atoms JOIN facts USING(fid) WHERE fid=?", (fid,)).fetchall()
-        return self._mk(fid, rows[0][0], [r[1:] for r in rows]) if rows else None
+        t = self.db.execute("SELECT tag FROM facts WHERE fid=?", (fid,)).fetchone()
+        rows = self.db.execute("SELECT kind, effect, role, scope, tt, t1, t2, value"
+                               " FROM atoms WHERE fid=?", (fid,)).fetchall()
+        return self._mk(fid, t[0], rows) if t else None    # zero atom rows is legal: hash decides
 
     def owners(self, n):                 # existence: who offers at this (materialized) need's
         if n.role == ALL_ROLE:           # key — never standing. Total demand: every stored fact.
