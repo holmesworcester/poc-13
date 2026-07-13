@@ -34,7 +34,7 @@ so a reconnect re-ships (the connection id outlives the socket)."""
 import errno, os, select, signal, socket, sys, time
 BIN = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [BIN, os.path.dirname(BIN)]
-from kernel import Node, Store, _rd, decode, fact_id, frame, unframe
+from kernel import Node, Store, _rd, frame, unframe
 from facts import ROOT
 from facts.sync import cadence
 from facts.auth import local_signer_secret, endpoint
@@ -166,10 +166,9 @@ def main(db, *argv):
             for src in inbound + [p for p in links.values() if p["s"]]:
                 if "inb" not in src: continue
                 for kind, body in messages(src):
-                    if kind == BARE:
-                        inbox.append(body)            # a handshake fact: admit as-is in the cycle
-                        rid = _peek_request(body)     # a request fid, peeked (decode, no admit): react after
-                        if rid: arrived.append(rid)
+                    if kind == BARE:                  # a handshake fact: admit now (idempotent), react after
+                        rid = node.admit(body)
+                        if rid and node.facts[rid].type_tag == request.TAG: arrived.append(rid)
                     else:
                         inbox += _open_frame(node, body)   # a sealed frame -> its inner fact bytes
                     n += 1; work = True
@@ -222,11 +221,6 @@ def main(db, *argv):
         for p in links.values():
             if p["s"]: p["s"].close()
         for i in inbound: i["s"].close()
-
-def _peek_request(body):                 # a bare handshake fact's fid iff it is a sealed request (no admit)
-    try: f = decode(body)
-    except Exception: return None
-    return fact_id(f) if f.type_tag == request.TAG else None
 
 def _open_frame(node, body):             # a sealed data frame -> its inner fact bytes (opened by connection id)
     cid = frames.frame_cid(body)         # the daemon opens via a family query; it holds no sync policy
