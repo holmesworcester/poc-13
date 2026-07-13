@@ -35,7 +35,7 @@ def _compares(n):                                       # send offers carrying a
 
 def test_cadence_opens_a_round_once_per_period():
     n = node()
-    cadence.arm(n, CID, 0)                               # first boundary at now(0) + PERIOD
+    cadence.arm(n, CID)                               # first clock sight anchors the boundary
     n.turn(now=0); n.run()
     assert not _compares(n)                              # before the boundary: no round, only an alarm
     ds = [int.from_bytes(a.target[1], "big") for _, _, a in n.watched(b"wake", b"clock")]
@@ -44,16 +44,18 @@ def test_cadence_opens_a_round_once_per_period():
     assert len(_compares(n)) == 1                        # boundary reached: exactly one round opened
     n.turn(now=PERIOD + 1); n.run()
     assert not _compares(n)                              # same period, re-woken: does not fire again
+    n.turn(now=PERIOD + 2); n.run()
+    assert not _compares(n)                              # and again: the tick memory survived the re-wake
     n.turn(now=2 * PERIOD); n.run()
     assert len(_compares(n)) == 1                        # next period: fires once more
 
 def test_next_wake_reads_the_alarm():
-    n = node(); cadence.arm(n, CID, 0); n.turn(now=100); n.run()
-    assert abs(next_wake(n, 100, 1.0) - (PERIOD - 100) / 1000.0) < 1e-6   # sleep exactly until the boundary
+    n = node(); cadence.arm(n, CID); n.turn(now=100); n.run()
+    assert abs(next_wake(n, 200, 1.0) - (PERIOD - 100) / 1000.0) < 1e-6   # sleep exactly until 100 + PERIOD
     assert next_wake(Node(ROOT), 0, 0.5) == 0.5         # no alarms -> the cap
 
 def test_closed_conn_tears_it_down():
-    n = node(); cadence.arm(n, CID, 0); n.turn(now=PERIOD); n.run()
+    n = node(); cadence.arm(n, CID); n.turn(now=0); n.turn(now=PERIOD); n.run()
     assert _compares(n)
     n.admit(encode(fact(b"connection.close", ts_atom(1, b"conn"),
                         Atom(OFFER, b"closed", b"conn", Exact(CID)))))   # a close for this connection
@@ -62,7 +64,7 @@ def test_closed_conn_tears_it_down():
     assert not n.watched(b"wake", b"clock")             # and stops arming alarms
 
 def test_cadence_is_volatile():
-    n = node(); cadence.arm(n, CID, 0); n.turn(now=PERIOD); n.run()
+    n = node(); cadence.arm(n, CID); n.turn(now=0); n.turn(now=PERIOD); n.run()
     syn = [fid for fid, f in n.facts.items() if f.type_tag == cadence.TAG]
     assert syn and not any(fid in n.durable for fid in syn)   # session state, never flushed
 

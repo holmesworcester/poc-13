@@ -122,7 +122,7 @@ def main(db, *argv):
         h, pt = listen.rsplit(":", 1)
         tsock = socket.create_server((h, int(pt))); tsock.setblocking(False)
     links, inbound = {}, []              # links: addr -> outbound socket; inbound: read sources
-    redial, armed = {}, set()                         # redial: addr -> last dial ; armed cids (their sync cadence)
+    redial = {}                                       # redial: addr -> last dial
     to_ship = set()                                   # flushed senders awaiting their reap
     sent = {}                                         # cid -> set of what was sent this session: a shipped fact by id
                                                       # AND a sync compare by content hash (both 32-byte digests). The
@@ -206,9 +206,9 @@ def main(db, *argv):
             fired = pump(node, lambda cid: conn.route(node, cid) or (cid, None), deliver, to_ship, sent)
             to_ship |= fired; work |= bool(fired)          # flushed: next turn presents shipped@o and it reaps
             if not node.frontier:
-                for _ep, _addr, cid, _who in conn.peers(node):     # a new connection: arm its periodic sync cadence
-                    if cid not in armed:                           # the sole round-opener (rounds are facts, not a
-                        cadence.arm(node, cid, now_ms()); armed.add(cid); work = True   # daemon reaction)
+                for _ep, _addr, cid, _who in conn.peers(node):     # a live connection: arm its periodic sync cadence
+                    cadence.arm(node, cid)                         # idempotent — the sole round-opener (rounds are
+                                                                   # facts, not a daemon reaction)
             for addr, p in links.items():
                 if p["s"] and pending(p) and p["s"] in w:
                     try: work |= drain(p) > 0
