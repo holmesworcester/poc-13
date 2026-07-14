@@ -87,7 +87,7 @@ and, for a valid fact, a set of projected offers:
 ```mermaid
 flowchart TB
     I["canonical bytes"] --> A["admit<br/>decode canonically · compute id · run optional intrinsic check"]
-    A --> X["family extract(fact)<br/>pure classification: durable, shareable"]
+    A --> X["family extract(fact)<br/>pure durability: durable or volatile"]
     X --> M["materialize SELF · index atoms<br/>match needs against validated offers"]
     M --> D{"valid offer matches<br/>a Suppress need?"}
     D -- yes --> Z["Suppressed · no offers · purged"]
@@ -102,12 +102,13 @@ flowchart TB
     O -- Reap --> R["Reap · no offers · purged"]
 ```
 
-Despite its name, `extract()` does not unpack the atoms. It is a content-pure
-policy decision made at admission: `durable` decides whether the canonical
-fact is retained in the atom relation, while `shareable` makes a valid,
-durable fact eligible for the sync family's treap. Local secrets and connection
-anchors are durable but unshareable; protocol work such as sync compares and
-outbox sends is neither.
+Despite its name, `extract()` does not unpack the atoms. It is the content-pure
+durability decision made at admission: a durable canonical fact is retained in
+the atom relation, while a volatile fact vanishes on restart. It does not decide
+replication. A valid family projector opts its fact into sync by including the
+derived `leaf@sync/SELF` offer returned by `sync_leaf()` in `Out.offers`. Local
+secrets and connection anchors are durable but project no marker; protocol work
+such as sync compares and outbox sends is volatile and projects none.
 
 The projector is the fact family's semantic boundary. It runs only after no
 validated suppressor matches and every `Require` need is satisfied. Its
@@ -116,10 +117,12 @@ needs, including each offer's owner and timestamp. The projector normally
 rebuilds the expected family shape, applies authorization or cryptographic
 policy, and returns `Out(offers=...)`. Only those returned offers enter the
 clean index read by dependents and queries; raw asserted offers never justify
-another fact on their own. `Parked`, `Invalid`, `Suppressed`, and family-chosen
-`Reap` verdicts publish no clean offers. A family's `settle()` hook observes
-every verdict, including ones that never call the projector, which is how sync
-maintains its own leaf set and treap in `node.regs[b"sync"]`.
+another fact on their own. The sync marker is one such projected offer, not a
+claim trusted from the fact's input atoms. `Parked`, `Invalid`, `Suppressed`,
+and family-chosen `Reap` verdicts publish no clean offers, so owner-scoped
+replacement also retracts any prior marker. The sync family's generic offer
+observer folds those marker deltas into its leaf set and treap in
+`node.regs[b"sync"]`.
 
 SQLite does not store canonical fact blobs. Its durable relation is a
 two-column `facts(fid, tag)` spine plus one `atoms` row for every atom. Reads
@@ -132,13 +135,14 @@ The main pieces are:
 
 - [`kernel.py`](kernel.py) — canonical identity, admission, matching, the
   bounded turn loop, demand faults, and two generic family-index seams:
-  `settle()` and `answer()`.
+  projected-offer `observe()` and reserved-need `answer()`.
 - [`facts/`](facts/) — one module per fact family. Each module owns SHAPE,
   EXTRACT, optional CHECK, PROJECT, COMMANDS, QUERIES, and CLI. Projectors are
   also the routing tree, so protocol policy stays out of the kernel.
 - [`facts/sync/index.py`](facts/sync/index.py) — the sync family’s own
   rebuildable register: leaf membership, a history-independent Merkle treap,
-  summary memo, and version counter. The kernel contains no sync tree.
+  summary memo, and version counter, derived from validated sync-leaf offers.
+  The kernel contains no sync tree.
 - [`facts/connection/`](facts/connection/) — sealed handshake, session,
   frame-bundle, close, and ephemeral-secret families. A durable answered
   request remains the known-peer anchor and redials only when its session is
@@ -156,10 +160,11 @@ The main pieces are:
 ## Current scope
 
 The prototype has a global resident sync set per node. Workspace-scoped sync
-lanes and negative multi-workspace isolation are not implemented yet. Also,
-`LocalOnly` currently controls sync egress but is not enforced on wire ingress,
-so the present threat model assumes connected peers do not send local-only
-families. Retention-policy enforcement remains outside the implemented surface.
+lanes and negative multi-workspace isolation are not implemented yet. Absence
+of a projected sync-leaf marker controls egress, but the peer inbox does not yet
+enforce a separate family-level ingress permission, so the present threat model
+assumes connected peers do not send local-only families. Retention-policy
+enforcement remains outside the implemented surface.
 
 ## Quick start
 
@@ -259,7 +264,7 @@ both facts and their validation work.
 
 | path | measured cost |
 |---|---:|
-| admit + settle 10k signed messages / 20k facts | 2.22 s (0.111 ms/fact) |
+| admit + project/index 10k signed messages / 20k facts | 2.22 s (0.111 ms/fact) |
 | rebuild the same set from atom rows with one total demand | 2.96 s |
 | daemon cold boot (no database-wide hydration) | 0.040 s |
 | hydrate the full signed-message database through one verb | 3.16 s |

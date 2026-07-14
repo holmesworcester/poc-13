@@ -1,5 +1,5 @@
 """facts/connection/close.py — ends a session by naming what it retires. Durable
-+ LocalOnly: a closed peer stays closed across restart, and the decision never
++ marker-free: a closed peer stays closed across restart, and the decision never
 syncs. It offers `closed` at each id it kills; request, connection, and
 ephemeral_secret all Suppress-need `closed@SELF` (the death key they carry), so
 admitting a close flips them to Suppressed — the daemon drops the socket and
@@ -20,8 +20,8 @@ def close(targets, t):
     return fact(TAG, ts_atom(t, SC),
                 *(Atom(OFFER, b"closed", SC, Exact(i)) for i in targets))
 
-# EXTRACT — content-pure: durable + LocalOnly, exactly like the request it kills.
-def extract(f): return True, False
+# EXTRACT — content-pure durability. A local close projects no sync marker.
+def extract(f): return True
 
 # PROJECT — the only place this family's meaning lives.
 def project(f, ctx):

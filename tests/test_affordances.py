@@ -50,7 +50,7 @@ def test_deps_structural():
     assert CHANNEL_ID in n.deps(fact_id(m))                # direct structural edge; workspace is transitive
 
 def test_summary_small_range_is_one_id_list_with_closure():
-    n = node(WS, WS_SIG, *MEMBER.facts, CHANNEL, CHANNEL_SIG)  # exactly T shareable leaves
+    n = node(WS, WS_SIG, *MEMBER.facts, CHANNEL, CHANNEL_SIG)  # exactly T marker-owning leaves
     rows = n._answer(summary_need(b"", HI))
     assert len(_role(rows, b"fp")) == 1                    # one prune-check fingerprint for the range
     cids = _role(rows, b"cids")

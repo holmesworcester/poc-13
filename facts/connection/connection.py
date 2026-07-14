@@ -73,8 +73,8 @@ def connection(env, request_id):
                 Atom(NEED, b"invite_secret", b"local", FULL, effect=WATCH),
                 Atom(NEED, b"closed", SC, SELF, effect=SUPPRESS))
 
-# EXTRACT — content-pure: volatile + LocalOnly. A session dies with the process.
-def extract(f): return False, False
+# EXTRACT — volatile session state.
+def extract(f): return False
 
 # PROJECT — open, recompute, verify, publish. Pure over ctx; rebuilt by replay.
 def project(f, ctx):

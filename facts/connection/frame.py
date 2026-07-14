@@ -7,7 +7,7 @@ opening secret and is bound into the AEAD associated data, so a frame sealed for
 one session can never open under another. A tampered frame opens to None and is
 dropped whole; the daemon then unpacks the plaintext and admits each inner fact
 through the NORMAL gate, so a corrupt inner is still a per-fact miss that never
-poisons its siblings. Volatile, unshareable, never in leaves: pure transport.
+poisons its siblings. Volatile, marker-free, never in leaves: pure transport.
 Handshake facts (the sealed request and connection) travel as bare facts before
 a secret exists — they carry their own X25519 envelopes; frames seal everything
 after."""
@@ -23,8 +23,8 @@ PURPOSE = b"tinyp2p connection frame v1"
 
 # SHAPE — none: a frame is sealed onto the wire, never admitted as a fact.
 
-# EXTRACT — content-pure: volatile + unshareable. Transport, never stored.
-def extract(f): return False, False
+# EXTRACT — volatile transport, never stored.
+def extract(f): return False
 
 # PROJECT — inert: a frame is unpacked by the daemon, never projected.
 def project(f, ctx): return Out()

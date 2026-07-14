@@ -17,9 +17,9 @@ def deletion(workspace_id, target_id, t):
                 Atom(NEED, b"key", workspace_id, Exact(workspace_id), effect=REQUIRE),
                 Atom(OFFER, b"dead", workspace_id, Exact(target_id)))
 
-# EXTRACT — content-pure: (durable, shareable). Deletions must travel.
-def extract(f): return True, True
-from facts.sync.index import settle      # opt in: these facts replicate (one line is the whole choice)
+# EXTRACT — content-pure durability.
+def extract(f): return True
+from facts.sync.index import sync_leaf
 
 # PROJECT — the only place this family's meaning lives.
 def project(f, ctx):
@@ -30,7 +30,7 @@ def project(f, ctx):
         return Out("Invalid")
     signer, members = signature.blessed(ctx)
     if not signer & set(members.values()): return Out("Invalid")   # a member signed it
-    return Out(offers=(d,))
+    return Out(offers=(d, sync_leaf()))
 
 # COMMANDS — build a fact, admit it, stop.
 def delete(node, workspace_id, target_id, t):

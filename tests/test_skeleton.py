@@ -62,7 +62,7 @@ def test_requires_suppression_and_wakes():
 
 def test_admission_check_hook():
     class SigLike:                       # throwaway family: a self-check at the gate
-        extract = staticmethod(lambda f: (True, True))
+        extract = staticmethod(lambda f: True)
         project = staticmethod(lambda f, ctx: Out())
         check = staticmethod(lambda f: ts_of(f) != 13)
     n = Node(Router({b"sig": Router({b"x": SigLike}, depth=1)}))

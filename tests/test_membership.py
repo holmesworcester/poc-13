@@ -11,15 +11,16 @@ from facts import ROOT
 from facts.auth import endpoint, local_signer_secret, user_invite, device
 from facts.auth import user as usermod, workspace as wsmod
 from facts.connection import request as req, connection as conn
+from facts.sync import index as sidx
 
 def _node():
     n = Node(ROOT)
     endpoint.keygen(n, 1); local_signer_secret.keygen(n, 1); n.run()
     return n
 
-def _sync(dst, src):                     # ship every shareable fact src holds into dst
+def _sync(dst, src):                     # ship every validated sync-leaf owner into dst
     for fid, b in list(src.durable.items()):
-        if src.root.extract(src.facts[fid])[1]: dst.admit(b)
+        if sidx.contains(src, fid): dst.admit(b)
     dst.run()
 
 def _members(host, joiner):

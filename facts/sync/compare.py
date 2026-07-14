@@ -24,7 +24,7 @@ Bundled: one compare is a whole message (many ranges), so the round count is
 log_B(n) and matched subranges are pruned wholesale. No rounds and no daemon
 reaction: convergence is fingerprint agreement, every response is a projector offer
 at the connection's outbox key, and a dropped frame just re-descends next cadence.
-Volatile (extract -> False, False): session state, never itself a leaf."""
+Volatile (extract -> False): session state, never itself a leaf."""
 from bisect import bisect_left
 from kernel import (Atom, Exact, NEED, OFFER, Out, Range, WATCH, by, encode,
                     fact, now_need, shipped_need, ts_atom, unframe)
@@ -61,7 +61,7 @@ def compare(cid, claims, floor=b"", pulse=False):   # claims: list of (role, lo,
     return fact(TAG, *atoms)
 
 # EXTRACT — volatile session state.
-def extract(f): return False, False
+def extract(f): return False
 
 # PROJECT — reconcile each peer claim against my summary; emit my claims + pulls.
 def project(f, ctx):

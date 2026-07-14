@@ -29,15 +29,15 @@ def user(workspace_id, name, pk, invite_id, t):
                 Atom(OFFER, b"member", workspace_id, SELF, name),
                 Atom(OFFER, b"key", workspace_id, Exact(workspace_id), pk))
 
-# EXTRACT — content-pure: (durable, shareable).
-def extract(f): return True, True
-from facts.sync.index import settle      # opt in: these facts replicate (one line is the whole choice)
+# EXTRACT — content-pure durability.
+def extract(f): return True
+from facts.sync.index import sync_leaf
 
 # PROJECT — the only place this family's meaning lives.
 def project(f, ctx):                 # signer must equal the pk the named invite blessed
     blessed = {r[2].value for r in by(ctx, b"invite")}
     if not blessed & {r[2].value for r in by(ctx, b"pk")}: return Out("Invalid")
-    return Out(offers=tuple(a for a in f.atoms if a.role in (b"member", b"key")))
+    return Out(offers=tuple(a for a in f.atoms if a.role in (b"member", b"key")) + (sync_leaf(),))
 
 # COMMANDS — build a fact, admit it, stop. invite=(invite_id, invite_secret);
 # authoring the acceptance is what makes the joined workspace Valid on this node.

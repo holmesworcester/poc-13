@@ -29,9 +29,9 @@ def file_slice(workspace_id, message_id, file_id, root, index, proof, t):
                 Atom(OFFER, b"slice", file_id, Exact(index.to_bytes(4, "big")), proof))
 
 
-# EXTRACT — durable and shared; each proof is an independently useful byte fact.
-def extract(f): return True, True
-from facts.sync.index import settle      # opt in: these facts replicate
+# EXTRACT — content-pure durability.
+def extract(f): return True
+from facts.sync.index import sync_leaf
 
 
 # CHECK — exact intrinsic SHAPE and bounded canonical Bao header geometry.
@@ -78,7 +78,7 @@ def project(f, ctx):
             if total != (0 if blob_bytes == 0 else (blob_bytes + width - 1) // width):
                 continue
             verified_bytes(atom.value, descriptor.target[1], index, blob_bytes, width)
-            return Out(offers=(atom,))
+            return Out(offers=(atom, sync_leaf()))
         except Exception:
             continue
     return Out("Invalid")

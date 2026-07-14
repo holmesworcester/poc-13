@@ -15,8 +15,8 @@ ALL = Range(b"", b"\xff" * 64)           # covers every exact target in practice
 def hydrate(role=None, scope=None, target=ALL):
     return fact(TAG, all_need if role is None else Atom(NEED, role, scope, target, effect=WATCH))
 
-# EXTRACT — content-pure: volatile session demand, never stored, never synced.
-def extract(f): return False, False
+# EXTRACT — volatile session demand.
+def extract(f): return False
 
 # PROJECT — demand is inert: valid, offers nothing, changes nothing.
 def project(f, ctx): return Out()

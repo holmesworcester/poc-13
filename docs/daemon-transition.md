@@ -23,8 +23,9 @@ while implementing (a mechanic I reasoned through but haven't run).
   (`("fp",child,label)` per child, or `("lst",pfx)`+`("has",kb)` at a leaf), floor-clipped.
   `gather`, gather/insert/remove all O(depth).
 - `Node`: `admit` (358, idempotent by fid, runs family `check`, extract→durable, clears
-  `deps`), `turn(now,shipped,bound)` (427), `_step` (441), `_promote` (470),
-  `_leafset_update` (457, leaf iff `durable ∧ shareable ∧ memo∈{Valid,Suppressed}`, hash =
+  `deps`), `turn(now,shipped,bound)` (427), `_step` (441), `_settle` (470),
+  `_leafset_update` (457, now superseded by the sync family's validated
+  `leaf@sync` observer; leaf iff durable and the projector publishes the marker, hash =
   `H(frame(fid, ts, H(bytes)))`, keeps `leafset`+`leaf_xor`+`tree`), `_present_now` (410),
   `_present_shipped` (419), `valid_offers` (385, clean twin), `offers_for` (379, asserted),
   `validated_deps` (389, uses `offers_for` = **asserted** REQUIRE+SUPPRESS edges),
@@ -219,7 +220,7 @@ def compare(cid, pfx, floor, fp):
         Atom(OFFER, b"peer", SC, Exact(pfx), fp),                     # sender's fingerprint; b"" for a bare root
         Atom(NEED,  SUM_ROLE, SC, Exact(pfx), _fkey(floor), WATCH),   # engine delivers my summary
         shipped_need)                                                # courier: reap when my sends flush
-def extract(f): return False, False
+def extract(f): return False
 def project(f, ctx, sl):
     if by(ctx, b"shipped"): return Out("Reap")
     cid  = _val(f, b"cid"); pfx = _tgt(f, b"pfx"); floor = _floorval(f); peer = _val(f, b"peer")
@@ -254,7 +255,7 @@ def have(cid, fid):
         Atom(OFFER, b"id",  SC, Exact(fid)),
         Atom(NEED,  RES_ROLE, SC, Exact(fid), WATCH),   # do I hold it?
         shipped_need)
-def extract(f): return False, False
+def extract(f): return False
 def project(f, ctx, sl):
     if by(ctx, b"shipped"): return Out("Reap")
     if by(ctx, RES_ROLE):   return Out("Reap")          # I already hold it: nothing to do, vanish
@@ -273,7 +274,7 @@ def need(cid, fid):
         Atom(OFFER, b"cid", SC, Exact(cid)),
         Atom(OFFER, b"id",  SC, Exact(fid)),
         shipped_need)
-def extract(f): return False, False
+def extract(f): return False
 def project(f, ctx, sl):
     if by(ctx, b"shipped"): return Out("Reap")
     cid = _val(f, b"cid"); fid = _tgt(f, b"id")
@@ -465,8 +466,9 @@ admit→project path and the crypto *is* their validity. The rule is "don't turn
 wire wrapper into a fact just to project its crypto," not "no crypto in projectors."
 
 ### Sync — dep-aware negentropy, decomposed
-Leaves = durable ∧ shareable ∧ Valid|Suppressed, keyed `workspace‖ts‖fid`, content-hashed
-(immutable), **valid-only** (Parked/pre-position rejected). Three families:
+Leaves = durable facts with a validated projected `leaf@sync` marker, keyed
+`workspace‖ts‖fid`, content-hashed (immutable), **valid-only**
+(Parked/pre-position rejected). Three families:
 `compare(range,fp)` (single-range descent, split-k on mismatch, deterministic split),
 `have(id)` (advertise), `need(id)` (request). Dep completion = **advertise the full
 transitive closure-ids with the leaves; pull by id**. This is convergent (request only
@@ -546,9 +548,9 @@ reads ctx values), so validate once (hydrating the dep closure transiently) then
 shed; "stay in sync without staying materialised" — yes. Companion affordance:
 expose Skeleton membership as a `validated@id` need (sibling of `resident@id`/
 `summary@range`) so a fact whose validity depends only on dep *existence* can
-validate cold, against the Skeleton, with no materialisation. `extract`'s
-`shareable` bit stays the sync axis; the hydrate window is an orthogonal residency
-axis.
+validate cold, against the Skeleton, with no materialisation. The projected
+`leaf@sync` marker stays the sync axis; the hydrate window is an orthogonal
+residency axis.
 
 ### 10.2 Count-augmented balanced tree for the Skeleton
 The RBSR Skeleton uses a sorted list: correct, minimal, optimal *wire* cost, but

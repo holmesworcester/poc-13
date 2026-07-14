@@ -1,5 +1,5 @@
 """facts/connection/ephemeral_secret.py — one X25519 ephemeral keypair for a
-single connection handshake (poc-10 tag 43). Durable + LocalOnly: kept so a
+single connection handshake (poc-10 tag 43). Durable and marker-free: kept so a
 replayed request/connection can recompute the same handshake material, never
 shared. It offers its secret keyed by its public key (the rendezvous the sealed
 request and connection Watch to open envelopes) and dies with a connection.close
@@ -17,8 +17,8 @@ def ephemeral(eph_sk, eph_pk, t):
                 Atom(OFFER, b"ephsk", SC, Exact(eph_pk), eph_sk),  # keyed by its own pub
                 Atom(NEED, b"closed", SC, SELF, effect=SUPPRESS))
 
-# EXTRACT — content-pure: (durable, LocalOnly). A handshake secret never syncs.
-def extract(f): return True, False
+# EXTRACT — content-pure durability. A handshake secret projects no sync marker.
+def extract(f): return True
 
 # CHECK — self-verification at the gate: the secret must derive the pub it keys.
 def check(f):

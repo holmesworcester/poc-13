@@ -23,9 +23,9 @@ def message(workspace_id, channel_id, author_id, body, t):
                 Atom(OFFER, b"posted", workspace_id, SELF, author_id),
                 Atom(NEED, b"dead", workspace_id, SELF, effect=SUPPRESS))
 
-# EXTRACT — content-pure: (durable, shareable).
-def extract(f): return True, True
-from facts.sync.index import settle      # opt in: these facts replicate (one line is the whole choice)
+# EXTRACT — content-pure durability.
+def extract(f): return True
+from facts.sync.index import sync_leaf
 
 # PROJECT — the only place this family's meaning lives.
 def project(f, ctx):
@@ -38,7 +38,7 @@ def project(f, ctx):
         return Out("Invalid")
     signer, members = signature.blessed(ctx)
     if members.get(p.value) not in signer: return Out("Invalid")   # the author signed it
-    return Out(offers=(m, p))
+    return Out(offers=(m, p, sync_leaf()))
 
 # COMMANDS — build a fact, admit it, stop. Authorship is the local signer's
 # membership; the signature travels with the message.

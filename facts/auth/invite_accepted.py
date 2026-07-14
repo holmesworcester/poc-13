@@ -22,8 +22,8 @@ def invite_accepted(workspace_id, invite_id, secret, addr, endpoint_pk, t):
                 Atom(OFFER, b"invite_ref", b"local", Exact(bh),
                      frame(workspace_id, invite_id, addr, endpoint_pk)))
 
-# EXTRACT — content-pure: (durable, LocalOnly). Acceptance is a local decision.
-def extract(f): return True, False
+# EXTRACT — content-pure durability. Acceptance projects no sync marker.
+def extract(f): return True
 
 # CHECK — the bootstrap_hash it keys by must be the hash of the secret it carries.
 def check(f):

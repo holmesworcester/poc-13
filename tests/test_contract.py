@@ -27,6 +27,20 @@ def test_fact_contract():
                 assert "ctx" not in part[s], (p, s)
         assert "CLI = {" in part["# CLI"], p                      # explicit verb table
 
+def test_extract_contract_has_one_result():
+    """EXTRACT is durability only; the retired (durable, shareable) tuple
+    must not return through a family implementation."""
+    for p in FACTS.rglob("*.py"):
+        if p.name == "__init__.py":
+            continue
+        tree = ast.parse(p.read_text())
+        extracts = [node for node in tree.body
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and node.name == "extract"]
+        for extract in extracts:
+            returns = [node for node in ast.walk(extract) if isinstance(node, ast.Return)]
+            assert returns and all(not isinstance(node.value, ast.Tuple) for node in returns), p
+
 def test_needs_carry_no_values():
     """Needs carry no values — a need is a key, and MATCHING reads nothing
     else (the hydration window died with the store spider: a demand is one
@@ -58,5 +72,6 @@ def test_needs_carry_no_values():
                 assert all(k.arg != "value" for k in node.keywords), (p, node.lineno)
 
 if __name__ == "__main__":
-    for t in (test_fact_contract, test_needs_carry_no_values):
+    for t in (test_fact_contract, test_extract_contract_has_one_result,
+              test_needs_carry_no_values):
         t(); print(f"ok  {t.__name__}")

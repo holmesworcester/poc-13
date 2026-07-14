@@ -25,15 +25,15 @@ def admin(workspace_id, user_id, t):
                 Atom(NEED, b"pk", workspace_id, SELF, effect=REQUIRE),
                 Atom(OFFER, b"admin", workspace_id, Exact(user_id)))
 
-# EXTRACT — content-pure: (durable, shareable).
-def extract(f): return True, True
-from facts.sync.index import settle      # opt in: these facts replicate (one line is the whole choice)
+# EXTRACT — content-pure durability.
+def extract(f): return True
+from facts.sync.index import sync_leaf
 
 # PROJECT — the only place this family's meaning lives.
 def project(f, ctx):                 # the granter's signer key must be the founder root
     blessed = {r[2].value for r in by(ctx, b"root")}
     if not blessed & {r[2].value for r in by(ctx, b"pk")}: return Out("Invalid")
-    return Out(offers=tuple(a for a in f.atoms if a.role == b"admin"))
+    return Out(offers=tuple(a for a in f.atoms if a.role == b"admin") + (sync_leaf(),))
 
 # COMMANDS — build a fact, admit it, stop.
 def grant(node, workspace_id, user_id, t):

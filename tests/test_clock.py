@@ -17,7 +17,7 @@ def _toy_family():
         deadline = int.from_bytes(next(a.value for a in f.atoms if a.role == b"d"), "big")
         if n is None or n < deadline: return Out(offers=())      # not due yet
         return Out(offers=(Atom(OFFER, b"fired", b"toy", SELF, n.to_bytes(8, "big")),))
-    return types.SimpleNamespace(extract=lambda f: (False, False), project=project)
+    return types.SimpleNamespace(extract=lambda f: False, project=project)
 
 def _node():
     return Node(Router({b"toy": Router({b"t": _toy_family()}, depth=1)}))

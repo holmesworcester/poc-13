@@ -25,15 +25,16 @@ def workspace(name, root_pk, t):
                 Atom(OFFER, b"workspace", b"auth", SELF, name),
                 Atom(OFFER, b"root", b"auth", SELF, root_pk))
 
-# EXTRACT — content-pure: (durable, shareable).
-def extract(f): return True, True
-from facts.sync.index import settle      # opt in: these facts replicate (one line is the whole choice)
+# EXTRACT — content-pure durability.
+def extract(f): return True
+from facts.sync.index import sync_leaf
 
 # PROJECT — valid only if the embedded root key signed it (and it is accepted).
 def project(f, ctx):
     root_pk = {a.value for a in f.atoms if a.role == b"root"}
     if not root_pk & {r[2].value for r in by(ctx, b"pk")}: return Out("Invalid")
-    return Out(offers=tuple(a for a in f.atoms if a.role in (b"workspace", b"root")))
+    return Out(offers=tuple(a for a in f.atoms if a.role in (b"workspace", b"root"))
+                       + (sync_leaf(),))
 
 # COMMANDS — the full bootstrap DAG, all signed by an ephemeral root then dropped.
 def create(node, name, t):

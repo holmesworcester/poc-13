@@ -1,6 +1,6 @@
 """Three real daemons in a hub over sealed connections, black box through
 tiny.py: bob and carol each bootstrap-connect to alice, so every bob<->carol leg
-relays through her (a node ships every durable+shareable fact it holds to each
+relays through her (a node ships every durable sync-leaf owner it holds to each
 of its own peers, not just its own authorship). Ports poc-10's three-daemon
 late-joiner story and poc-7's offline-delta rejoin, scaled to a ~1k delta
 authored over the unix socket (sock() is bench.py's uverb idiom).

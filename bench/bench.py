@@ -33,7 +33,7 @@ N = 10_000                               # the standard load: N messages (signed
 CHAN_NAMES = [b"c%d" % i for i in range(5)] # a few real channels, messages fanned across them
 RK, RPK = ed.ed25519_keygen(bytes(32))
 WS = workspace(b"acme", RPK, 1); WID = fact_id(WS)
-# the facts that make WS Valid: root self-signature (shareable) + local acceptance,
+# the facts that make WS Valid: root self-signature (marker-emitting) + local acceptance,
 # plus one enrolled member and five signed channels. Every message also travels
 # with its member signature.
 sys.path.insert(0, os.path.join(ROOT_DIR, "tests"))
@@ -119,7 +119,7 @@ def bench_chain(depth=100):
     from types import SimpleNamespace
     from kernel import Atom, Exact, SELF, NEED, OFFER, REQUIRE, Out, Router, fact, ts_atom
     from facts.store import hydrate
-    fam = SimpleNamespace(extract=lambda f: (True, False),
+    fam = SimpleNamespace(extract=lambda f: True,
                           project=lambda f, ctx: Out(offers=tuple(a for a in f.atoms if a.kind == OFFER)))
     root = Router({b"chain": fam, b"store": hydrate})
     fbs, prev = [], None

@@ -14,8 +14,8 @@ def send(dest, payload, t):
     return fact(TAG, ts_atom(t, b"outbox"), shipped_need,
                 Atom(OFFER, b"send", b"outbox", Exact(dest), payload))
 
-# EXTRACT — content-pure: (durable, shareable). A one-shot send is neither.
-def extract(f): return False, False
+# EXTRACT — volatile one-shot work.
+def extract(f): return False
 
 # PROJECT — offer the payload until the flush report, then reap with no residue.
 def project(f, ctx):

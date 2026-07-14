@@ -124,8 +124,8 @@ def test_a_flushed_key_is_already_resident():
 
 # --- the relation is version-neutral: closures cross vocabulary eras ------------
 S = b"s"
-_epoch = SimpleNamespace(extract=lambda f: (True, False),   # a minimal always-valid family:
-                         project=lambda f, ctx:             # settle each fact Valid, gate on needs
+_epoch = SimpleNamespace(extract=lambda f: True,            # a minimal always-valid family:
+                         project=lambda f, ctx:             # publish every offer, gate on needs
                              Out(offers=tuple(a for a in f.atoms if a.kind == OFFER)))
 EPOCHS = Router({b"v1": _epoch, b"v2": _epoch, b"v3": _epoch})
 

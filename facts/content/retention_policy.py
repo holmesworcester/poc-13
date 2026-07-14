@@ -22,9 +22,9 @@ def policy(workspace_id, ttl, t):
                 Atom(OFFER, b"retention", workspace_id, Exact(b"window"),
                      ttl.to_bytes(8, "little")))
 
-# EXTRACT — content-pure: (durable, shareable).
-def extract(f): return True, True
-from facts.sync.index import settle      # opt in: these facts replicate (one line is the whole choice)
+# EXTRACT — content-pure durability.
+def extract(f): return True
+from facts.sync.index import sync_leaf
 
 # PROJECT — the only place this family's meaning lives.
 def project(f, ctx):
@@ -36,7 +36,7 @@ def project(f, ctx):
     signer, members = signature.blessed(ctx)
     admins = {row[2].target[0] for row in by(ctx, b"admin") if row[2].target[0]}  # empty span never indexes
     if not signer & {members[a] for a in admins if a in members}: return Out("Invalid")
-    return Out(offers=(r,))
+    return Out(offers=(r, sync_leaf()))
 
 # COMMANDS — build a fact, admit it, stop. The client-side admin check names the
 # refusal; the projector is what a forged fact meets.

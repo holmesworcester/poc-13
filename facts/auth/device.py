@@ -3,7 +3,7 @@ member (poc-10 endpoint_shared, role=Device). The endpoint (X25519 key in
 auth.endpoint) is node-level and the SAME across every workspace; this fact is
 the per-workspace statement 'that endpoint is my device here', so a node that
 joins two workspaces has two device facts carrying one identical endpoint. It is
-durable + shareable so peers learn each other's endpoints, self-attested by the
+durable and marker-emitting so peers learn each other's endpoints, self-attested by the
 member's own signing key (the primary device needs no separate invite), and
 valid only if that signer is an enrolled member (its key is a published member
 key). It publishes `endpoint_shared@auth` — the frame(endpoint, signing_pk, wid)
@@ -28,9 +28,9 @@ def device(workspace_id, label, endpoint_pk, signing_pk, t):
                      frame(endpoint_pk, signing_pk, workspace_id)),
                 Atom(OFFER, b"endpoint_key", workspace_id, Exact(endpoint_pk), signing_pk))
 
-# EXTRACT — content-pure: (durable, shareable). Endpoints must travel to peers.
-def extract(f): return True, True
-from facts.sync.index import settle      # opt in: these facts replicate (one line is the whole choice)
+# EXTRACT — content-pure durability.
+def extract(f): return True
+from facts.sync.index import sync_leaf
 
 # PROJECT — the embedded signing key must have signed this fact and be an
 # enrolled member's key. Canonical form is the SHAPE rebuilt: every cross-field
@@ -46,7 +46,8 @@ def project(f, ctx):
     signer, members = signature.blessed(ctx)
     if spk not in signer or spk not in set(members.values()): return Out("Invalid")
     return Out(offers=tuple(a for a in f.atoms
-                            if a.role in (b"device", b"endpoint_shared", b"endpoint_key")))
+                            if a.role in (b"device", b"endpoint_shared", b"endpoint_key"))
+                       + (sync_leaf(),))
 
 # COMMANDS — bind this node's endpoint into the workspace, self-signed. Ensures a
 # node-level endpoint exists (one per node, shared across every workspace).

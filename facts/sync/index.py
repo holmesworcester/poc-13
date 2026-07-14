@@ -1,20 +1,18 @@
 """facts/sync/index.py — the reconciliation set as FAMILY state: the treap, the
 leaf-membership rule, and the `summary` answerer, evicted whole from the kernel.
 
-The kernel's contribution is two generic seams. The SETTLE hook: a family that
-declares settle() sees every verdict its facts settle to (including Suppressed
-and Parked, which never reach project()) and maintains derived group state from
-it. And answer(): a family claims a reserved role and serves the need from its
-own index, injected into ctx like any engine answer. Sync uses both: a family
-opts its facts into replication with one line — `from facts.sync.index import
-settle` — and this module folds each verdict into the treap held in the b"sync"
-register; compares and cadences read it back through the `summary` need. What
-replicates is therefore a FAMILY decision, made identically on every peer
-because every peer runs the same family code over the same fact — the kernel
-knows nothing but the seams. (No fact carries this module's tag yet: the index
-is pure register state, and replay rebuilds it through the same hook, because
-hydration re-steps every durable fact and each re-promotion re-inserts its leaf.
-There is no kernel feed, no cursor, and no second rebuild path.)
+The kernel's contribution is two generic seams. observe() lets this family
+subscribe to one validated offer address and fold its deltas into a register;
+answer() lets it serve a reserved need from that register. A replicating
+projector emits sync_leaf(), an ordinary projected offer at leaf@sync/SELF.
+Only Valid output reaches the clean twin, whose owner and timestamp are the
+treap entry. Invalid, Parked, Suppressed, and Reap output no marker, so clean
+replacement retracts the leaf through the same observer. What replicates is
+therefore a projector decision made identically on peers running the same
+family code. The index is pure register state: no wire fact carries this
+module's tag, and hydration re-steps every durable fact so its projector
+re-emits the marker that rebuilds the register. There is no cursor or second
+rebuild path.
 
 The set itself: range-based set reconciliation (Meyer & Scherer,
 rbsr_nonhomomorphic) over 40-byte (ts‖FactId) keys, held in a TREAP — a binary
@@ -33,7 +31,8 @@ fanout is B and depth is log_B(n) regardless of key distribution. A range of
 <= T leaves is listed by id instead, ending the recursion. (A maliciously
 degenerate set costs O(n) local compute; the paper shows communication,
 roundtrips, and censorship-resistance stay immune.)"""
-from kernel import Atom, H, NEED, OFFER, Range, Row, WATCH, answer, frame, ts_of
+from kernel import (Atom, Exact, H, NEED, OFFER, Range, Row, SELF, WATCH,
+                    answer, frame, observe, ts_of)
 
 TAG = b"sync.index"                      # the namespace claim; no wire fact carries it yet
 
@@ -157,16 +156,21 @@ class Treap:
             else: t = stack.pop(); out.append(t.k); t = t.r
         return out
 
-# SHAPE — no wire fact: the shape here is the reserved need this module answers
-# and the 40-byte reconciliation key it answers over.
+# SHAPE — the validated marker projected by every replicating family, the
+# matching Watch used by sync.need, the reserved summary need this module
+# answers, and the 40-byte reconciliation key it answers over.
+LEAF_ROLE, LEAF_SCOPE = b"leaf", b"sync"
+sync_leaf = lambda: Atom(OFFER, LEAF_ROLE, LEAF_SCOPE, SELF)
+sync_leaf_need = lambda fid: Atom(NEED, LEAF_ROLE, LEAF_SCOPE, Exact(fid), effect=WATCH)
+is_sync_leaf_row = lambda row: row.atom == Atom(OFFER, LEAF_ROLE, LEAF_SCOPE, Exact(row.owner))
 SUM_ROLE, _SUM = b"\x00summary", b"\x00sum"
 CLOSURE_CAP = 4096                       # generous safety valve on unique closure ids per summary answer
 _kb = lambda ts, fid: ts.to_bytes(8, "big") + fid            # (ts, fid) -> the 40-byte reconciliation key
 summary_need = lambda lo, hi, floor=b"": Atom(NEED, SUM_ROLE, b"sync", Range(lo, hi), floor, effect=WATCH)
 
-# EXTRACT — nothing to extract: the index is pure register state, never a leaf.
+# EXTRACT — nothing to extract: the index is pure register state, never a fact.
 
-# PROJECT — none: the register is written by the settle hook below and read
+# PROJECT — none: the register is written by the marker observer below and read
 # through the summary answerer, not by a projector of its own.
 
 # COMMANDS — the writes. The register: one dict at scope b"sync", shared by
@@ -176,19 +180,18 @@ summary_need = lambda lo, hi, floor=b"": Atom(NEED, SUM_ROLE, b"sync", Range(lo,
 def _reg(node):
     return node.regs.setdefault(b"sync", {"tree": Treap(), "leaves": set(), "ver": 0, "memo": {}})
 
-# The opt-in hook, aliased verbatim by each replicating family: fold this
-# fact's leaf membership into the shared treap. A fact is a leaf iff durable,
-# shareable, and Valid — Suppressed is terminal (the kernel purges the husk),
-# so deletions reconcile through what DOES replicate: the deletion fact is a
-# durable leaf, and a laggard peer re-shipping the purged fact costs one
-# admission that re-derives Suppressed and dies on arrival.
+# Fold validated leaf-marker deltas into the shared treap. A fact is a leaf iff
+# it is durable and its projector currently publishes exactly leaf@sync/SELF.
+# Suppressed is terminal (the kernel purges the husk), so deletions reconcile
+# through what DOES replicate: the deletion fact is a durable leaf, and a
+# laggard peer re-shipping the purged fact costs one admission that re-derives
+# Suppressed and dies on arrival.
 # Its leaf hash is a constant per fid (fid/ts/bytes are all fixed), so
 # membership is the only thing that changes; the fid set detects the no-op so
-# a re-promotion neither re-hashes nor spuriously bumps ver.
-def settle(node, fid, f, verdict):
+# a re-settlement neither re-hashes nor spuriously bumps ver.
+def _observe_leaf(node, fid, f, old, new):
     reg = _reg(node)
-    should = (fid in node.durable and verdict == "Valid"
-              and node.root.extract(f)[1])
+    should = fid in node.durable and any(is_sync_leaf_row(row) for row in new)
     if should == (fid in reg["leaves"]): return         # membership unchanged: no delta
     kb = _kb(ts_of(f), fid)
     if should:
@@ -199,6 +202,8 @@ def settle(node, fid, f, verdict):
     reg["ver"] += 1
     reg["memo"].clear()                                 # the set moved: the memoised summaries are stale
 
+observe(LEAF_ROLE, LEAF_SCOPE, _observe_leaf)
+
 # QUERIES — the `summary` answerer: my fingerprint for the range + my
 # reconciliation claims for it (a B-way equal-count split, or the range's id
 # list and its deduped dependency closure ids when the range is small), served
@@ -207,15 +212,11 @@ def settle(node, fid, f, verdict):
 def summary(node, n):
     reg = _reg(node); lo, hi = n.target; floor = n.value or b""
     if floor > lo: lo = floor            # clip the range to the window floor
-    # A summary is a pure function of the leaf set + (windowed only) the durable
-    # closure graph, so the memo lives while the set holds still — a peer that
-    # re-opens the same round every quiescence answers from it instead of
-    # re-fingerprinting. A floored entry additionally pins the durable count:
-    # a new below-floor dependency changes which closure ids ride in cids
-    # without moving any leaf.
+    # A summary is a pure function of the leaf set: closure ids are themselves
+    # marker-owning leaves below the floor. The memo therefore lives exactly
+    # while the set holds still, and the observer clears it on every change.
     cached = reg["memo"].get((lo, hi, floor))
-    if cached is not None and (not floor or cached[1] == len(node.durable)):
-        return cached[0]
+    if cached is not None: return cached
     t = reg["tree"]
     def row(a): return Row(_SUM, 0, a)
     rows = [row(Atom(OFFER, b"fp", b"sync", Range(lo, hi), t.fp(lo, hi)))]   # the prune-check fingerprint
@@ -224,20 +225,21 @@ def summary(node, n):
             ids = list(t.fids(a, b))                            # my leaves in range: always advertised (enumerate)
             if floor:                                           # a windowed round: a leaf's below-floor deps won't
                 seen = set()                                    # enumerate as leaves of their own, so they ride here
-                for d in ids: node.closure(d, seen)             # as closure ids — only the shareable, below-floor ones
-                ids += [d for d in seen if d in node.facts and _kb(ts_of(node.facts[d]), d) < floor
-                        and node.root.extract(node.facts[d])[1]]
+                for d in ids: node.closure(d, seen)             # as closure ids — only marker owners below the floor
+                ids += [d for d in seen if d in reg["leaves"]
+                        and _kb(ts_of(node.facts[d]), d) < floor]
             blob = frame(*ids[:CLOSURE_CAP])                    # full round (floor==b""): leaves only — none below b""
             return row(Atom(OFFER, b"cids", b"sync", Range(a, b), blob))
         return row(Atom(OFFER, b"cfp", b"sync", Range(a, b), t.fp(a, b)))
     rows += [claim(lo, hi)] if t.small(lo, hi) else [claim(a, b) for a, b in t.parts(lo, hi)]
-    reg["memo"][(lo, hi, floor)] = (rows, len(node.durable))
+    reg["memo"][(lo, hi, floor)] = rows
     return rows
 
 answer(SUM_ROLE, summary)                # claim the reserved role: the engine now asks this module
 
 def tree(node): return _reg(node)["tree"]
 def ver(node): return _reg(node)["ver"]
+def contains(node, fid): return fid in _reg(node)["leaves"]
 
 # CLI — no verbs.
 CLI = {}

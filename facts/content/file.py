@@ -49,9 +49,9 @@ def file(workspace_id, message_id, file_id, root, blob_bytes, total_slices,
                 Atom(OFFER, b"file_mime", file_id, Exact(root), mime_type))
 
 
-# EXTRACT — durable and shared; attachment descriptors reconcile like messages.
-def extract(f): return True, True
-from facts.sync.index import settle      # opt in: these facts replicate
+# EXTRACT — content-pure durability.
+def extract(f): return True
+from facts.sync.index import sync_leaf
 
 
 # CHECK — exact SHAPE, scalar widths, geometry, text, and content-instance id.
@@ -101,7 +101,8 @@ def project(f, ctx):
     authors = {row[2].value for row in by(ctx, b"posted")}
     if not signer & {members[a] for a in authors if a in members}: return Out("Invalid")
     return Out(offers=tuple(a for a in f.atoms
-                            if a.kind == OFFER and a.role in PROJECTED_ROLES))
+                            if a.kind == OFFER and a.role in PROJECTED_ROLES)
+                       + (sync_leaf(),))
 
 
 # COMMANDS — read and prove the complete source before admitting any graph fact.

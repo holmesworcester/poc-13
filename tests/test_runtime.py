@@ -10,6 +10,17 @@ from facts import ROOT
 from facts.outbox.send import send
 from runtime import cycle, outbox, pump
 
+def _shared_fact(node, n):
+    """Admit one intrinsically valid durable fact whose projector emits sync_leaf."""
+    import crypto as _c
+    from facts.auth.signature import signature
+    sk, pk = _c.ed25519_keygen(bytes([n]) * 32)
+    target = bytes([n + 16]) * 32
+    item = signature(b"w", pk, target, _c.ed25519_sign(sk, target), n)
+    blob = encode(item)
+    fid = node.admit(blob); node.run()
+    return fid, blob
+
 def test_cycle_stages_then_reaps():
     n = Node(ROOT)
     s1, s2 = send(b"peer", b"hello", 1), send(b"peer", b"world", 2)
@@ -45,15 +56,14 @@ def test_pump_dedup_ships_each_fid_once_per_connection():
     and the re-asking owner still fires (its need reaps)."""
     from facts.sync.need import need
     n = Node(ROOT)
-    f1, f2, f3 = b"\x01" * 32, b"\x02" * 32, b"\x03" * 32
-    for f, b in ((f1, b"A"), (f2, b"B"), (f3, b"C")): n.durable[f] = b   # stand-in durable bodies
+    (f1, b1), (f2, b2), (f3, b3) = (_shared_fact(n, i) for i in (1, 2, 3))
     cid, sent = b"conn1", {}
     cycle(n, [encode(need(cid, [f1, f2])), encode(need(cid, [f2, f3]))], 1000, ())  # two overlapping needs
     def run(sink):
         return pump(n, lambda c: (c, b"sec"),
                     lambda c, a, s, inn: (sink.extend(inn), len(inn))[1], set(), sent)
     got = []; fired = run(got)
-    assert sorted(got) == [b"A", b"B", b"C"]            # f2 shipped once despite two needs naming it
+    assert sorted(got) == sorted([b1, b2, b3])          # f2 shipped once despite two needs naming it
     assert sent[cid] == {f1, f2, f3} and len(fired) == 2
     got2 = []; fired2 = run(got2)                       # a re-descend re-pumps the same rows
     assert got2 == [] and len(fired2) == 2              # nothing re-ships; owners still fire (reap)
@@ -64,16 +74,15 @@ def test_pump_overflow_tail_is_unmarked_and_reships():
     heal a bounded outbox needs, without re-shipping the prefix."""
     from facts.sync.need import need
     n = Node(ROOT)
-    f1, f2 = b"\x01" * 32, b"\x02" * 32
-    n.durable[f1], n.durable[f2] = b"A", b"B"
+    (f1, b1), (f2, b2) = (_shared_fact(n, i) for i in (1, 2))
     cid, sent, cap = b"c", {}, [1]
     cycle(n, [encode(need(cid, [f1, f2]))], 1000, ())
     def deliver(c, a, s, inn, got): k = min(cap[0], len(inn)); got.extend(inn[:k]); return k
     g1 = []; fired1 = pump(n, lambda c: (c, b"sec"), lambda *a: deliver(*a, g1), set(), sent)
-    assert g1 == [b"A"] and sent[cid] == {f1} and len(fired1) == 1   # only the prefix is marked (tail unsent)
+    assert g1 == [b1] and sent[cid] == {f1} and len(fired1) == 1   # only the prefix is marked (tail unsent)
     cap[0] = 9; g2 = []
     fired2 = pump(n, lambda c: (c, b"sec"), lambda *a: deliver(*a, g2), set(), sent)
-    assert g2 == [b"B"] and sent[cid] == {f1, f2} and len(fired2) == 1  # unmarked tail re-ships, never the prefix
+    assert g2 == [b2] and sent[cid] == {f1, f2} and len(fired2) == 1  # unmarked tail re-ships, never the prefix
 
 def test_flush_forgets_purged_fids():
     """Purge undoes "on disk": the fid must leave the flushed set, or its

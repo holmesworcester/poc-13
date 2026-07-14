@@ -1,6 +1,6 @@
 """facts/auth/endpoint.py — this node's static X25519 endpoint keypair as a
 fact (poc-10 tag 128): the secret, and its public key which is the node's
-endpoint id. Durable so the endpoint survives restart, NOT shareable — the
+endpoint id. Durable so the endpoint survives restart, but marker-free — the
 static secret is the key every sealed connection request seals to and every
 sealed connection response is sealed back to, so it must never leave the node.
 keygen admits one and refuses a second: the endpoint is single and stable.
@@ -18,8 +18,8 @@ def endpoint(esk, epk, t):
                 Atom(OFFER, b"esk", b"local", Exact(epk), esk),   # keyed by its own pub
                 Atom(OFFER, b"endpoint", b"local", Exact(epk)))   # presence: "epk is me"
 
-# EXTRACT — content-pure: (durable, LocalOnly — never shareable).
-def extract(f): return True, False
+# EXTRACT — content-pure durability. The projector emits no sync marker.
+def extract(f): return True
 
 # CHECK — self-verification at the gate: the secret must derive the pub it names.
 def check(f):

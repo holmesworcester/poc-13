@@ -23,7 +23,7 @@ def _node():
 def _wire(dst, src, tag):                # move every fact of a type from src to dst, admit
     moved = []
     for fid, f in list(src.facts.items()):
-        if f.type_tag == tag and fid in src.durable or (f.type_tag == tag and not src.root.extract(f)[0]):
+        if f.type_tag == tag:
             if dst.admit(src.durable.get(fid) or encode(f)): moved.append(fid)
     dst.run(); return moved
 

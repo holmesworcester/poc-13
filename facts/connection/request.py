@@ -65,8 +65,8 @@ def request(env, to_ep, init_eph_pk, t):
                 Atom(NEED, b"answered", SC, SELF, effect=WATCH),                 # slow the redial once answered
                 Atom(NEED, b"closed", SC, SELF, effect=SUPPRESS))
 
-# EXTRACT — content-pure: (durable, LocalOnly). First contact is never synced.
-def extract(f): return True, False
+# EXTRACT — content-pure durability. First contact projects no sync marker.
+def extract(f): return True
 
 # CHECK — structural only: the envelope parses to the right widths (no context).
 def check(f):

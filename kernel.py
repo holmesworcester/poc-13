@@ -21,10 +21,10 @@ The story of one fact:
                 gate (a matched Suppress kills, an unmet Require parks),
                 else hand the fact and the validated answers to its needs
                 to its family's project(), which returns the verdict.
-  4. _settle()  make the verdict real: memo it, run the family settle()
-                hook, publish or withdraw the fact's offers, wake every
-                fact those changed offers answer (back to step 3), and on
-                a terminal verdict erase the fact whole (_evict).
+  4. _settle()  make the verdict real: memo it, atomically publish or
+                withdraw the fact's offers, notify registered observers,
+                wake every fact those changed offers answer (back to step
+                3), and on a terminal verdict erase the fact whole (_evict).
   5. watched()  the one door out: the host reads validated offers at keys
                 it watches, does the external work, and admits new facts
                 reporting what happened.
@@ -32,13 +32,13 @@ The story of one fact:
 Who owns what: the kernel owns identity, admission, matching, and the turn
 loop — and knows no domain. Fact families under facts/ own all judgment
 (project()), plus two seams for family state the kernel never reads:
-settle() (fold every verdict into a register under regs) and answer()
-(serve a reserved role from a family index). The Store owns existence only
-— durable atoms, "who offers at this key" — never standing. The host owns
-time and effects: it feeds turn(), drains watched(), performs the I/O; it
-never writes engine state. Projectors ARE the routers: the kernel runs one
-root projector, and a Router is just a projector that dispatches on the
-next type-tag segment; extraction routes through the same tree.
+observe() (fold validated offer deltas into a register under regs) and
+answer() (serve a reserved role from a family index). The Store owns
+existence only — durable atoms, "who offers at this key" — never standing.
+The host owns time and effects: it feeds turn(), drains watched(), performs
+the I/O; it never writes engine state. Projectors ARE the routers: the kernel
+runs one root projector, and a Router is just a projector that dispatches on
+the next type-tag segment; extraction routes through the same tree.
 
 Derived state (validity memo, clean twin, frontier) is rebuildable from the
 durable fact set alone. There is no replay: a stepped fact's needs fault
@@ -214,17 +214,21 @@ _ALL_KEY = (ALL_ROLE, b"store", all_need.target)
 
 RESERVED = {RES_ROLE, ALL_ROLE}          # grows via answer(): registration is the census
 ANSWERERS = {}                           # reserved role -> fn(node, need) -> ctx rows
+OBSERVERS = {}                           # (role, scope) -> [fn(node, owner, fact, old, new)]
 
 def answer(role, fn):                    # a family claims a reserved role at import time
     assert role[:1] == b"\x00" and role not in (RES_ROLE, ALL_ROLE)
     ANSWERERS[role] = fn; RESERVED.add(role)
 
+def observe(role, scope, fn):             # a family indexes one validated offer address
+    OBSERVERS.setdefault((role, scope), []).append(fn)
+
 class Router:
     """A projector that dispatches on one type-tag segment and delegates whole.
     Routers narrow inputs and cannot widen a delegate's context; delegation
     must equal the delegate run alone (routing neutrality). Extraction —
-    content-pure, decided at admission — routes through the same tree.
-    Unknown tags are Durable + LocalOnly + Parked."""
+    content-pure durability, decided at admission — routes through the same
+    tree. Unknown tags are Durable + Parked and project no offers."""
 
     def __init__(self, routes, depth=0): self.routes, self.depth = routes, depth
 
@@ -236,9 +240,9 @@ class Router:
         c = self.routes.get(segs[self.depth]) if len(segs) > self.depth else None
         return c.resolve(segs) if isinstance(c, Router) else c
 
-    def extract(self, f):                # -> (durable, shareable)
+    def extract(self, f):                # -> durable
         c = self._child(f)
-        return c.extract(f) if c else (True, False)
+        return c.extract(f) if c else True
 
     def project(self, f, ctx):           # -> Out | None (None: no family, park)
         c = self._child(f)
@@ -387,7 +391,7 @@ class Node:
         self.memo, self.clean = {}, {}       # id -> verdict ; (role,scope) -> Bucket: the clean twin
         self.owned = {}                      # id -> its clean rows, for owner-scoped replacement
         self.regs = {}                       # scope -> one shared mutable register per family group, written
-                                             # by settle() hooks; volatile derived state, rebuilt by replay
+                                             # by offer observers; volatile derived state, rebuilt by replay
         self.checked = set()                 # need keys already faulted: existence is monotone
                                              # (rows enter the store only via resident facts)
         # Turn machinery and host bookkeeping.
@@ -408,7 +412,7 @@ class Node:
         if fid in self.facts: return fid     # idempotent admission
         chk = None if checked else getattr(self.root.resolve(f.type_tag.split(b".")), "check", None)
         if chk and not chk(f): return None   # per-family self-check: falsy = inert miss
-        durable, _shareable = self.root.extract(f)
+        durable = self.root.extract(f)
         self.facts[fid], self.memo[fid] = f, UNKNOWN
         if durable: self.durable[fid] = b
         for a in f.atoms:
@@ -463,7 +467,6 @@ class Node:
         self._fault(ns)
         # Precedence (ratified): Suppress > Require(Park) > Resolve. Reserved
         # index needs never reach here — decode pins a NUL role to a WATCH need.
-        fam = self.root.resolve(f.type_tag.split(b"."))
         if any(self.valid_offers(n) for n in ns if n.effect == SUPPRESS):
             out = Out(SUPPRESSED)
         elif any(not self.valid_offers(n) for n in ns if n.effect == REQUIRE):
@@ -471,7 +474,7 @@ class Node:
         else:                            # Context<Validated>; Watch never gates. Reserved index needs are
             ctx = {n: self._answer(n) for n in ns if n.effect in (REQUIRE, WATCH)}   # answered from the engine
             out = self.root.project(f, ctx) or Out(PARKED)
-        self._settle(fid, f, out, fam)
+        self._settle(fid, f, out)
 
     def _fault(self, ns):
         """The fault leg: each need key is checked against the store once (a
@@ -507,15 +510,10 @@ class Node:
         for fid in self.facts: self._enqueue(fid)     # fact, so their keys re-check the store
 
     # --- Making a verdict real (_settle / _evict) ------------------------------
-    # This records standing, replaces validated offers, wakes dependents, and evicts terminals.
-    def _settle(self, fid, f, out, fam=None):
+    # This records standing, replaces validated offers, notifies observers,
+    # wakes dependents, and evicts terminals.
+    def _settle(self, fid, f, out):
         self.memo[fid] = out.verdict
-        # The family lifecycle hook: a family that declares settle() sees every
-        # verdict its fact settles to — including Suppressed and Parked, which
-        # never reach project() — and maintains derived group state from it
-        # (e.g. sync's leaf membership, whose minus side needs the verdict).
-        if fam is not None and (hook := getattr(fam, "settle", None)):
-            hook(self, fid, f, out.verdict)
         # Owner-scoped replacement: pull this fact's current rows from their
         # buckets, add the new ones — old and new output are never both visible.
         old = self.owned.pop(fid, [])
@@ -524,6 +522,16 @@ class Node:
                if out.verdict == VALID else [])
         for r in new: self.clean.setdefault((r.atom.role, r.atom.scope), Bucket()).add(r)
         if new: self.owned[fid] = new
+        # Family indexes subscribe to validated offer addresses, not fact tags
+        # or verdicts. This runs after atomic clean replacement but before wake
+        # fanout, so a consumer woken by the delta sees the matching register.
+        addresses = {(r.atom.role, r.atom.scope) for r in old + new}
+        for address in addresses:
+            before = tuple(r for r in old if (r.atom.role, r.atom.scope) == address)
+            after = tuple(r for r in new if (r.atom.role, r.atom.scope) == address)
+            if set(before) != set(after):
+                for hook in OBSERVERS.get(address, ()):
+                    hook(self, fid, f, before, after)
         for r in set(old) ^ set(new):    # wake fanout on every changed offer (never re-wake self)
             self._wake(r.atom, fid)
         if out.verdict in (REAP, SUPPRESSED): self._evict(fid, f, out.verdict, old)

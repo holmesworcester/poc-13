@@ -54,9 +54,9 @@ design.
   families, not engine primitives. Time and wire-flush reports are transient
   host inputs to the turn. The kernel owns identity, admission, matching, and
   the turn loop.
-- A generic `settle()` hook and reserved-role `answer()` registry let a family
-  maintain a rebuildable index without teaching the kernel its semantics.
-  Sync uses this to own its treap and reconciliation state in its own register.
+- Generic projected-offer `observe()` and reserved-role `answer()` registries
+  let a family maintain and query a rebuildable index without teaching the
+  kernel its semantics. Sync uses them to own its treap in its own register.
 - Projectors ARE the routers: the kernel runs one root projector, and a
   router is just a projector that dispatches on type-tag segments.
 - Every fact family is one file with one fixed six-part contract: SHAPE,
@@ -118,23 +118,25 @@ A fact never embeds its own `FactId`. Hash references in values or targets
 must name already-existing facts, so the hash-reference graph is acyclic by
 construction.
 
-Every durable/shareable fact carries one canonical timestamp atom
+Every durable fact whose projector can emit a sync-leaf marker carries one canonical timestamp atom
 `Offer(role="ts", scope=family_scope, target=SELF, value=u64le)` — the
 reconciliation sort key and a retention input, never an authority proof.
 A fact without one promotes rows at `ts = 0`.
 
 ## Extraction and Durability
 
-Extraction is content-pure — `(durable, shareable)` from the fact's own
-bytes only — decided at admission, never by validation, and routed through
-the same router tree as projection. Durable facts flush before they can be
-forgotten; volatile facts vanish on restart. Unknown tags default to
-Durable + LocalOnly + Parked.
+Extraction is the content-pure durability decision from the fact's own bytes,
+made at admission before validation and routed through the same router tree as
+projection. Durable facts flush before they can be forgotten; volatile facts
+vanish on restart. Unknown tags default to Durable + Parked and project no
+offers.
 
-`shareable` controls membership in sync's egress set. The daemon does not yet
-apply the symmetric check to peer ingress, so connected peers are currently
-trusted not to send LocalOnly families. Enforcing that provenance rule at the
-wire inbox is part of the remaining trust-boundary work.
+Replication is not extraction policy. A Valid projector includes the derived
+`leaf@sync/SELF` offer returned by `sync_leaf()` when its owner may enter sync
+egress. The sync family observes only that validated clean offer. The daemon
+does not yet apply a separate family-level permission to peer ingress, so
+connected peers are currently trusted not to send local-only families.
+Enforcing that provenance rule at the wire inbox remains trust-boundary work.
 
 ## Runtime State
 
@@ -159,10 +161,11 @@ Ephemeral, all rebuilt from demand and promotion:
   engine-owned provenance);
 - owner-to-clean-row bookkeeping, checked store keys, and the bounded FIFO
   frontier with its membership set; and
-- `Node.regs`, one rebuildable register per family group. A `settle()` hook
-  writes a register, and a registered `answer()` function can expose its index
-  through a reserved Watch need. Sync's `b"sync"` register holds its treap,
-  leaf membership, summary memo, and monotonic version counter.
+- `Node.regs`, one rebuildable register per family group. A registered
+  `observe()` function folds validated offer deltas into a register, and a
+  registered `answer()` function can expose its index through a reserved Watch
+  need. Sync's `b"sync"` register holds its treap, leaf membership, summary
+  memo, and monotonic version counter.
 
 Validated offers are the application read model. Registers are derived family
 indexes, not a second authority surface, and are never persisted.
@@ -222,11 +225,11 @@ of its need keys once against the persisted relation and admits the cold
 owners (checked admission — the bytes passed the gate once); then check
 suppressors, then requires, against the clean twin; build `Context<Validated>` from matching validated offers; call the
 routed projector `project(fact, ctx) -> Out(verdict, offers)`. Promotion records
-the verdict, calls the family's optional `settle()` hook, and replaces the
-owner's clean output atomically, so old and new offers are never both visible.
-The kernel restamps promoted offers with engine provenance and wakes every
-resident owner whose asserted needs match a changed offer. `Reap` and
-`Suppressed` are terminal: after clean replacement and settle notification,
+the verdict and replaces the owner's clean output atomically, so old and new
+offers are never both visible. The kernel restamps promoted offers with engine
+provenance, notifies registered observers of changed offer addresses, and wakes
+every resident owner whose asserted needs match a changed offer. `Reap` and
+`Suppressed` are terminal: after clean replacement and observer notification,
 the engine removes the resident body, asserted rows, memo, durable bytes, and
 SQLite rows.
 
@@ -324,8 +327,8 @@ routes through the same tree, and so does the dotted api/CLI namespace
 (`content.message.send` resolves through the same routes as the
 `content.message` tag).
 Routers narrow inputs and cannot widen a delegate's context; delegation
-must equal the delegate run alone. Unknown tags fall out as
-Durable + LocalOnly + Parked with no special casing.
+must equal the delegate run alone. Unknown tags fall out as Durable + Parked
+with no projected offers and no special casing.
 
 ## The Clock and the Flush Report
 
@@ -396,15 +399,16 @@ parts (plus an optional CHECK between EXTRACT and PROJECT), always in this
 order, enforced by a source-contract test:
 
 - **SHAPE** — constructors returning canonical `Fact`s. The only place
-  atoms are chosen. This is the whole codec story: the kernel's one
+  asserted input atoms are chosen. This is the whole codec story: the kernel's one
   canonical encoding covers every family, so there are no per-family byte
   formats. A family that wants a private format inside a value is a signal
   the atom vocabulary is missing something.
-- **EXTRACT** — content-pure `(durable, shareable)`.
+- **EXTRACT** — content-pure durability (`True` is durable, `False` volatile).
 - **CHECK** — optional, self-verification at the admission gate; pure
   function of the fact's own bytes; runs once, never on replay.
 - **PROJECT** — the only place the family's meaning lives: validity and
-  promoted offers. Pure function of `(fact, ctx)`; never touches the node.
+  promoted offers, including any derived sync marker. Pure function of
+  `(fact, ctx)`; never touches the node.
 - **COMMANDS** — local authoring: `(node, params) -> fact id`. Build a
   fact, admit it, stop. Commands may call queries to choose parameters and
   write only through admission. Anything multi-step or retryable is more
@@ -512,25 +516,27 @@ implemented family.
 Sync reconciles complete facts, never individual atoms, and its set and
 protocol live in `facts/sync/`. The kernel contributes two generic seams:
 
-- A family with `settle(node, fid, fact, verdict)` sees every verdict for its
-  facts, including `Parked` and `Suppressed`, and can fold that transition into
-  its group register.
+- `observe(role, scope, fn)` lets a family fold validated clean-offer deltas at
+  one address into its group register.
 - `answer(role, fn)` registers a handler for a reserved Watch role and injects
   the handler's rows into projector context like ordinary validated offers.
 
-A replicating family aliases `facts.sync.index.settle`. That hook maintains the
-`b"sync"` register with a treap, a leaf-membership set, a summary memo, and a
-monotonic `ver` counter. A fact is a leaf exactly while it is durable,
-shareable, and `Valid`. The decision to replicate is therefore owned by each
-fact family, while peers running the same family code derive the same set.
+A replicating projector includes `facts.sync.index.sync_leaf()` in its Valid
+`Out.offers`. This creates the validated `leaf@sync/SELF` row whose engine-owned
+provenance names the fact and timestamp. The index observer folds marker deltas
+into the `b"sync"` register's treap, leaf-membership set, summary memo, and
+monotonic `ver` counter. A fact is a leaf exactly while it is durable and its
+projector publishes that marker. Raw asserted marker atoms have no effect. The
+decision to replicate is therefore owned by each projector, while peers running
+the same family code derive the same set.
 
-Suppression removes the target leaf before terminal eviction. Deletion travels
-because the deletion fact itself is a durable, shareable, valid leaf; wherever
-it validates, its `dead` offer purges matching targets. A laggard may re-send a
-purged target, but the durable suppressor makes that admission settle
-`Suppressed` and disappear again. Hydration rebuilds the register by stepping
-durable facts through the ordinary promotion path, with no separate sync replay
-feed.
+Suppression's clean replacement retracts the target marker before terminal
+eviction. Deletion travels because the deletion fact itself is durable, Valid,
+and projects a marker; wherever it validates, its `dead` offer purges matching
+targets. A laggard may re-send a purged target, but the durable suppressor makes
+that admission settle `Suppressed` and disappear again. Hydration rebuilds the
+register by stepping durable facts through the ordinary projection path, with
+no separate sync replay feed.
 
 Each reconciliation key is `ts‖FactId`, where `ts` is 8-byte big-endian for
 ordering. Its leaf hash is `H(FactId ‖ ts ‖ H(canonical_bytes))`; the treap stores
@@ -566,23 +572,26 @@ matched subranges prune together and mismatch depth is `O(log_B n)`.
 
 Windowing is the domain's lower bound: the root claim covers `[floor, HI)`, and
 every subrange stays inside it. The daemon's active tier pair uses `floor=b""`,
-so its domain is the complete resident durable/shareable set. A nonempty floor
+so its domain is the complete resident marker-owning set. A nonempty floor
 is the reconciliation counterpart of a retention horizon; enforcement is not
 implemented.
 
 Dependency-awareness rides in id lists. For a windowed small range, the summary
 answerer expands its in-range leaves through `Node.closure()`, which computes
 Require and Suppress ancestry directly from resident asserted matches. It adds
-shareable dependencies below the floor to the listed ids, deduplicated and
-capped at 4096. A peer requests only ids that the other side advertised. Every
-received fact enters normal unchecked peer admission; the `checked=True` path
-is reserved for reconstruction from the node's own store.
+marker-owning dependencies below the floor to the listed ids, deduplicated and
+capped at 4096. A peer requests only ids that the other side advertised. The
+resulting `sync.need` Watches `leaf@sync` at every requested id and its projector
+offers only matching marker owners to the outbox, so a forged by-id request
+cannot turn a durable local-only fact into egress. Every received fact enters
+normal unchecked peer admission; the `checked=True` path is reserved for
+reconstruction from the node's own store.
 
-`compare` and `need` are volatile and unshareable, so they are absent from the
-set they reconcile and leave no reboot state. A `need` offers requested ids by
-reference at the host-watched outbox key; the pump resolves them against
-resident durable bytes at send time, and the need reaps after its wire-flush
-report. `resident@id` is answered by the kernel's durable map, while
+`compare` and `need` are volatile and project no marker, so they are absent
+from the set they reconcile and leave no reboot state. A `need` offers its
+marker-authorized requested ids by reference at the host-watched outbox key;
+the pump resolves them against resident durable bytes at send time, and the
+need reaps after its wire-flush report. `resident@id` is answered by the kernel's durable map, while
 `summary@range` is answered by the sync family. Both appear in projector
 context in the same row shape, and the kernel never reads the treap.
 
@@ -633,7 +642,7 @@ Peer sessions are facts too — the transport is a fact family, not an engine
 primitive — living in `facts/connection/`. There is no kernel change.
 
 **First contact is a sealed handshake.** A
-`connection.request` (durable, LocalOnly) is the sealed first-contact fact: its
+`connection.request` (durable, no sync marker) is the sealed first-contact fact: its
 bytes ARE its id, and its public envelope (seal version, initiator ephemeral
 X25519 key, addressed endpoint, nonce) wraps a ciphertext hiding both static
 endpoints, the transcript nonce, the dial/return addresses, an authority proof,
@@ -641,7 +650,7 @@ and a branch signature. CHECK is structural only (widths parse); decryption
 happens in PROJECT, keyed by opening secrets the fact Watches (the responder
 opens with its static endpoint secret, the initiator with its own ephemeral —
 the X25519 box is symmetric). The responder authors a `connection.connection`
-(volatile, LocalOnly; its id IS the connection id, its bytes ARE the wire
+(volatile, no sync marker; its id IS the connection id, its bytes ARE the wire
 message so both sides admit identical bytes): the plaintext carries the recomputed
 `handshake_hash` and per-session `connection_secret`, and the projector refuses
 unless it re-derives them from the transcript. Key agreement is `ee = DH(init_eph,
@@ -663,9 +672,9 @@ inviter retains as `invite_accepted`). *Membership* — reconnect after both nod
 are enrolled, with no invite — signs with the member's own key and names its
 `endpoint_shared` record; the responder verifies the signature against the
 signing key that record binds. The endpoint (X25519) is machine-wide, one per
-node and identical across every workspace (`auth.endpoint`, LocalOnly, holding
-the secret); the per-workspace binding is `auth.device`: durable and
-**shareable**, self-attested by the member's signing key,
+node and identical across every workspace (`auth.endpoint`, projecting no
+marker, holding the secret); the per-workspace binding is `auth.device`: durable and
+projecting a **sync leaf**, self-attested by the member's signing key,
 valid only if that signer is an enrolled member, publishing
 `endpoint_shared@auth = frame(endpoint, signing_pk, wid)` and an `endpoint_key`
 reverse index. So a node that joins two workspaces has two device facts carrying
@@ -676,7 +685,7 @@ so an unrecognized endpoint still connects and simply shows `anon`, matching
 Authority's stance.
 
 **Close is a death key, and forward secrecy is its verdict.** `connection.close`
-(durable, LocalOnly) offers `closed` at an id; the request, connection, and
+(durable, no sync marker) offers `closed` at an id; the request, connection, and
 ephemeral secrets each Suppress-need `closed@SELF`, so admitting a close flips
 the cluster to Suppressed — and suppression purges, so the ephemeral private
 keys leave disk and memory at the close itself, no sweep to schedule. The
@@ -686,7 +695,7 @@ must author a fresh request. `sever` closes a whole cluster (connection +
 request + both handshake ephemerals) from one connection id.
 
 **Frame bundles are ephemeral transport.** A `connection.frame` bundle is
-volatile and unshareable exactly like a sync compare — never stored, never in
+volatile and marker-free exactly like a sync compare — never stored, never in
 leaves, excluded from the reconciliation it carries. Its one value packs many
 length-framed canonical fact bytes (up to ~48 KiB of inner fact bytes per
 frame); the sync driver's shipments ride bundles instead of one fact per wire
@@ -778,7 +787,7 @@ because the Bao root and proofs commit to the carried bytes.
 
 Signed content makes the authority chain part of hydration and sync closure: a
 message feed faults the author's membership resident, and a windowed sync id
-list carries shareable authority ancestors below the floor. A detached
+list carries marker-owning authority ancestors below the floor. A detached
 signature remains an independent fact when its target is suppressed unless it
 also carries the applicable death key.
 
@@ -793,8 +802,9 @@ also carries the applicable death key.
 - **Workspace sync lanes** — one global `b"sync"` register currently feeds
   every peer. Per-workspace authorization and coverage isolation are required
   before unrelated workspace sets can safely share a node.
-- **LocalOnly ingress enforcement** — shareability excludes facts from sync
-  egress, but the peer inbox does not yet reject LocalOnly types by provenance.
+- **Local-only ingress enforcement** — absence of a projected sync marker
+  excludes facts from egress, but the peer inbox does not yet enforce the
+  separate question of which families may arrive from the wire.
 - **Local-input drivers** — connection driving exists and time is a turn
   primitive; a general host-authored input family is not implemented.
 

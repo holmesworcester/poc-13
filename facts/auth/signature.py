@@ -8,7 +8,7 @@ signature is checked once at the admission gate (the
 CHECK part) over exactly the 32-byte target id: the id IS the whole canonical
 fact, so signing it covers everything. Wrong math is falsy at the gate — an
 inert miss, never a bad fact, and replay never re-verifies. Durable and
-shareable: a signature must travel with what it signs, and being a Require
+marker-emitting: a signature must travel with what it signs, and being a Require
 dep it ships automatically under dep-aware sync.
 
 A pk offer IS an authority claim ("this key signed that id"), so the fact must
@@ -28,9 +28,9 @@ def signature(workspace_id, pk, target_id, sig, t):
                 Atom(OFFER, b"pk", workspace_id, Exact(target_id), pk),
                 Atom(OFFER, b"sig", workspace_id, Exact(target_id), sig))
 
-# EXTRACT — content-pure: (durable, shareable).
-def extract(f): return True, True
-from facts.sync.index import settle      # opt in: these facts replicate (one line is the whole choice)
+# EXTRACT — content-pure durability.
+def extract(f): return True
+from facts.sync.index import sync_leaf
 
 # CHECK — optional self-verification at the admission gate: a pure function
 # of the fact's own bytes, run once and never on replay.
@@ -52,7 +52,7 @@ def check(f):                            # verify over the exact target a Requir
 # PROJECT — the only place this family's meaning lives.
 def project(f, ctx):                     # publish only the canonical signer pk and sig
     parts = _canonical(f)
-    return Out(offers=parts[:2]) if parts else Out("Invalid")
+    return Out(offers=parts[:2] + (sync_leaf(),)) if parts else Out("Invalid")
 # a fact Requires b"pk" at its own id to pull WHO signed it into ctx, then a
 # projector value-compares that pk against the pk its authority chain blessed.
 

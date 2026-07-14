@@ -22,15 +22,15 @@ def device_invite(workspace_id, device_pk, t):
                 Atom(NEED, b"key", workspace_id, Exact(workspace_id), effect=WATCH),
                 Atom(OFFER, b"device_invite", workspace_id, SELF, device_pk))
 
-# EXTRACT — content-pure: (durable, shareable).
-def extract(f): return True, True
-from facts.sync.index import settle      # opt in: these facts replicate (one line is the whole choice)
+# EXTRACT — content-pure durability.
+def extract(f): return True
+from facts.sync.index import sync_leaf
 
 # PROJECT — the only place this family's meaning lives.
 def project(f, ctx):                 # the inviter's signer key must be root or a member key
     blessed = {r[2].value for r in by(ctx, b"root") + by(ctx, b"key")}
     if not blessed & {r[2].value for r in by(ctx, b"pk")}: return Out("Invalid")
-    return Out(offers=tuple(a for a in f.atoms if a.role == b"device_invite"))
+    return Out(offers=tuple(a for a in f.atoms if a.role == b"device_invite") + (sync_leaf(),))
 
 # COMMANDS — build a fact, admit it, stop. Returns (invite_id, invite_secret).
 def invite(node, workspace_id, t):

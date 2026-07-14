@@ -3,7 +3,7 @@ The fact id is the channel id: names are display data, never routing keys.
 Messages Require the validated `channel` offer at this id, so an arbitrary
 label cannot create a feed and a message arriving before its channel parks
 until the channel's workspace-backed identity arrives. Channels are durable,
-shareable structural state and are pulled whole by channel queries. Any
+sync-leaf structural state and are pulled whole by channel queries. Any
 workspace member may create one; its signature travels with the channel."""
 from kernel import (Atom, Exact, NEED, OFFER, Out, REQUIRE, SELF, encode,
                     fact, now, ts_atom, ts_of)
@@ -28,10 +28,9 @@ def channel(workspace_id, name, t):
                 Atom(NEED, b"key", workspace_id, Exact(workspace_id), effect=REQUIRE),
                 Atom(OFFER, b"channel", workspace_id, SELF, name))
 
-# EXTRACT — content-pure: (durable, shareable). Channels are replicated
-# structural state, not local aliases.
-def extract(f): return True, True
-from facts.sync.index import settle      # opt in: these facts replicate (one line is the whole choice)
+# EXTRACT — content-pure durability.
+def extract(f): return True
+from facts.sync.index import sync_leaf
 
 # PROJECT — accept exactly SHAPE and a useful bounded name.
 def project(f, ctx):
@@ -43,7 +42,7 @@ def project(f, ctx):
         return Out("Invalid")
     signer, members = signature.blessed(ctx)
     if not signer & set(members.values()): return Out("Invalid")
-    return Out(offers=(row,))
+    return Out(offers=(row, sync_leaf()))
 
 # COMMANDS — names are unique at the local authoring boundary. Concurrent
 # same-name channels remain distinct facts and resolve as ambiguous by id/name.

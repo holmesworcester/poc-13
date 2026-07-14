@@ -56,7 +56,7 @@ def cadence(cid, floor, period_ms, mode=ANCHOR):
                 Atom(NEED, b"closed", b"conn", Exact(cid), effect=SUPPRESS))
 
 # EXTRACT — volatile session state.
-def extract(f): return False, False
+def extract(f): return False
 
 # PROJECT — hold the alarm until due; when due, the anchor opens unconditionally and
 # the gated tier opens iff my split CHANGED since my last opener (`sent`) AND has

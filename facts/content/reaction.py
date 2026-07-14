@@ -23,9 +23,9 @@ def reaction(workspace_id, message_id, reactor_id, emoji, t):
                 Atom(OFFER, b"reaction", workspace_id, Exact(message_id),
                      frame(reactor_id, emoji)))
 
-# EXTRACT — content-pure: (durable, shareable).
-def extract(f): return True, True
-from facts.sync.index import settle      # opt in: these facts replicate (one line is the whole choice)
+# EXTRACT — content-pure durability.
+def extract(f): return True
+from facts.sync.index import sync_leaf
 
 # PROJECT — the only place this family's meaning lives.
 def project(f, ctx):
@@ -37,7 +37,7 @@ def project(f, ctx):
         return Out("Invalid")
     signer, members = signature.blessed(ctx)
     if members.get(reactor_id) not in signer: return Out("Invalid")   # the reactor signed it
-    return Out(offers=(r,))
+    return Out(offers=(r, sync_leaf()))
 
 # COMMANDS — build a fact, admit it, stop.
 def react(node, workspace_id, message_id, emoji, t):

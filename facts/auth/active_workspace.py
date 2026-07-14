@@ -1,7 +1,7 @@
 """facts/auth/active_workspace.py — local-only workspace selection for the CLI.
 This is UI state, not shared authority: it names which workspace a verb uses
 when `wid=` is omitted. Durable so the choice survives a daemon restart, but
-LocalOnly so it never syncs and never touches the kernel's authority story. It
+marker-free so it never syncs and never touches the kernel's authority story. It
 Requires the workspace it names, so a selection self-heals — a workspace that is
 gone parks its selection and the reader falls back to the sole/only workspace.
 The latest selection wins by the ordinary (ts, owner) read-side fold."""
@@ -18,8 +18,8 @@ def active_workspace(workspace_id, t):
                 Atom(NEED, b"workspace", b"auth", Exact(workspace_id), effect=REQUIRE),
                 Atom(OFFER, b"active_workspace", b"local", Exact(KEY), workspace_id))
 
-# EXTRACT — content-pure: durable but LocalOnly. The selection never travels.
-def extract(f): return True, False
+# EXTRACT — content-pure durability. The projector emits no sync marker.
+def extract(f): return True
 
 # PROJECT — accept exactly SHAPE (the workspace Require gates validity upstream).
 def project(f, ctx):
