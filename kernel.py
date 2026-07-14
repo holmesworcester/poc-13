@@ -301,6 +301,8 @@ class Bucket:
         return iter([r for rs in self.exact.values() for r in rs] + self.ranges)
     def __len__(self):
         return sum(len(rs) for rs in self.exact.values()) + len(self.ranges)
+    def __bool__(self):                  # truthiness is presence, O(1) — `b.match(t) if b else []`
+        return bool(self.exact) or bool(self.ranges)   # must never pay the linear count
 
 # --- The engine --------------------------------------------------------------------
 class Node:
