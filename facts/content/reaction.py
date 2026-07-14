@@ -1,8 +1,8 @@
 """facts/content/reaction.py — an emoji on a message. Requires the target's
 `posted` offer: Require gates on VALID offers, so a missing message parks the
-reaction and a suppressed one un-validates it naturally. It also carries the
+reaction and a deleted one un-validates it naturally. It also carries the
 target's death key (suppression closure, DESIGN.md Need Effects), so it dies
-with the message — Suppressed and purgeable — rather than merely parking."""
+with the message — Suppressed, purged with it — rather than merely parking."""
 from kernel import (Atom, Exact, NEED, OFFER, Out, REQUIRE, SUPPRESS, encode,
                     fact, now, ts_atom)
 from facts.store import hydrate

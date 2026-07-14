@@ -75,9 +75,35 @@ def test_pump_overflow_tail_is_unmarked_and_reships():
     fired2 = pump(n, lambda c: (c, b"sec"), lambda *a: deliver(*a, g2), set(), sent)
     assert g2 == [b"B"] and sent[cid] == {f1, f2} and len(fired2) == 1  # unmarked tail re-ships, never the prefix
 
+def test_flush_forgets_purged_fids():
+    """Purge undoes "on disk": the fid must leave the flushed set, or its
+    re-arrival hides behind the stale mark and every fact admitted earlier in
+    the same cycle silently misses the disk (the tail scan stops at it)."""
+    from kernel import Store
+    from runtime import flush
+    from facts.content.message import message
+    from facts.content.message_deletion import deletion
+    wid = b"\x07" * 32
+    store, flushed = Store(), set()
+    n = Node(ROOT, store)
+    m = message(wid, b"g", b"al", b"doomed", 5); mid = fact_id(m)
+    cycle(n, [encode(m)], 1000, ())
+    flush(n, store, flushed)
+    assert mid in flushed                                  # on disk, marked
+    cycle(n, [encode(deletion(wid, mid, 6))], 1001, ())    # the death key bites: purged
+    x = message(wid, b"g", b"al", b"new", 7)
+    cycle(n, [encode(x), encode(m)], 1002, (), bound=0)    # re-arrival lands BEHIND x, both unstepped
+    flush(n, store, flushed)                               # the purge unmarked mid, so the tail scan
+    assert store.db.execute("SELECT 1 FROM facts WHERE fid=?",
+                            (fact_id(x),)).fetchone(), "the newer fact reached disk"
+    n.run(); flush(n, store, flushed)                      # the re-arrival dies on arrival...
+    assert store.db.execute("SELECT 1 FROM facts WHERE fid=?", (mid,)).fetchone() is None
+    assert mid not in n.facts and mid not in n.durable     # ...and leaves no residue anywhere
+
 if __name__ == "__main__":
     for t in (test_cycle_stages_then_reaps, test_pump_routes_and_fires,
               test_pump_parks_without_route, test_pump_reaps_even_when_outbox_refuses,
               test_pump_dedup_ships_each_fid_once_per_connection,
-              test_pump_overflow_tail_is_unmarked_and_reships):
+              test_pump_overflow_tail_is_unmarked_and_reships,
+              test_flush_forgets_purged_fids):
         t(); print("ok ", t.__name__)

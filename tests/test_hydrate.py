@@ -59,7 +59,7 @@ def test_gating_needs_pull_their_closure():
 def test_suppression_across_the_cold_boundary():
     n = Node(ROOT, store_of(CORPUS))
     feed(n, WID, CH)
-    assert n.memo[MIDS[2]] == "Suppressed"                   # tombstone was faulted in
+    assert MIDS[2] not in n.facts                            # the deletion was faulted in and bit: purged
     assert n.memo[MIDS[3]] == "Valid"
 
 def test_unrelated_facts_stay_cold():
@@ -173,12 +173,12 @@ def test_a_tombstone_rides_the_closure_across_eras():
     n = Node(EPOCHS, s)
     hydrate.demand(n, b"item", S)
     assert fact_id(D) in n.facts                       # faulted via B's suppress key
-    assert n.memo[fact_id(chain[1])] == "Suppressed"
+    assert fact_id(chain[1]) not in n.facts            # ...and bit: B purged whole
     m = Node(EPOCHS)
     for f in chain + [D]: m.admit(encode(f), checked=True)
     m.run()
-    ids = [fact_id(f) for f in chain + [D]]
-    assert {i: n.memo[i] for i in ids} == {i: m.memo[i] for i in ids}
+    ids = [fact_id(f) for f in chain + [D]]            # purged ids compare as absent on both paths
+    assert {i: n.memo.get(i) for i in ids} == {i: m.memo.get(i) for i in ids}
 
 def test_needs_fault_their_own_deps():
     """No demand needed: a resident fact's own step checks its keys against
@@ -201,7 +201,7 @@ def test_a_cold_suppressor_bites_without_a_demand():
     s.add(encode(chain[0])); s.add(encode(D))          # A and B's tombstone, cold
     n = Node(EPOCHS, s)
     bid = n.admit(encode(chain[1])); n.run()           # B authored live
-    assert fact_id(D) in n.facts and n.memo[bid] == "Suppressed"
+    assert fact_id(D) in n.facts and bid not in n.facts   # the cold tombstone bit: B purged on arrival
 
 # --- existence is the certificate: reconstruction, damage, repair ---------------
 class _Flaky:

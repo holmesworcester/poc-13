@@ -1,9 +1,10 @@
-"""Close and purge (poc-10 close-purge): severing a live session flips its whole
-cluster — the connection, its request, and the handshake ephemerals — to
-Suppressed via the death key each carries, so the daemon drops the socket and
-stops dialing; the close is durable, so a reboot faults it back and the peer
-stays closed. Purge is the forward-secrecy sweep: once suppressed, the ephemeral
-private keys are DELETEd from disk and dropped from memory, leaving no residue."""
+"""Close (poc-10 close-purge, now a kernel consequence): severing a live session
+flips its whole cluster — the connection, its request, and the handshake
+ephemerals — to Suppressed via the death key each carries, and suppression
+purges: the cluster leaves memory and disk at the verdict itself, no sweep to
+schedule. The daemon drops the socket and stops dialing; the durable close is
+what a restart keeps — the peer stays closed because the request it would
+re-dial from no longer exists."""
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -34,39 +35,39 @@ def _handshake(host, joiner):            # a full bootstrap handshake; returns (
 def _ephemerals(node):
     return [k for k, f in node.facts.items() if f.type_tag == b"connection.ephemeral_secret"]
 
-def test_sever_suppresses_the_whole_cluster():
+def test_sever_purges_the_whole_cluster():
     host, joiner = _node(), _node()
     rid, cid = _handshake(host, joiner)
     ephs = _ephemerals(host)
     assert host.memo[rid] == "Valid" and host.memo[cid] == "Valid" and ephs
     close.sever(host, cid, 5); host.run()
-    assert host.memo[rid] == "Suppressed"                        # request killed: no more dialing
-    assert host.memo[cid] == "Suppressed"                        # connection killed
-    assert all(host.memo[e] == "Suppressed" for e in ephs)       # handshake secret killed
+    for fid in (rid, cid, *ephs):        # killed = gone whole: no dialing, no socket, no husk
+        assert fid not in host.facts and fid not in host.durable and fid not in host.memo
 
 def test_restart_stays_closed():
     host, joiner = _node(), _node()
     rid, cid = _handshake(host, joiner)
     close.sever(host, cid, 5); host.run()
-    m = reboot(host)                                             # the durable close reboots
-    assert m.memo[rid] == "Suppressed", "a severed peer stays closed across restart"
+    m = reboot(host)                     # the durable close reboots; the cluster it killed does not
+    assert rid not in m.facts and cid not in m.facts, "a severed peer stays closed across restart"
+    assert any(f.type_tag == b"connection.close" for f in m.facts.values())
 
-def test_purge_reclaims_the_ephemeral_secret():
+def test_sever_reclaims_secrets_from_disk():
     host, joiner = _node(), _node()
     rid, cid = _handshake(host, joiner)
     store = Store()
     for b in host.durable.values(): store.add(b)                 # persist the session
     store.commit()
+    host.store = store                   # production wires the store at boot (cond.py)
     ephs = _ephemerals(host)
     close.sever(host, cid, 5); host.run()
-    gone = close.purge(host, store, cid)
-    assert set(gone) == set(ephs), "purge reclaims exactly the suppressed handshake secrets"
+    assert set(host.purged) >= set(ephs), "the kernel reports what left disk, for flush bookkeeping"
     assert all(store.db.execute("SELECT 1 FROM facts WHERE fid=?", (e,)).fetchone() is None
-               for e in ephs), "secret bytes are gone from disk"
+               for e in ephs), "secret bytes are gone from disk the moment the session dies"
     assert all(e not in host.facts and e not in host.durable for e in ephs), "and from memory"
 
 if __name__ == "__main__":
-    for t in (test_sever_suppresses_the_whole_cluster, test_restart_stays_closed,
-              test_purge_reclaims_the_ephemeral_secret):
+    for t in (test_sever_purges_the_whole_cluster, test_restart_stays_closed,
+              test_sever_reclaims_secrets_from_disk):
         t(); print(f"ok  {t.__name__}")
     print("\nall close/purge tests passed")

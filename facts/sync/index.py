@@ -178,13 +178,16 @@ def _reg(node):
 
 # The opt-in hook, aliased verbatim by each replicating family: fold this
 # fact's leaf membership into the shared treap. A fact is a leaf iff durable,
-# shareable, and Valid|Suppressed (tombstones stay, so deletions reconcile).
+# shareable, and Valid — Suppressed is terminal (the kernel purges the husk),
+# so deletions reconcile through what DOES replicate: the deletion fact is a
+# durable leaf, and a laggard peer re-shipping the purged fact costs one
+# admission that re-derives Suppressed and dies on arrival.
 # Its leaf hash is a constant per fid (fid/ts/bytes are all fixed), so
 # membership is the only thing that changes; the fid set detects the no-op so
 # a re-promotion neither re-hashes nor spuriously bumps ver.
 def settle(node, fid, f, verdict):
     reg = _reg(node)
-    should = (fid in node.durable and verdict in ("Valid", "Suppressed")
+    should = (fid in node.durable and verdict == "Valid"
               and node.root.extract(f)[1])
     if should == (fid in reg["leaves"]): return         # membership unchanged: no delta
     kb = _kb(ts_of(f), fid)

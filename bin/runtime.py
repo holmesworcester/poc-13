@@ -39,11 +39,16 @@ class TTLSet:
             self.d = {x: e for x, e in self.d.items() if e > self.now}
     def __eq__(self, other): return {k for k, e in self.d.items() if e > self.now} == other
 
-def flush(node, store, flushed):         # one transaction per host turn. durable is
-    if len(flushed) == len(node.durable): return   # append-only, so the unflushed facts are a
-    new = []                             # contiguous tail: scan back from newest until an already-
-    for fid in reversed(node.durable):   # flushed id, never the whole set (that repeat scan was O(n^2)).
-        if fid in flushed: break
+def flush(node, store, flushed):         # one transaction per host turn.
+    if node.purged:                      # the kernel already DELETEd these rows: commit that, and
+        for fid in node.purged:          # forget the fids so a re-arrival re-enters the unflushed
+            flushed.discard(fid)         # tail instead of hiding behind its old flush mark
+        node.purged.clear(); store.commit()
+    last = next(reversed(node.durable), None)      # durable appends at the tail (purge only pops),
+    if last is None or last in flushed: return     # so newest-already-flushed means nothing new
+    new = []                             # unflushed facts are a contiguous tail: scan back from newest
+    for fid in reversed(node.durable):   # until an already-flushed id, never the whole set (that
+        if fid in flushed: break         # repeat scan was O(n^2))
         new.append(fid)
     for fid in reversed(new): store.add(node.durable[fid]); flushed.add(fid)
     store.commit()

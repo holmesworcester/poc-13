@@ -328,6 +328,8 @@ class Node:
                                              # by settle() hooks; volatile derived state, rebuilt by replay
         self.frontier = deque()              # FIFO of fids to (re)step
         self._queued = set()                 # membership mirror of the frontier: O(1) dedup ('in' on a deque is O(n))
+        self.purged = []                     # durable fids a terminal verdict evicted, for the host's
+                                             # flush bookkeeping (a purged fid is no longer "on disk")
 
     # Host in — admission gates; a failed gate is inert. checked=True (replay
     # from own durable file) skips the family self-check: those bytes passed once.
@@ -451,7 +453,7 @@ class Node:
         # The family lifecycle hook: a family that declares settle() sees every
         # verdict its fact settles to — including Suppressed and Parked, which
         # never reach project() — and maintains derived group state from it
-        # (e.g. sync's leaf membership, where tombstones require the verdict).
+        # (e.g. sync's leaf membership, whose minus side needs the verdict).
         if fam is not None and (hook := getattr(fam, "settle", None)):
             hook(self, fid, f, out.verdict)
         # Owner-scoped replacement: pull this fact's current rows from their
@@ -464,13 +466,25 @@ class Node:
         if new: self.owned[fid] = new
         for _, _, a in set(old) ^ set(new):   # wake fanout on every changed offer (never re-wake self)
             self._wake(a, fid)
-        if out.verdict == "Reap":            # terminal: evict the body, leaving no residue
-            for r in old:                    # guard: never reap an offer another fact gates on
+        # Terminal verdicts evict the whole body — resident fact, memo, asserted
+        # rows, durable bytes — leaving no residue. Suppression keeps the
+        # RELATIONSHIP, never the husk: the suppressor and the death keys it
+        # matches are durable facts, so a purged fact that re-arrives (a laggard
+        # peer re-ships it) re-derives Suppressed and dies on arrival. Deletion
+        # is immediate and real; what remains of a deleted fact is only the edge
+        # that deleted it. (No guard for Suppressed: withdrawing offers others
+        # gate on is the point — dependents park, or die by their own death key.)
+        if out.verdict == "Reap":            # guard: never reap an offer another fact gates on
+            for r in old:
                 for o, na in self.needs_for(r[2]):
                     assert o == fid or na.effect not in (REQUIRE, SUPPRESS), "reap of a gating offer"
+        if out.verdict in ("Reap", "Suppressed"):
             self.facts.pop(fid, None); self.memo.pop(fid, None)
             for a in f.atoms:                # drop its asserted rows so nothing re-wakes it
                 if bk := self.rows.get((a.kind, a.role, a.scope)): bk.remove((fid, mat(a, fid)))
+            if self.durable.pop(fid, None):  # physical deletion; the host un-marks it as flushed
+                self.purged.append(fid)
+                if self.store: self.store.delete(fid)
 
     # Host out — the host drains validated offers at keys it watches, performs
     # external work, and admits facts reporting what happened. It never writes.

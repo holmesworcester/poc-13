@@ -205,8 +205,12 @@ Parked (keeps asserted atoms, wakes later, promotes nothing). **Watch** —
 non-blocking subscription: never gates validity, only reprojects when
 matching valid offers appear or change; queues and recurring work live
 here. **Suppress** — negative dependency: a valid matching offer flips the
-owner to Suppressed and its output is removed by owner-scoped replacement;
-durable asserted atoms remain until retention purges the fact.
+owner to Suppressed, its output is removed by owner-scoped replacement, and
+the verdict is terminal: the kernel purges the fact whole — resident body,
+asserted rows, durable bytes on disk. Deletion is immediate and real. What
+suppression keeps is the RELATIONSHIP, never the husk: the suppressor and
+the death key it matches are durable facts, so a purged fact that re-arrives
+(a laggard peer re-ships it) re-derives Suppressed and dies on arrival.
 
 Precedence: Suppress > Require(Park) > Resolve.
 
@@ -301,10 +305,13 @@ presents each as a transient offer at the SHIPPED key, waking any sender that
 Watches `shipped@SELF`. A one-shot sender (an `outbox.send`, a `sync.need`)
 answers by returning the terminal **Reap** verdict, on which the engine evicts
 the fact whole — offers, memo, and match rows — so a busy session leaves no
-drained-send residue. Reap is the only verdict that *removes* a fact (Suppress
-merely neutralizes and keeps a tombstone); it is safe precisely because these
-senders are volatile and host-watched, so nothing gates on their offers — an
-invariant the engine asserts before evicting. The daemon re-presents an
+drained-send residue. Reap and Suppressed are both terminal evictions; they
+differ in cause and guard. Reap is family-chosen with no durable cause, so it
+is safe only leafward — nothing may gate on the reaped offers, an invariant
+the engine asserts before evicting. Suppression is kernel-derived from a
+durable edge, so it is deliberately unguarded: withdrawing offers others gate
+on is the point (dependents park, or die by their own death key), and the
+verdict re-derives on any re-arrival because its cause outlives the fact. The daemon re-presents an
 unacked `shipped` until its sender acts (a bounded drain never drops the
 report) and drives no retirement itself: the policy — reap, or re-arm a retry
 — lives in the family, never in the pump. Persistence is the same shape
@@ -461,15 +468,18 @@ facts settle to — including `Suppressed` and `Parked`, which never reach
 index). A family opts its facts into replication with one line — `from
 facts.sync.index import settle` — and `facts/sync/index.py` folds each
 verdict into the leaf set: `(ts, FactId) -> leaf hash` over every fact that is
-durable, shareable, and `Valid|Suppressed`, held in a treap in the `b"sync"`
-register, plus `ver`, a monotonic counter (never a hash) a host can cheaply
-poll for "my set moved" (bench and the sync tests do; the daemon today relies
-on the cadence alone). What replicates is thus a FAMILY decision, made
-identically on every peer because every peer runs the same family code over
-the same fact. Suppressed facts stay in the leaf set, which is how deletions
-reconcile — and why the hook rides promotion, not projection: a tombstone's
-verdict never reaches its projector. Replay needs no second path: hydration
-re-steps every durable fact and each re-promotion re-inserts its leaf. A
+durable, shareable, and `Valid`, held in a treap in the `b"sync"` register,
+plus `ver`, a monotonic counter (never a hash) a host can cheaply poll for
+"my set moved" (bench and the sync tests do; the daemon today relies on the
+cadence alone). What replicates is thus a FAMILY decision, made identically
+on every peer because every peer runs the same family code over the same
+fact. Deletions reconcile through what DOES replicate: the deletion fact is
+a durable leaf, its target is purged everywhere it lands, and a laggard peer
+re-shipping the purged fact costs one admission that dies on arrival. The
+hook rides promotion, not projection, because the MINUS side needs the
+verdict: a leaf that settles Suppressed or Parked never reaches its
+projector. Replay needs no second path: hydration re-steps every durable
+fact and each re-promotion re-inserts its leaf. A
 leaf hash is `H(FactId ‖ ts ‖ H(bytes))` — bytes-only, so the tree stores only
 `key -> leaf hash`, never fact bodies. That body-independence is the seam for a
 later residency/sync split (sync the full leaf set, hydrate a recent subset).
@@ -613,15 +623,15 @@ endpoint→member lookup. That lookup is the `auth` column of
 so an unrecognized endpoint still connects and simply shows `anon`, matching
 Authority's stance.
 
-**Close is a death key; purge is forward secrecy.** `connection.close` (durable,
-LocalOnly) offers `closed` at an id; the request, connection, and ephemeral
-secrets each Suppress-need `closed@SELF`, so admitting a close flips the cluster
-to Suppressed — the daemon drops the socket and stops dialing, and because the
-close is durable a restart replays it and the peer stays closed. `sever` closes a
-whole cluster (connection + request + both handshake ephemerals) from one
-connection id; `purge` is the cold-path forward-secrecy sweep that DELETEs the
-now-suppressed ephemeral private keys from disk and drops them from memory,
-leaving no residue.
+**Close is a death key, and forward secrecy is its verdict.** `connection.close`
+(durable, LocalOnly) offers `closed` at an id; the request, connection, and
+ephemeral secrets each Suppress-need `closed@SELF`, so admitting a close flips
+the cluster to Suppressed — and suppression purges, so the ephemeral private
+keys leave disk and memory at the close itself, no sweep to schedule. The
+daemon drops the socket and stops dialing; the close fact is what a restart
+keeps — the cluster it killed no longer exists to replay, and a reconnect
+must author a fresh request. `sever` closes a whole cluster (connection +
+request + both handshake ephemerals) from one connection id.
 
 **Frame bundles are ephemeral transport.** A `connection.frame` bundle is
 volatile and unshareable exactly like a sync compare — never stored, never in

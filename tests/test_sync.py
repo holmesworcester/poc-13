@@ -98,13 +98,14 @@ def test_fresh_peer_gets_dependency_closure():
     assert set(a.durable) == set(b.durable)        # own, enumerated and pulled directly — no closure ride needed
     assert feed(b, WID, b"g") == [b"hi"]
 
-def test_tombstone_travels_and_suppresses():
+def test_deletion_travels_and_the_content_dies():
     m = message(WID, b"g", b"al", b"doomed", T0 + HOUR)
     a, b = node(WS, WS_SIG, m, deletion(WID, fact_id(m), T0 + HOUR + MIN)), node()
     reconcile(a, b)
-    assert b.memo[fact_id(m)] == "Suppressed"      # arrived already dead: no resurrection window
+    assert fact_id(m) not in a.durable             # purged at the source the moment the deletion landed
+    assert fact_id(m) not in b.facts               # so the peer bootstraps the deletion, never the content
     assert feed(b, WID, b"g") == []
-    assert leaves(a) == leaves(b)                  # the suppressed leaf still reconciles
+    assert leaves(a) == leaves(b)                  # both sets carry the deletion leaf, neither the dead one
 
 def test_sync_facts_volatile_and_excluded():
     a, b = node(WS, WS_SIG, message(WID, b"g", b"al", b"hi", T0 + HOUR)), node()
@@ -210,7 +211,7 @@ def test_frame_count_is_sublinear():
 
 if __name__ == "__main__":
     for t in (test_equal_sets_zero_ships, test_one_fact_diff_ships_exactly_that_fact,
-              test_fresh_peer_gets_dependency_closure, test_tombstone_travels_and_suppresses,
+              test_fresh_peer_gets_dependency_closure, test_deletion_travels_and_the_content_dies,
               test_sync_facts_volatile_and_excluded, test_shuffled_orders_converge,
               test_reconcile_is_idempotent,
               test_full_range_advertises_leaves_only_windowed_carries_the_spine,

@@ -50,7 +50,8 @@ def test_requires_suppression_and_wakes():
     for f in WS_CHAIN: n.admit(encode(f))                     # authority root + acceptance land
     n.run()                                                   # wakes both messages
     assert n.memo[fact_id(m1)] == "Valid"
-    assert n.memo[fact_id(m2)] == "Suppressed"                # cross-time match held
+    assert fact_id(m2) not in n.facts                         # cross-time match held: purged whole
+    assert fact_id(m2) not in n.durable
     assert [a.value for _, _, a in n.watched(b"msg", WID)] == [b"keep"]
 
 def test_admission_check_hook():
