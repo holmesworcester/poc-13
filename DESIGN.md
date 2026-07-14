@@ -280,6 +280,41 @@ its own relationships park, suppress, or reap it. Connection teardown copies the
 keys into every secret/session fact that must be physically removed; content
 families copy a message death key into dependents that must die with it.
 
+### Collapsible alternative: Provide and Gather only
+
+`Require` and `SuppressIf` are not additional matching power. A smaller atom
+algebra could express both as `Gather`, leaving only `Provide | Gather`, but the
+coherent simplification would remove both relationships rather than only
+`SuppressIf`: an empty Require is just as expressible as a projector branch as
+a nonempty SuppressIf. The projector would check death matches first and return
+`Suppressed`, return `Parked` while any declared dependency is absent, and run
+its semantic projection once all dependencies are present. Every validated
+Provide delta already re-enqueues matching owners, so the resident fact would
+be re-stepped and re-projected until that projection succeeds.
+
+That replay would not re-admit, decode, hash, or signature-check the fact. The
+fact is immutable and its admission CHECK remains trusted; in particular,
+Ed25519 verification still happens once. Compared with the current engine, the
+number of dependency-driven steps is unchanged. `Require` merely avoids calling
+the projector on incomplete steps. A local synthetic measurement with ten
+dependencies found one batched settlement at about 171 µs with Require versus
+175 µs with Gather-only (one extra projector call, about 2%). With the ten
+dependencies arriving in ten separate waves, it measured about 256 µs versus
+284 µs (ten extra calls, about 11%, or 28 µs total). These figures are
+machine-specific, but the shape is stable: the extra work is
+`O(arrival waves × projector preflight)`, and a cheap completeness check before
+shape or authority work keeps it small relative to storage, transport, and
+one-time cryptographic admission.
+
+The larger cost is semantic, not computational. A Gather-only kernel no longer
+enforces suppression-before-parking, distinguishes positive from negative
+dependency edges for stratification, or identifies dependency ancestry for
+sync closure. Those responsibilities would have to move into every projector
+or another declaration mechanism; adding such a mechanism could recreate the
+relationships the collapse removed. The four-relationship model keeps that
+policy generic even though the two-relationship model is expressively
+sufficient.
+
 ## Matching
 
 ```text
