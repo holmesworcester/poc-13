@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "target": "ES2024",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "exactOptionalPropertyTypes": true,
+    "noUncheckedIndexedAccess": true,
+    "strict": true,
+    "types": ["node"],
+    "verbatimModuleSyntax": true,
+    "noEmit": true
+  },
+  "include": ["*.ts"]
+}

@@ -1,0 +1,13 @@
+{
+  "name": "tinyp2p-language-lab-typescript",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test lab.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "typescript": "7.0.2"
+  }
+}
