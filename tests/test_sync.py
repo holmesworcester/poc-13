@@ -154,9 +154,9 @@ def test_full_range_advertises_leaves_only_windowed_carries_the_spine():
     SAME range, a full round (floor=b"") advertises only the in-range leaves: every dep
     is itself an in-range leaf, enumerated on its own, so repeating it is waste. The
     signature doubles the leaves — the message and its signature both sit in range. A
-    windowed round (floor>0) additionally carries that leaf's below-floor SHAREABLE
+    windowed round (floor>0) additionally carries that leaf's below-floor marker-owning
     spine as closure ids (the window won't enumerate it) — now including the author's
-    enrollment chain and signed channel, so we pin that spine as a subset — but never a local-only
+    enrollment chain and signed channel, so we pin that spine as a subset — but never a marker-free
     fact like invite_accepted, which must not travel."""
     recent = msg(b"recent", T0 + 30 * DAY)
     a = node(*BASE, *recent)                                     # node() also holds a local invite_accepted (_ACCEPT)
@@ -165,7 +165,7 @@ def test_full_range_advertises_leaves_only_windowed_carries_the_spine():
     assert cidsunframe(a, lo, HI, b"") == {rid, sid}                # full: just the in-range leaves, no deps repeated
     assert {rid, sid, CH_ID, fact_id(CHANNEL_SIG), WID,
             fact_id(WS_SIG)} <= cidsunframe(a, lo, HI, lo)
-    assert fact_id(_ACCEPT) not in cidsunframe(a, lo, HI, lo)       # local-only invite_accepted never rides
+    assert fact_id(_ACCEPT) not in cidsunframe(a, lo, HI, lo)       # marker-free invite_accepted never rides
 
 def test_windowed_in_range_facts_and_their_deps_reconcile():
     """In range: a fact at/after the window floor reconciles, and its below-floor

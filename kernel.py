@@ -214,7 +214,7 @@ _ALL_KEY = (ALL_ROLE, b"store", all_need.target)
 
 RESERVED = {RES_ROLE, ALL_ROLE}          # grows via answer(): registration is the census
 ANSWERERS = {}                           # reserved role -> fn(node, need) -> ctx rows
-OBSERVERS = {}                           # (role, scope) -> [fn(node, owner, fact, old, new)]
+OBSERVERS = {}                           # (role, scope) -> [fn(node, before_rows, after_rows)]
 
 def answer(role, fn):                    # a family claims a reserved role at import time
     assert role[:1] == b"\x00" and role not in (RES_ROLE, ALL_ROLE)
@@ -531,7 +531,7 @@ class Node:
             after = tuple(r for r in new if (r.atom.role, r.atom.scope) == address)
             if set(before) != set(after):
                 for hook in OBSERVERS.get(address, ()):
-                    hook(self, fid, f, before, after)
+                    hook(self, before, after)
         for r in set(old) ^ set(new):    # wake fanout on every changed offer (never re-wake self)
             self._wake(r.atom, fid)
         if out.verdict in (REAP, SUPPRESSED): self._evict(fid, f, out.verdict, old)

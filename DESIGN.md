@@ -135,7 +135,7 @@ Replication is not extraction policy. A Valid projector includes the derived
 `leaf@sync/SELF` offer returned by `sync_leaf()` when its owner may enter sync
 egress. The sync family observes only that validated clean offer. The daemon
 does not yet apply a separate family-level permission to peer ingress, so
-connected peers are currently trusted not to send local-only families.
+connected peers are currently trusted not to send node-private families.
 Enforcing that provenance rule at the wire inbox remains trust-boundary work.
 
 ## Runtime State
@@ -481,7 +481,7 @@ a real refusal, distinct from parking on a not-yet-arrived signature.
   a joiner signs the membership with the invite key from the link, and the
   invite vouches for the member key the fact carries. From then on the member
   signs with their own key, now a blessed `b"key"`.
-- `auth.invite_accepted` is the local-only acceptance record: it never syncs,
+- `auth.invite_accepted` is the node-private acceptance record: it never syncs,
   gates the workspace as above, and carries the replayable bootstrap context
   (the invite secret keyed by its `bootstrap_hash`, the inviter's address and
   endpoint) — so it doubles as the bootstrap-reconnect source. Both the creator
@@ -516,8 +516,9 @@ implemented family.
 Sync reconciles complete facts, never individual atoms, and its set and
 protocol live in `facts/sync/`. The kernel contributes two generic seams:
 
-- `observe(role, scope, fn)` lets a family fold validated clean-offer deltas at
-  one address into its group register.
+- `observe(role, scope, fn)` passes `fn(node, before_rows, after_rows)` the
+  validated clean-offer delta at one address so a family can fold it into its
+  group register.
 - `answer(role, fn)` registers a handler for a reserved Watch role and injects
   the handler's rows into projector context like ordinary validated offers.
 
@@ -583,7 +584,7 @@ marker-owning dependencies below the floor to the listed ids, deduplicated and
 capped at 4096. A peer requests only ids that the other side advertised. The
 resulting `sync.need` Watches `leaf@sync` at every requested id and its projector
 offers only matching marker owners to the outbox, so a forged by-id request
-cannot turn a durable local-only fact into egress. Every received fact enters
+cannot turn a durable marker-free fact into sync egress. Every received fact enters
 normal unchecked peer admission; the `checked=True` path is reserved for
 reconstruction from the node's own store.
 
@@ -802,7 +803,7 @@ also carries the applicable death key.
 - **Workspace sync lanes** — one global `b"sync"` register currently feeds
   every peer. Per-workspace authorization and coverage isolation are required
   before unrelated workspace sets can safely share a node.
-- **Local-only ingress enforcement** — absence of a projected sync marker
+- **Node-private ingress enforcement** — absence of a projected sync marker
   excludes facts from egress, but the peer inbox does not yet enforce the
   separate question of which families may arrive from the wire.
 - **Local-input drivers** — connection driving exists and time is a turn

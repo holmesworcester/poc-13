@@ -214,7 +214,7 @@ Known gap left deliberately: the set-moved counter (leaf_ver, now
 facts.sync.index.ver) is polled by bench/tests only; the daemon relies on
 the cadence (DESIGN.md prose softened to match).
 
-# TODO — local-only ingress
+# TODO — node-private wire ingress
 
 Projected `leaf@sync` offers now gate both treap membership and `sync.need`'s
 by-id egress, but `cycle()` still admits every inbound wire byte with no

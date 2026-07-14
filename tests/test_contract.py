@@ -28,7 +28,7 @@ def test_fact_contract():
         assert "CLI = {" in part["# CLI"], p                      # explicit verb table
 
 def test_extract_contract_has_one_result():
-    """EXTRACT is durability only; the retired (durable, shareable) tuple
+    """EXTRACT is one durability result; tuple-shaped policy classifications
     must not return through a family implementation."""
     for p in FACTS.rglob("*.py"):
         if p.name == "__init__.py":

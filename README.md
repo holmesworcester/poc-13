@@ -161,9 +161,9 @@ The main pieces are:
 
 The prototype has a global resident sync set per node. Workspace-scoped sync
 lanes and negative multi-workspace isolation are not implemented yet. Absence
-of a projected sync-leaf marker controls egress, but the peer inbox does not yet
-enforce a separate family-level ingress permission, so the present threat model
-assumes connected peers do not send local-only families. Retention-policy
+of a projected sync-leaf marker controls sync egress, but the peer inbox does not
+yet enforce a separate family-level ingress permission, so the present threat
+model assumes connected peers do not send node-private families. Retention-policy
 enforcement remains outside the implemented surface.
 
 ## Quick start

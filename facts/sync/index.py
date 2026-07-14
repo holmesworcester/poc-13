@@ -189,11 +189,15 @@ def _reg(node):
 # Its leaf hash is a constant per fid (fid/ts/bytes are all fixed), so
 # membership is the only thing that changes; the fid set detects the no-op so
 # a re-settlement neither re-hashes nor spuriously bumps ver.
-def _observe_leaf(node, fid, f, old, new):
+def _observe_leaf(node, old, new):
     reg = _reg(node)
-    should = fid in node.durable and any(is_sync_leaf_row(row) for row in new)
+    before = next((row for row in old if is_sync_leaf_row(row)), None)
+    after = next((row for row in new if is_sync_leaf_row(row)), None)
+    row = after or before or next(iter(new or old))
+    fid = row.owner
+    should = after is not None and fid in node.durable
     if should == (fid in reg["leaves"]): return         # membership unchanged: no delta
-    kb = _kb(ts_of(f), fid)
+    kb = _kb(row.ts, fid)
     if should:
         reg["leaves"].add(fid)
         reg["tree"].insert(kb, H(frame(fid, kb[:8], H(node.durable[fid]))))

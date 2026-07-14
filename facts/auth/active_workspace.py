@@ -1,4 +1,4 @@
-"""facts/auth/active_workspace.py — local-only workspace selection for the CLI.
+"""facts/auth/active_workspace.py — node-private workspace selection for the CLI.
 This is UI state, not shared authority: it names which workspace a verb uses
 when `wid=` is omitted. Durable so the choice survives a daemon restart, but
 marker-free so it never syncs and never touches the kernel's authority story. It
