@@ -88,6 +88,9 @@ EXACT, SELF_T, RANGE = 0, 1, 2           # wire tags only; in memory a target is
 SELF = ()                                # "this fact's eventual FactId"
 Exact = lambda b: (b, b)                 # a point is the degenerate range
 Range = lambda lo, hi: (lo, hi)
+REMOTE_NAME, BARE_NAME, CONNECTION_NAME = b"\x00remote", b"\x00bare", b"\x00connection"
+PROVENANCE_NAMES = {REMOTE_NAME, BARE_NAME, CONNECTION_NAME}
+ORIGIN_SCOPE = b"origin"
 
 @dataclass(frozen=True)
 class Atom:
@@ -105,13 +108,17 @@ def dec_atom(b):                         # strict: parse leniently, then the re-
     hdr, name, scope, *rest = unframe(b)
     relationship, tt = hdr               # header is exactly (relationship, target-tag)
     if relationship not in RELATIONSHIPS or tt > RANGE: raise ValueError("bad tag")
-    if name[:1] == b"\x00" and relationship != GATHER: raise ValueError("reserved name")
+    if name[:1] == b"\x00":
+        allowed = relationship == GATHER or (relationship == SUPPRESS_IF and name in PROVENANCE_NAMES)
+        if not allowed: raise ValueError("reserved name")
     parts = (1, 0, 2)[tt]                 # target frames after the header: EXACT 1, SELF 0, RANGE 2
     if len(rest) < parts: raise ValueError("short target")
     if tt == SELF_T:   target = SELF
     elif tt == EXACT:  target = Exact(rest[0])
     else:              target = Range(rest[0], rest[1])
     a = Atom(relationship, name, scope, target, rest[parts] if len(rest) > parts else None)
+    if name in PROVENANCE_NAMES and (scope != ORIGIN_SCOPE or target != SELF or a.value is not None):
+        raise ValueError("provenance relationship must be origin@SELF and carry no value")
     if enc_atom(a) != b: raise ValueError("non-canonical atom")   # extra/misplaced frames re-encode differently
     return a                              # (RANGE-form (v,v) re-encodes EXACT: rejected as non-canonical)
 
@@ -178,15 +185,19 @@ def by(ctx, name): return [r for relationship, rows in ctx.items()
 
 # --- Host signals & reserved names -------------------------------------------------
 # This turns clocks, flush reports, and reserved indexes into context rows.
-# Names no ordinary projection answers. Host signals arrive through turn() as
-# one transient clean-twin slot each; reserved names (leading NUL — decode pins
-# them to Gather, so no family can Provide or gate on one) are answered from
-# indexes by _answer(), injected into ctx exactly as matches() would be, so
-# `by(ctx, name)` reads every source uniformly.
+# Names no ordinary projection answers. Host signals arrive through turn() or
+# admission as engine-owned clean rows. Reserved names decode only as Gathers,
+# with SuppressIf additionally allowed for the three provenance names, so no
+# fact can Provide or collide with an engine-owned answer. Gathers are answered
+# into ctx; provenance SuppressIf relationships gate in the ordinary precedence
+# path before family projection.
 #
 #   name           scope   answered from                       wakes / serves
 #   now            clock   the OS clock, via turn(now=…)       time Gathers whose deadline arrived
 #   shipped        wire    the daemon's flush report, turn()   senders Gathering shipped@SELF
+#   \x00remote      origin  admission provenance                local-only facts suppress wire input
+#   \x00bare        origin  admission provenance                session-only facts suppress bare input
+#   \x00connection  origin  opened frame (value = cid)          peer-control facts bind to their carrier
 #   \x00resident   sync    the kernel: fid residency           the have/request pull seam
 #   \x00all        store   the fault leg (boot total demand)   every stored fact, once
 #   \x00<family>   …       a family answer() registrant        a family-owned index (e.g. sync's summary)
@@ -207,6 +218,26 @@ def now_of(ctx):
 SHIPPED_NAME, SHIPPED_SCOPE, _SHIP = b"shipped", b"wire", b"\x00ship"
 shipped_gather = Atom(GATHER, SHIPPED_NAME, SHIPPED_SCOPE, SELF)
 
+# Provenance is a host observation, never a sender assertion. `WireOrigin()` is
+# a bare pre-session fact; `WireOrigin(cid)` is an inner fact opened under that
+# connection. Locally authored and checked-store facts pass no origin. Families
+# state their rule in SHAPE with ordinary relationships: node-private work
+# Suppresses remote; session-only work Suppresses bare; a handler that must bind
+# an embedded cid Gathers connection and compares its engine-owned value.
+@dataclass(frozen=True)
+class WireOrigin:
+    connection_id: bytes | None = None
+    def __post_init__(self):
+        if self.connection_id is not None and (not isinstance(self.connection_id, bytes)
+                                               or len(self.connection_id) != 32):
+            raise ValueError("connection origin must be a 32-byte FactId")
+
+_ORIGIN = b"\x00origin"
+remote_suppress = Atom(SUPPRESS_IF, REMOTE_NAME, ORIGIN_SCOPE, SELF)
+bare_suppress = Atom(SUPPRESS_IF, BARE_NAME, ORIGIN_SCOPE, SELF)
+connection_suppress = Atom(SUPPRESS_IF, CONNECTION_NAME, ORIGIN_SCOPE, SELF)
+connection_gather = Atom(GATHER, CONNECTION_NAME, ORIGIN_SCOPE, SELF)
+
 RES_NAME, _RES = b"\x00resident", b"\x00res"
 resident_gather = lambda fid: Atom(GATHER, RES_NAME, b"sync", Exact(fid))
 
@@ -218,12 +249,13 @@ FULL = Range(b"", b"\xff" * 64)         # the full-domain Gather: covers any exa
 all_gather = Atom(GATHER, ALL_NAME, b"store", FULL)
 _ALL_KEY = (ALL_NAME, b"store", all_gather.target)
 
-RESERVED_NAMES = {RES_NAME, ALL_NAME}    # grows via answer(): registration is the census
+# Host-owned names plus the family answerer census (which grows via answer()).
+RESERVED_NAMES = {REMOTE_NAME, BARE_NAME, CONNECTION_NAME, RES_NAME, ALL_NAME}
 ANSWERERS = {}                           # reserved name -> fn(node, Gather) -> ctx rows
 OBSERVERS = {}                           # (name, scope) -> [fn(node, before_rows, after_rows)]
 
 def answer(name, fn):                    # a family claims a reserved name at import time
-    assert name[:1] == b"\x00" and name not in (RES_NAME, ALL_NAME)
+    assert name[:1] == b"\x00" and name not in RESERVED_NAMES
     ANSWERERS[name] = fn; RESERVED_NAMES.add(name)
 
 def observe(name, scope, fn):            # a family indexes one validated Provide address
@@ -397,11 +429,13 @@ class Node:
         # Durable authority; everything below it is derived, rebuildable from
         # the durable set (plus the store) alone.
         self.durable = {}                    # id -> canonical bytes: 'the disk'
+        self.pending_durable = {}            # wire-extracted bytes awaiting their first source-aware judgment
         # The resident set and its derived indexes.
         self.facts = {}                      # id -> Fact (resident: durable + volatile)
         self.provides, self.consumers = {}, {}  # (name,scope) -> Bucket: asserted match indexes
         self.memo, self.clean = {}, {}       # id -> verdict ; (name,scope) -> Bucket: the clean twin
         self.owned = {}                      # id -> its clean rows, for owner-scoped replacement
+        self.origins = {}                    # id -> transient engine-owned provenance rows, cleared after first judgment
         self.regs = {}                       # scope -> one shared mutable register per family group, written
                                              # by Provide observers; volatile derived state, rebuilt by replay
         self.checked = set()                 # consumer addresses faulted: existence is monotone
@@ -414,26 +448,57 @@ class Node:
 
     # --- The way in (admit) -----------------------------------------------------
     # This accepts one canonical fact, indexes it, and queues its first judgment.
-    # A failed gate is inert. checked=True (replay from own durable file) skips
-    # the family self-check: those bytes passed once. `local` is provenance: True
-    # for a command or a replay from our own store, False for bytes off the wire —
-    # a family whose facts are node-private authority may refuse a non-local origin.
-    def admit(self, b, expect=None, checked=False, local=True):
+    # A failed intrinsic gate is inert. checked=True (replay from our durable
+    # store) skips that gate: those bytes passed once. Wire provenance is not a
+    # gate argument: it becomes engine-owned graph rows that family SHAPEs can
+    # SuppressIf/Gather. Extracted wire bytes become durable only at first
+    # judgment, so a provenance-suppressed fact can never flush and resurrect
+    # without its label; local and checked-store bytes retain immediate durability.
+    def admit(self, b, expect=None, checked=False, origin=None):
+        if origin is not None and not isinstance(origin, WireOrigin):
+            raise TypeError("origin must be WireOrigin or None")
         try: f = decode(b)
         except Exception: return None
         fid = fact_id(f)
         if expect not in (None, fid): return None
-        if fid in self.facts: return fid     # idempotent admission
+        if checked and origin is not None: return None       # stored bytes are local certificates, never wire input
+        if fid in self.facts:
+            if origin is None and fid in self.origins:       # local/store observation upgrades a pending wire arrival
+                self._clear_origin(fid)
+                if fid in self.pending_durable:
+                    self.durable[fid] = self.pending_durable.pop(fid)
+                self._enqueue(fid)
+            return fid                                       # otherwise idempotent admission
         chk = None if checked else getattr(self.root.resolve(f.type_tag.split(b".")), "check", None)
-        if chk and not chk(f, local): return None   # per-family self-check: falsy = inert miss
+        try:
+            if chk and not chk(f): return None      # per-family intrinsic check: falsy/raise = inert miss
+        except Exception:
+            return None
         durable = self.root.extract(f)
         self.facts[fid], self.memo[fid] = f, UNKNOWN
-        if durable: self.durable[fid] = b
+        if durable:
+            if checked or origin is None:
+                self.durable[fid] = b               # local/store bytes are already trusted for durability
+            else:
+                self.pending_durable[fid] = b       # wire bytes wait for their first source-aware judgment
         for a in f.atoms:
             index = self.provides if a.relationship == PROVIDE else self.consumers
             index.setdefault((a.name, a.scope), Bucket()).add(Row(fid, 0, mat(a, fid)))
+        if origin is not None:
+            atoms = [Atom(PROVIDE, REMOTE_NAME, ORIGIN_SCOPE, Exact(fid))]
+            if origin.connection_id is None:
+                atoms.append(Atom(PROVIDE, BARE_NAME, ORIGIN_SCOPE, Exact(fid)))
+            else:
+                atoms.append(Atom(PROVIDE, CONNECTION_NAME, ORIGIN_SCOPE,
+                                  Exact(fid), origin.connection_id))
+            rs = self.origins[fid] = [Row(_ORIGIN, 0, a) for a in atoms]
+            for r in rs: self.clean.setdefault((r.atom.name, r.atom.scope), Bucket()).add(r)
         self._enqueue(fid)
         return fid
+
+    def _clear_origin(self, fid):
+        for r in self.origins.pop(fid, ()):
+            if b := self.clean.get((r.atom.name, r.atom.scope)): b.remove(r)
 
     # --- The index queries ------------------------------------------------------
     # This answers asserted discovery, validated standing, and reserved lookups.
@@ -482,17 +547,26 @@ class Node:
     def _step(self, fid):
         if fid not in self.facts: return
         f = self.facts[fid]; consumers = consumers_of(f, fid)
-        self._fault(consumers)
-        # Every consumer relationship gets the same exhaustive answer. Only its
-        # settlement rule differs. Precedence: SuppressIf > Require(Park) > Resolve.
-        answers = {consumer: self._answer(consumer) for consumer in consumers}
-        if any(answers[r] for r in consumers if r.relationship == SUPPRESS_IF):
+        # Provenance Provides are already resident, so an already-matched
+        # SuppressIf settles before faulting any other relationship. A remote
+        # hydrate sentenced by its source must not pull the store in first.
+        if any(self.matches(r) for r in consumers if r.relationship == SUPPRESS_IF):
             out = Out(SUPPRESSED)
-        elif any(not answers[r] for r in consumers if r.relationship == REQUIRE):
-            out = Out(PARKED)
-        else:                            # Context<Validated>; Gather never gates
-            ctx = {r: answers[r] for r in consumers if r.relationship in (GATHER, REQUIRE)}
-            out = self.root.project(f, ctx) or Out(PARKED)
+        else:
+            self._fault(consumers)
+            # Every consumer relationship gets the same exhaustive answer. Only
+            # its settlement rule differs. SuppressIf > Require(Park) > Project.
+            answers = {consumer: self._answer(consumer) for consumer in consumers}
+            if any(answers[r] for r in consumers if r.relationship == SUPPRESS_IF):
+                out = Out(SUPPRESSED)
+            elif any(not answers[r] for r in consumers if r.relationship == REQUIRE):
+                out = Out(PARKED)
+            else:                        # Context<Validated>; Gather never gates
+                ctx = {r: answers[r] for r in consumers if r.relationship in (GATHER, REQUIRE)}
+                out = self.root.project(f, ctx) or Out(PARKED)
+        if fid in self.pending_durable:        # first nonterminal judgment is the durability certificate;
+            b = self.pending_durable.pop(fid)  # a first-step terminal never becomes durable, even briefly
+            if out.verdict not in (REAP, SUPPRESSED): self.durable[fid] = b
         self._settle(fid, f, out)
 
     def _fault(self, consumers):
@@ -539,6 +613,7 @@ class Node:
         if out.verdict == VALID and any(a.relationship != PROVIDE for a in out.provides):
             out = Out(INVALID)
         self.memo[fid] = out.verdict
+        self._clear_origin(fid)                # provenance is first-admission evidence, now certified or terminal
         # Owner-scoped replacement: pull this fact's current rows from their
         # buckets, add the new ones — old and new output are never both visible.
         old = self.owned.pop(fid, [])
@@ -575,7 +650,7 @@ class Node:
                 for d in self.consumers_for(r.atom):
                     assert (d.owner == fid or d.atom.relationship not in (REQUIRE, SUPPRESS_IF)), \
                         "reap of a gating Provide"
-        self.facts.pop(fid, None); self.memo.pop(fid, None)
+        self.facts.pop(fid, None); self.memo.pop(fid, None); self.pending_durable.pop(fid, None)
         for a in f.atoms:                # drop its asserted rows so nothing re-wakes it
             index = self.provides if a.relationship == PROVIDE else self.consumers
             if bk := index.get((a.name, a.scope)): bk.remove(Row(fid, 0, mat(a, fid)))

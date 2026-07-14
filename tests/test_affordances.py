@@ -8,9 +8,10 @@ import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import crypto as _c
-from kernel import (Node, RES_NAME, RESERVED_NAMES, Row, unframe,
-                    resident_gather, encode, fact, fact_id, Atom, Exact,
-                    dec_atom, enc_atom, now_gather, PROVIDE, GATHER, REQUIRE)
+from kernel import (Node, ORIGIN_SCOPE, REMOTE_NAME, RES_NAME, RESERVED_NAMES,
+                    Row, unframe, resident_gather, encode, fact, fact_id, Atom,
+                    Exact, dec_atom, enc_atom, now_gather, PROVIDE, GATHER,
+                    REQUIRE, SUPPRESS_IF, SELF)
 from facts.sync.index import SUM_NAME, summary_gather
 from facts import ROOT
 from facts.auth.workspace import workspace
@@ -73,7 +74,7 @@ def test_resident_present_and_absent():
     n = node(WS, WS_SIG, *MEMBER.facts, CHANNEL, CHANNEL_SIG, m, s)
     assert n._answer(resident_gather(fact_id(m)))            # I hold it
     assert not n._answer(resident_gather(bytes(32)))         # I do not hold this one
-    assert SUM_NAME in RESERVED_NAMES and RES_NAME in RESERVED_NAMES   # reserved: GATHER-only, never a gate
+    assert SUM_NAME in RESERVED_NAMES and RES_NAME in RESERVED_NAMES   # reserved names are engine/family-owned
 
 def test_every_match_path_returns_the_named_row_shape():
     """Asserted, validated, host, and reserved answers share one safe API."""
@@ -99,11 +100,16 @@ def test_every_match_path_returns_the_named_row_shape():
         assert all(type(r) is Row for r in rows), name
         assert all(isinstance(r.ts, int) and isinstance(r.atom, Atom) for r in rows), name
 
-def test_reserved_name_must_be_a_gather():
+def test_reserved_name_relationships_are_narrow():
     ok = Atom(GATHER, SUM_NAME, b"sync", Exact(b"x"))
     assert dec_atom(enc_atom(ok)).relationship == GATHER          # a reserved Gather round-trips
+    provenance = Atom(SUPPRESS_IF, REMOTE_NAME, ORIGIN_SCOPE, SELF)
+    assert dec_atom(enc_atom(provenance)).relationship == SUPPRESS_IF
     for bad in (Atom(REQUIRE, SUM_NAME, b"sync", Exact(b"x")),  # reserved name that would gate
-                Atom(PROVIDE, RES_NAME, b"sync", Exact(b"x"))):                # a NUL-name Provide
+                Atom(SUPPRESS_IF, SUM_NAME, b"sync", Exact(b"x")),
+                Atom(SUPPRESS_IF, REMOTE_NAME, ORIGIN_SCOPE, Exact(b"x")),
+                Atom(SUPPRESS_IF, REMOTE_NAME, ORIGIN_SCOPE, SELF, b"x"),
+                Atom(PROVIDE, RES_NAME, b"sync", Exact(b"x"))):       # a NUL-name Provide
         try: dec_atom(enc_atom(bad)); assert False, "reserved name accepted"
         except ValueError: pass
 
@@ -112,5 +118,5 @@ if __name__ == "__main__":
               test_summary_small_range_is_one_id_list_with_closure,
               test_summary_large_range_splits_by_equal_count, test_resident_present_and_absent,
               test_every_match_path_returns_the_named_row_shape,
-              test_reserved_name_must_be_a_gather):
+              test_reserved_name_relationships_are_narrow):
         t(); print("ok ", t.__name__)

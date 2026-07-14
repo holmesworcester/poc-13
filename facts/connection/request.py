@@ -19,7 +19,8 @@ responder restart heals by the next slow redial), and — on the addressee, once
 receipt proves the request arrived — a host-read `respond` naming the reply
 route."""
 from kernel import (Atom, Exact, FULL, PROVIDE, Out, SELF, SUPPRESS_IF, GATHER,
-                    by, encode, fact, frame, now, ts_atom, unframe)
+                    by, connection_suppress, encode, fact, frame, now, ts_atom,
+                    ts_of, unframe)
 from crypto import open_x25519
 from crypto import ed25519_keygen as keygen, ed25519_sign as sign, ed25519_verify as verify
 from facts.auth import endpoint, invite_accepted as ish
@@ -56,6 +57,7 @@ _header = lambda eph, to, nc: frame(bytes([SEAL_VERSION]), eph, to, nc)
 # SHAPE — the canonical atom set; the only place atoms are chosen.
 def request(env, to_ep, init_eph_pk, t):
     return fact(TAG, ts_atom(t, SC),
+                connection_suppress,
                 Atom(PROVIDE, b"sreq", SC, SELF, env),
                 Atom(GATHER, b"esk", b"local", Exact(to_ep)),        # responder opens
                 Atom(GATHER, b"ephsk", SC, Exact(init_eph_pk)),      # initiator opens
@@ -68,13 +70,17 @@ def request(env, to_ep, init_eph_pk, t):
 # EXTRACT — content-pure durability. First contact projects no sync marker.
 def extract(f): return True
 
-# CHECK — structural only: the envelope parses to the right widths (no context).
-def check(f, local):                     # the handshake legitimately arrives from a peer: provenance ignored
-    env = next((a.value for a in f.atoms if a.name == b"sreq"), None)
-    if env is None: return False
-    try: ver, eph, to, nc, ct = _unenv(env)
-    except Exception: return False
-    return ver == SEAL_VERSION and len(eph) == 32 and len(to) == 32 and len(nc) == 24 and len(ct) >= 16
+# CHECK — exact handshake shape plus public-envelope widths. Its SHAPE accepts
+# local authoring or bare wire and Suppresses an already-connected carrier.
+def check(f):
+    try:
+        env = next(a.value for a in f.atoms if a.name == b"sreq")
+        ver, eph, to, nc, ct = _unenv(env)
+        return (ver == SEAL_VERSION and len(eph) == 32 and len(to) == 32
+                and len(nc) == 24 and len(ct) >= 16
+                and f == request(env, to, eph, ts_of(f)))
+    except Exception:
+        return False
 
 # PROJECT — decrypt, verify authority, then publish. Pure given ctx; replay-safe.
 def project(f, ctx):

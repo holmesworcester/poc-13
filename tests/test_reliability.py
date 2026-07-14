@@ -29,7 +29,7 @@ from collections import Counter
 HERE = os.path.dirname(os.path.abspath(__file__)); ROOT_DIR = os.path.dirname(HERE)
 sys.path[:0] = [HERE, ROOT_DIR, os.path.join(ROOT_DIR, "bin")]
 import crypto as _c
-from kernel import Node, decode, encode, fact_id
+from kernel import Node, WireOrigin, decode, encode, fact_id
 from facts import ROOT
 from facts.sync import cadence
 from facts.sync import compare as cmp, index as _sidx, need as _need
@@ -102,7 +102,8 @@ class World:
         # pump after EVERY turn, as tinyd does: a cadence due-fire is a transient
         # Provide the next clock presentation erases, so a drain-then-pump harness
         # silently drops any opener fired before the drain's last turn.
-        cycle(n, inbox, self.t, tuple(self.fired[me]), 4096)
+        for blob in inbox: n.admit(blob, origin=WireOrigin(CID))
+        cycle(n, [], self.t, tuple(self.fired[me]), 4096)
         while True:
             self.fired[me] &= {o for o, _, _ in outbox(n)}
             self.fired[me] |= pump(n, lambda c: (b"peer", None), deliver,

@@ -17,7 +17,8 @@ deterministic ephemeral and seal nonce derived from the static secret over the
 request id make re-performance byte-identical, so a replayed or duplicated
 request produces one and the same connection."""
 from kernel import (Atom, Exact, FULL, H, PROVIDE, Out, REQUIRE, SELF,
-                    SUPPRESS_IF, GATHER, by, encode, fact, frame, ts_of, unframe)
+                    SUPPRESS_IF, GATHER, by, connection_suppress, encode, fact,
+                    frame, ts_of, unframe)
 from crypto import dh, hkdf_sha256, keyed_hash, open_x25519, seal_x25519, x25519_pk
 from facts.auth import endpoint, invite_accepted as ish
 from facts.connection import ephemeral_secret as eph
@@ -66,6 +67,7 @@ def _material(F, req_pt, secret, ee, es, resp_eph_pk, resp_addr, init_addr):
 # SHAPE — deterministic given (env, request_id): both sides build identical bytes.
 def connection(env, request_id):
     return fact(TAG,
+                connection_suppress,
                 Atom(PROVIDE, b"sconn", SC, Exact(request_id), env),
                 Atom(REQUIRE, b"req_open", SC, Exact(request_id)),
                 Atom(GATHER, b"esk", b"local", FULL),
@@ -75,6 +77,18 @@ def connection(env, request_id):
 
 # EXTRACT — volatile session state.
 def extract(f): return False
+
+# CHECK — exact public envelope and shape. A response is authored locally or
+# arrives bare; carrying it inside an established connection is suppressed.
+def check(f):
+    try:
+        row = next(a for a in f.atoms if a.name == b"sconn")
+        ver, eph, to, rid, nonce, ct = _uncenv(row.value)
+        return (ver == SEAL_VERSION and len(eph) == len(to) == len(rid) == 32
+                and len(nonce) == 24 and len(ct) >= 16 and row.target == Exact(rid)
+                and f == connection(row.value, rid))
+    except Exception:
+        return False
 
 # PROJECT — open, recompute, verify, publish. Pure over ctx; rebuilt by replay.
 def project(f, ctx):

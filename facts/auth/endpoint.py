@@ -6,7 +6,7 @@ sealed connection response is sealed back to, so it must never leave the node.
 keygen admits one and refuses a second: the endpoint is single and stable.
 The Ed25519 signing pair stays in auth.local_signer_secret; auth.endpoint_shared
 binds the two publicly for the workspace."""
-from kernel import Atom, Exact, PROVIDE, Out, encode, fact, now, ts_atom
+from kernel import Atom, Exact, PROVIDE, Out, encode, fact, now, remote_suppress, ts_atom, ts_of
 from crypto import x25519_keygen, x25519_pk
 from facts.store import hydrate
 
@@ -15,17 +15,21 @@ TAG = b"auth.endpoint"
 # SHAPE — the canonical atom set; the only place atoms are chosen.
 def endpoint(esk, epk, t):
     return fact(TAG, ts_atom(t, b"local"),
+                remote_suppress,
                 Atom(PROVIDE, b"esk", b"local", Exact(epk), esk),   # keyed by its own pub
                 Atom(PROVIDE, b"endpoint", b"local", Exact(epk)))   # presence: "epk is me"
 
 # EXTRACT — content-pure durability. The projector emits no sync marker.
 def extract(f): return True
 
-# CHECK — self-verification at the gate: the secret must derive the pub it names.
-def check(f, local):                     # local-only: the endpoint secret is authored here, never off the wire
-    v = {a.name: (a.target, a.value) for a in f.atoms}
-    (tgt, esk) = v.get(b"esk", (None, None))
-    return bool(esk) and tgt == Exact(x25519_pk(esk)) and local
+# CHECK — exact shape plus self-verification; provenance lives in the graph.
+def check(f):
+    try:
+        row = next(a for a in f.atoms if a.name == b"esk")
+        epk = x25519_pk(row.value)
+        return bool(row.value) and row.target == Exact(epk) and f == endpoint(row.value, epk, ts_of(f))
+    except Exception:
+        return False
 
 # PROJECT — the only place this family's meaning lives.
 def project(f, ctx):

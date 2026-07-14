@@ -9,7 +9,7 @@ deletion: the kernel purges a suppressed fact whole — memory, and its rows on
 disk — at the verdict itself, so the ephemeral private keys are gone the moment
 the session dies (poc-10's close-purge, now a kernel consequence, not a sweep).
 What persists is the close fact: the relationship that keeps the peer dead."""
-from kernel import Atom, Exact, PROVIDE, Out, encode, fact, now, ts_atom
+from kernel import Atom, Exact, PROVIDE, Out, encode, fact, now, remote_suppress, ts_atom, ts_of
 
 TAG = b"connection.close"
 SC = b"conn"
@@ -18,14 +18,20 @@ SC = b"conn"
 # Provide per id this close retires.
 def close(targets, t):
     return fact(TAG, ts_atom(t, SC),
+                remote_suppress,
                 *(Atom(PROVIDE, b"closed", SC, Exact(i)) for i in targets))
 
 # EXTRACT — content-pure durability. A local close projects no sync marker.
 def extract(f): return True
 
-# CHECK — local-only: a session is retired here; a wire-injected close would
-# let a peer tear down our connections.
-def check(f, local): return local
+# CHECK — exact shape; remote authorship is a graph suppression.
+def check(f):
+    try:
+        targets = [a.target[0] for a in f.atoms if a.name == b"closed"
+                   and a.target[0] == a.target[1]]
+        return bool(targets) and f == close(targets, ts_of(f))
+    except Exception:
+        return False
 
 # PROJECT — the only place this family's meaning lives.
 def project(f, ctx):

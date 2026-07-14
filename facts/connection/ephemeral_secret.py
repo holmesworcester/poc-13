@@ -5,7 +5,7 @@ shared. It provides its secret keyed by its public key (the rendezvous the seale
 request and connection Gather to open envelopes) and dies with a connection.close
 naming it, so severing a session purges the ephemeral that keyed it."""
 from kernel import (Atom, Exact, PROVIDE, Out, SELF, SUPPRESS_IF, encode, fact,
-                    now, ts_atom)
+                    now, remote_suppress, ts_atom, ts_of)
 from crypto import x25519_pk
 
 TAG = b"connection.ephemeral_secret"
@@ -14,17 +14,21 @@ SC = b"conn"
 # SHAPE — the canonical atom set; the only place atoms are chosen.
 def ephemeral(eph_sk, eph_pk, t):
     return fact(TAG, ts_atom(t, SC),
+                remote_suppress,
                 Atom(PROVIDE, b"ephsk", SC, Exact(eph_pk), eph_sk),  # keyed by its own pub
                 Atom(SUPPRESS_IF, b"closed", SC, SELF))
 
 # EXTRACT — content-pure durability. A handshake secret projects no sync marker.
 def extract(f): return True
 
-# CHECK — self-verification at the gate: the secret must derive the pub it keys.
-def check(f, local):                     # local-only: an ephemeral secret is minted here, never off the wire
-    v = {a.name: (a.target, a.value) for a in f.atoms}
-    (tgt, sk) = v.get(b"ephsk", (None, None))
-    return bool(sk) and tgt == Exact(x25519_pk(sk)) and local
+# CHECK — exact shape plus self-verification; provenance lives in SHAPE.
+def check(f):
+    try:
+        row = next(a for a in f.atoms if a.name == b"ephsk")
+        pk = x25519_pk(row.value)
+        return bool(row.value) and row.target == Exact(pk) and f == ephemeral(row.value, pk, ts_of(f))
+    except Exception:
+        return False
 
 # PROJECT — the only place this family's meaning lives.
 def project(f, ctx):

@@ -170,7 +170,7 @@ def test_replay_never_reverifies():
     sigmod.verify = lambda *a: (calls.append(1), orig(*a))[1]
     try:
         assert sigmod.check(n.facts[[k for k, f in n.facts.items()
-                                     if f.type_tag == b"auth.signature"][0]], True)
+                                     if f.type_tag == b"auth.signature"][0]])
         assert calls, "a live check must call verify"   # gate really runs the crypto
         calls.clear()
         m = reboot(n)                                   # boot from the durable rows

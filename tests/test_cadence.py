@@ -7,7 +7,7 @@ import os, sys
 HERE = os.path.dirname(os.path.abspath(__file__)); ROOT_DIR = os.path.dirname(HERE)
 sys.path[:0] = [ROOT_DIR, os.path.join(ROOT_DIR, "bin")]
 import crypto as _c
-from kernel import Node, Atom, Exact, PROVIDE, encode, fact, fact_id, ts_atom, decode
+from kernel import Node, encode, fact_id, decode
 from facts import ROOT
 from facts.sync import cadence
 from facts.sync.compare import TAG as CMP_TAG
@@ -61,10 +61,10 @@ def test_next_wake_reads_the_alarm():
     assert next_wake(Node(ROOT), 0, 0.5) == 0.5         # no alarms -> the cap
 
 def test_closed_conn_tears_it_down():
+    from facts.connection import close
     n = node(); cadence.arm(n, CID, ONE); n.turn(now=0); n.turn(now=PERIOD); n.run()
     assert _compares(n)
-    n.admit(encode(fact(b"connection.close", ts_atom(1, b"conn"),
-                        Atom(PROVIDE, b"closed", b"conn", Exact(CID)))))   # a close for this connection
+    n.admit(encode(close.close([CID], 1)))                 # a close for this connection
     n.turn(now=2 * PERIOD); n.run()
     assert not _compares(n)                              # suppressed: the cadence stops opening rounds
     assert not n.provided(b"wake", b"clock")             # and stops arming alarms

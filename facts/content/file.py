@@ -90,7 +90,7 @@ def _canonical(f):
         return None
 
 
-def check(f, local): return _canonical(f) is not None   # shareable content: provenance ignored
+def check(f): return _canonical(f) is not None
 
 
 # PROJECT — the descriptor must be signed by the parent message's author.

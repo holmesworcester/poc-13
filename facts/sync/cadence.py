@@ -27,7 +27,8 @@ it — `synced` is then a locally provable predicate: someone matched fingerprin
 over exactly the split I hold now. SUPPRESS_IF on `closed@conn` tears both tiers down;
 being volatile, a reconnect re-arms them."""
 from kernel import (Atom, Exact, H, PROVIDE, Out, SELF, SUPPRESS_IF, GATHER,
-                    by, encode, fact, frame, now_gather, now_of, ts_atom, unframe)
+                    by, encode, fact, frame, now_gather, now_of, remote_suppress,
+                    ts_atom, unframe)
 from facts.sync.index import SUM_NAME, summary, summary_gather
 from facts.sync.compare import compare, sorted_claims, HI
 
@@ -44,6 +45,7 @@ _val = lambda f, r: next((a.value for a in f.atoms if a.name == r), b"")
 # domain summary, my per-tier tick register, the confirm pulse, and teardown.
 def cadence(cid, floor, period_ms, mode=ANCHOR):
     return fact(TAG, ts_atom(0, SC),
+                remote_suppress,
                 Atom(PROVIDE, b"cid",    SC, Exact(cid)),
                 Atom(PROVIDE, b"floor",  SC, SELF, floor),
                 Atom(PROVIDE, b"period", SC, SELF, _T8(period_ms)),
@@ -56,6 +58,17 @@ def cadence(cid, floor, period_ms, mode=ANCHOR):
 
 # EXTRACT — volatile session state.
 def extract(f): return False
+
+# CHECK — exact timer shape. Cadence is daemon-authored session state and its
+# SHAPE suppresses either kind of wire provenance.
+def check(f):
+    try:
+        cid, floor = _tgt(f, b"cid"), _val(f, b"floor")
+        period_b, mode = _val(f, b"period"), _val(f, b"mode")
+        return (len(period_b) == 8 and mode in (ANCHOR, GATED)
+                and f == cadence(cid, floor, int.from_bytes(period_b, "big"), mode))
+    except Exception:
+        return False
 
 # PROJECT — hold the alarm until due; when due, the anchor opens unconditionally and
 # the gated tier opens iff my split CHANGED since my last opener (`sent`) AND has

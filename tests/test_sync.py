@@ -12,7 +12,7 @@ import os, random, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import crypto as _c
-from kernel import Node, decode, encode, fact_id, unframe
+from kernel import Node, WireOrigin, decode, encode, fact_id, unframe
 from facts import ROOT
 from facts.sync import compare as cmp, index as sidx, need as _need
 from facts.sync.index import summary_gather
@@ -56,7 +56,7 @@ def reconcile(a, b, maxr=6000, lo=0):
         t[0] += 50                                              # a clock: confirm pulses reap on their
         me.turn(now=t[0], shipped=tuple(fired[me])); fired[me] = []   # next tick, as under the daemon
         got, inbox[me] = inbox[me], []
-        for blob in got: me.admit(blob)                         # admit what the peer sent
+        for blob in got: me.admit(blob, origin=WireOrigin(CID)) # opened under this simulated connection
         me.run()
         if sidx.ver(me) != ver[me]:                             # leaf set moved: open a fresh round
             cmp.open_round(me, CID, floor); ver[me] = sidx.ver(me); me.run()

@@ -4,8 +4,9 @@ opened frame misses while its siblings still admit (a per-fact miss never poison
 the batch). The end-to-end handshake, sync, restart, and ciphertext properties
 live in test_transport.py and test_pair.py."""
 import os, sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from kernel import Node, encode, fact_id, unframe
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path[:0] = [ROOT_DIR, os.path.join(ROOT_DIR, "bin")]
+from kernel import Node, WireOrigin, encode, fact_id, unframe
 from facts import ROOT
 from facts.connection import frame as frames
 from facts.auth.workspace import workspace
@@ -31,7 +32,7 @@ def test_corrupt_inner_fact_misses_siblings_land():
     wire = frames.seal(blob, cid, secret, os.urandom(24))
     n = Node(ROOT)
     for inner in unframe(frames.open_frame(wire, secret)):   # exactly what the daemon does per frame
-        try: n.admit(inner)
+        try: n.admit(inner, origin=WireOrigin(cid))
         except Exception: pass
     landed = {fid for fid, f in n.facts.items() if f.type_tag == b"content.message"}
     assert landed == {fact_id(msgs[0]), fact_id(msgs[1]), fact_id(msgs[3])}   # sibling of the corrupt one land
@@ -46,7 +47,17 @@ def test_oversized_content_fact_gets_a_solo_sealed_frame():
     wire = frames.seal(blob, cid, secret, os.urandom(24))
     assert unframe(frames.open_frame(wire, secret)) == [inner]
 
+def test_daemon_drops_a_malformed_authenticated_bundle(monkeypatch):
+    """AEAD authenticity identifies the carrier; it does not make the peer's
+    inner length framing well-formed, and malformed framing must not kill tinyd."""
+    import tinyd
+    secret, cid = os.urandom(32), os.urandom(32)
+    wire = frames.seal(b"\x00", cid, secret, os.urandom(24))
+    monkeypatch.setattr(tinyd.conn, "route", lambda _node, got: (b"peer", secret) if got == cid else None)
+    assert tinyd._open_frame(Node(ROOT), wire) is None
+
 if __name__ == "__main__":
     for t in (test_tampered_frame_opens_to_nothing, test_corrupt_inner_fact_misses_siblings_land,
-              test_oversized_content_fact_gets_a_solo_sealed_frame):
+              test_oversized_content_fact_gets_a_solo_sealed_frame,
+              test_daemon_drops_a_malformed_authenticated_bundle):
         t(); print(f"ok  {t.__name__}")

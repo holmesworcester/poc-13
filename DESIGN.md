@@ -52,6 +52,10 @@ design.
   Require(Park) > Project.
 - Admission is idempotent and content-addressed; wrong bytes are a miss,
   never a wrong fact.
+- Wire provenance enters through the same graph as every other input. The host
+  labels bare facts and facts opened by an authenticated connection with
+  engine-owned Provides; family SHAPEs SuppressIf or Gather those Provides.
+  There is no central table classifying fact tags as local or remote.
 - Queues, effects, sync, connections, content, and retention policy are fact
   families, not engine primitives. Time and wire-flush reports are transient
   host inputs to the turn. The kernel owns identity, admission, matching, and
@@ -131,16 +135,26 @@ A fact without one promotes rows at `ts = 0`.
 
 Extraction is the content-pure durability decision from the fact's own bytes,
 made at admission before validation and routed through the same router tree as
-projection. Durable facts flush before they can be forgotten; volatile facts
+projection. Extracted wire bytes are staged until their first graph judgment: a
+nonterminal verdict certifies them into the durable map, while a first-step
+Suppressed/Reap fact never becomes durable. This prevents a crash between wire
+admission and provenance judgment from resurrecting unlabeled bytes. Locally
+authored and checked-store facts retain immediate durability. Volatile facts
 vanish on restart. Unknown tags default to Durable + Parked and project no
 Provides.
 
 Replication is not extraction policy. A Valid projector includes the derived
 `leaf@sync/SELF` Provide returned by `sync_leaf()` when its owner may enter sync
-egress. The sync family observes only that validated clean Provide. The daemon
-does not yet apply a separate family-level permission to peer ingress, so
-connected peers are currently trusted not to send node-private families.
-Enforcing that provenance rule at the wire inbox remains trust-boundary work.
+egress. The sync family observes only that validated clean Provide. Ingress is
+a separate graph relation and remains accept-by-default. A handler
+opts into source constraints in its own SHAPE: node-private families carry
+`SuppressIf(remote@origin/SELF)`; bare handshake facts carry
+`SuppressIf(connection@origin/SELF)`; and established sync controls carry
+`SuppressIf(bare@origin/SELF)` plus `Gather(connection@origin/SELF)`. The last
+lets the projector compare the authenticated outer connection id with the id
+inside the fact. One-argument intrinsic CHECKs rebuild source-sensitive family
+shapes exactly, so a sender cannot remove or substitute their policy atoms;
+CHECK itself never receives or classifies provenance.
 
 ## Runtime State
 
@@ -169,7 +183,9 @@ Ephemeral, all rebuilt from demand and promotion:
   validated Provide set (the clean twin, stamped `(owner, ts, atom)` with
   engine-owned provenance);
 - owner-to-clean-row bookkeeping, checked store keys, and the bounded FIFO
-  frontier with its membership set; and
+  frontier with its membership set;
+- staged wire-extracted bytes plus engine-owned `remote`, `bare`, and `connection`
+  source rows, retained only through the fact's first judgment; and
 - `Node.regs`, one rebuildable register per family group. A registered
   `observe()` function folds validated Provide deltas into a register, and a
   registered `answer()` function can expose its index through a reserved
@@ -198,13 +214,17 @@ fault their keys, and hydration at any scale is a client verb
 (`store.hydrate.pull` with no key faults everything). It runs
 the three-phase host turn in a single-threaded select loop — client verbs
 over a unix socket at `<db>.sock`, peers over TCP. Its reusable core is
-`bin/runtime.py`, a socket-free seam: `cycle` admits an inbox of fact bytes
+`bin/runtime.py`, a socket-free seam: `cycle` admits a locally-authored inbox
 and drains one bounded turn presenting the wire's flush reports; `pump`
 groups the validated `send`/`ship` Provides by owner, resolves each route and
 its ship-ids, and hands the frames to a `deliver` callback. The wire's only
 payload is length-framed canonical fact bytes under a one-byte discriminator:
 a bare handshake fact before a session key exists, a sealed `connection.frame`
-after. There is **one out door** — the daemon reads validated outbox Provides and
+after. On input, the daemon admits a bare body with `WireOrigin()`; after it
+authenticates and opens a frame, it admits each inner body with
+`WireOrigin(connection_id)`. Those labels are engine-owned graph rows, never
+sender-authored atoms. There is **one out door** — the daemon reads validated
+outbox Provides and
 `deliver` seals iff the route yields a session secret, else sends bare — so
 handshake responses and sync frames leave through the same mechanism. The
 outbound path tolerates loss until the receiver admits: a frame is handed
@@ -221,29 +241,39 @@ A host turn has three phases.
 
 **Host in.** Admission strict-decodes candidate bytes, recomputes `FactId`
 (rejecting a mismatch when an id was requested), returns early for an already
-resident id, then runs the family CHECK gate and extraction. A successful
-admission stores the resident fact, retains canonical bytes in the resident
-durable map when applicable, adds every materialized atom directly to the
-asserted match buckets, and enqueues the owner. After the turn, the host flushes
-new durable facts as one SQLite transaction containing the `facts` spine row
-and all atom rows. Failed gates are inert.
+resident id, then runs an optional intrinsic family CHECK and extraction. A
+successful admission stores the resident fact, stages extracted bytes, adds
+every materialized atom directly to the asserted match buckets, and enqueues
+the owner. Locally authored and checked-store facts enter the durable map
+immediately. Wire input instead stages extracted bytes and publishes transient,
+engine-owned source Provides at that owner's id: `remote` plus either `bare` or
+`connection` (whose value is the authenticated connection id). Failed
+intrinsic checks are inert.
 
 **Engine drain.** Drain the frontier to a bound (overflow parks, never
-drops). For each owner, the fault leg first checks every Gather, Require, and
-SuppressIf key once against the persisted relation and admits all cold
-providers (checked admission — the bytes passed the gate once). The engine then
-answers all three consumer relationships through that same match path. Any
-nonempty SuppressIf suppresses; otherwise any empty Require parks; otherwise
-the engine builds `Context<Validated>` from Gather and Require matches and calls
-the routed projector `project(fact, ctx) -> Out(verdict, provides)`. Promotion
-records the verdict and replaces the owner's clean output atomically, so old
-and new Provides are never both visible. The kernel restamps projected
-Provides with engine provenance, notifies registered observers of changed
-Provide addresses, and wakes every resident owner whose asserted consumer
-relationships match a changed Provide. `Reap` and
+drops). For each owner, check already-resident suppressors first, so a rejected
+source cannot trigger another consumer relationship such as total hydration.
+If no suppressor is present and a store is attached, the fault leg checks every
+Gather, Require, and SuppressIf key once against the persisted relation and
+admits all cold providers (checked admission — the bytes passed the intrinsic
+gate once). The engine then answers all three consumer relationships through
+that same match path. Any nonempty SuppressIf suppresses; otherwise any empty
+Require parks; otherwise the engine builds `Context<Validated>` from Gather and
+Require matches and calls the routed projector
+`project(fact, ctx) -> Out(verdict, provides)`. Promotion records the verdict
+and replaces the owner's clean output atomically, so old and new Provides are
+never both visible. The kernel restamps projected Provides with engine
+provenance, notifies registered observers of changed Provide addresses, and
+wakes every resident owner whose asserted consumer relationships match a
+changed Provide. `Reap` and
 `Suppressed` are terminal: after clean replacement and observer notification,
 the engine removes the resident body, asserted rows, memo, durable bytes, and
-SQLite rows.
+SQLite rows. A first nonterminal verdict moves staged extracted bytes into the
+durable map before settlement; a first terminal verdict discards them. Source
+rows are cleared after this first judgment because the source decision is then
+certified; for durable facts, stored existence carries that certificate across
+restart. After the turn, the host flushes newly durable facts as one SQLite
+transaction.
 
 **Host out.** The host drains validated Provides at keys it Gathers, performs
 external work, and admits facts reporting what happened. Host code never
@@ -449,11 +479,16 @@ order, enforced by a source-contract test:
 - **SHAPE** — constructors returning canonical `Fact`s. The only place
   asserted input atoms are chosen. This is the whole codec story: the kernel's one
   canonical encoding covers every family, so there are no per-family byte
-  formats. A family that wants a private format inside a value is a signal
-  the atom vocabulary is missing something.
+  formats. Source policy lives here too: a family adds the provenance
+  SuppressIf/Gather relationships that describe where its facts may come from.
+  A family that wants a private format inside a value is a signal the atom
+  vocabulary is missing something.
 - **EXTRACT** — content-pure durability (`True` is durable, `False` volatile).
-- **CHECK** — optional, self-verification at the admission gate; pure
-  function of the fact's own bytes; runs once, never on replay.
+- **CHECK** — optional intrinsic self-verification at the admission gate; pure
+  function of the fact's own bytes; runs once, never on replay. It never
+  receives host provenance. Families with source-policy atoms rebuild their
+  exact SHAPE here, so a sender cannot strip the relationship that would
+  suppress or bind it.
 - **PROJECT** — the only place the family's meaning lives: validity and
   projected Provides, including any derived sync marker. Pure function of
   `(fact, ctx)`; never touches the node.
@@ -632,9 +667,9 @@ marker-owning dependencies below the floor to the listed ids, deduplicated and
 capped at 4096. A peer requests only ids that the other side advertised. The
 resulting `sync.need` Gathers `leaf@sync` at every requested id and its projector
 Provides only matching marker owners to the outbox, so a forged by-id request
-cannot turn a durable marker-free fact into sync egress. Every received fact enters
-normal unchecked peer admission; the `checked=True` path is reserved for
-reconstruction from the node's own store.
+cannot turn a durable marker-free fact into sync egress. Every received fact
+enters ordinary admission with its host-observed source rows; the `checked=True`
+path is reserved for reconstruction from the node's own store.
 
 `compare` and `need` are volatile and project no marker, so they are absent
 from the set they reconcile and leave no reboot state. A `need` Provides its
@@ -695,8 +730,8 @@ primitive — living in `facts/connection/`. There is no kernel change.
 bytes ARE its id, and its public envelope (seal version, initiator ephemeral
 X25519 key, addressed endpoint, nonce) wraps a ciphertext hiding both static
 endpoints, the transcript nonce, the dial/return addresses, an authority proof,
-and a branch signature. CHECK is structural only (widths parse); decryption
-happens in PROJECT, keyed by opening secrets the fact Watches (the responder
+and a branch signature. CHECK verifies the exact public shape and envelope
+widths; decryption happens in PROJECT, keyed by opening secrets the fact Gathers (the responder
 opens with its static endpoint secret, the initiator with its own ephemeral —
 the X25519 box is symmetric). The responder authors a `connection.connection`
 (volatile, no sync marker; its id IS the connection id, its bytes ARE the wire
@@ -705,6 +740,13 @@ message so both sides admit identical bytes): the plaintext carries the recomput
 unless it re-derives them from the transcript. Key agreement is `ee = DH(init_eph,
 resp_eph)`, `es = DH(init_eph, resp_static)` → HKDF-SHA256 → the session key that
 seals every established frame with XChaCha20-Poly1305.
+
+The two handshake families carry `SuppressIf(connection@origin/SELF)`: local
+authoring and bare first contact are allowed, but smuggling a handshake inside
+an existing session is not. Established `sync.compare` and `sync.need` facts
+instead carry `SuppressIf(bare@origin/SELF)` plus
+`Gather(connection@origin/SELF)`; their projectors require the outer
+authenticated connection id to equal the id embedded in the control fact.
 
 The durable request remains after its first answer and continues to Provide its
 bare handshake as a dial anchor. The connection's `answered` Provide moves it
@@ -749,7 +791,7 @@ leaves, excluded from the reconciliation it carries. Its one value packs many
 length-framed canonical fact bytes (up to ~48 KiB of inner fact bytes per
 frame); the sync driver's shipments ride bundles instead of one fact per wire
 frame. A receiver unpacks a bundle and
-admits each inner fact through the normal gate, a bounded batch per turn — a
+admits each inner fact with the authenticated connection id, a bounded batch per turn — a
 corrupt inner is a per-fact miss that never poisons its siblings, and the wrapper
 itself is never admitted. Bundling amortizes framing, encryption, and socket
 overhead during bulk catch-up while preserving per-inner admission checks.
@@ -851,9 +893,6 @@ also carries the applicable death key.
 - **Workspace sync lanes** — one global `b"sync"` register currently feeds
   every peer. Per-workspace authorization and coverage isolation are required
   before unrelated workspace sets can safely share a node.
-- **Node-private ingress enforcement** — absence of a projected sync marker
-  excludes facts from egress, but the peer inbox does not yet enforce the
-  separate question of which families may arrive from the wire.
 - **Local-input drivers** — connection driving exists and time is a turn
   primitive; a general host-authored input family is not implemented.
 

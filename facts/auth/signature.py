@@ -45,7 +45,7 @@ def _canonical(f):                       # the free parameters, or None if f is 
     except Exception:
         return None
 
-def check(f, local):                     # signatures sync between peers: provenance ignored
+def check(f):                            # signatures sync between peers; provenance is irrelevant
     parts = _canonical(f)                 # verify over the exact target a Require will match
     return bool(parts and verify(parts[0].value, parts[2], parts[1].value))
 

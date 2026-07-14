@@ -6,7 +6,7 @@ Requires the workspace it names, so a selection self-heals — a workspace that 
 gone parks its selection and the reader falls back to the sole/only workspace.
 The latest selection wins by the ordinary (ts, owner) read-side fold."""
 from kernel import (Atom, Exact, PROVIDE, Out, REQUIRE, encode, fact, now,
-                    ts_atom, ts_of)
+                    remote_suppress, ts_atom, ts_of)
 from facts.store import hydrate
 
 TAG = b"auth.active_workspace"
@@ -15,15 +15,20 @@ KEY = b"current"
 # SHAPE — the canonical atom set; the only place atoms are chosen.
 def active_workspace(workspace_id, t):
     return fact(TAG, ts_atom(t, b"local"),
+                remote_suppress,
                 Atom(REQUIRE, b"workspace", b"auth", Exact(workspace_id)),
                 Atom(PROVIDE, b"active_workspace", b"local", Exact(KEY), workspace_id))
 
 # EXTRACT — content-pure durability. The projector emits no sync marker.
 def extract(f): return True
 
-# CHECK — local-only: the selection is UI state authored here, never a fact a
-# peer may inject.
-def check(f, local): return local
+# CHECK — exact family shape. Wire provenance is expressed by remote_suppress.
+def check(f):
+    try:
+        row = next(a for a in f.atoms if a.name == b"active_workspace")
+        return f == active_workspace(row.value, ts_of(f))
+    except Exception:
+        return False
 
 # PROJECT — accept exactly SHAPE (the workspace Require gates validity upstream).
 def project(f, ctx):

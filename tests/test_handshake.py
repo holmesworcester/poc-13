@@ -9,7 +9,7 @@ from dataclasses import replace
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from kernel import Node, decode, encode, fact, fact_id
+from kernel import Node, WireOrigin, decode, encode, fact, fact_id
 from harness import reboot
 from facts import ROOT
 from facts.auth import endpoint, invite_accepted, local_signer_secret, workspace as wsmod
@@ -21,11 +21,11 @@ def _node():
     endpoint.keygen(n, 1); local_signer_secret.keygen(n, 1); n.run()
     return n
 
-def _wire(dst, src, tag):                # move every fact of a type from src to dst, admit
+def _wire(dst, src, tag):                # handshake facts cross the bare pre-session wire
     moved = []
     for fid, f in list(src.facts.items()):
         if f.type_tag == tag:
-            if dst.admit(src.durable.get(fid) or encode(f)): moved.append(fid)
+            if dst.admit(src.durable.get(fid) or encode(f), origin=WireOrigin()): moved.append(fid)
     dst.run(); return moved
 
 def _invited_workspace(host):
@@ -45,11 +45,11 @@ def _handshake(host, joiner):
     joiner.run()
     assert joiner.memo[rid] == "Valid", "joiner's own request must validate"
     # wire: request -> host; host authors the connection; connection -> joiner
-    host.admit(joiner.durable[rid]); host.run()
+    host.admit(joiner.durable[rid], origin=WireOrigin()); host.run()
     # only the addressee can open the request, so it responds (no receipt needed)
     cid = conn.respond(host, rid, b"127.0.0.1:7", 4); host.run()
     assert cid and host.memo[cid] == "Valid", "responder connection must validate"
-    joiner.admit(encode(host.facts[cid])); joiner.run()
+    joiner.admit(encode(host.facts[cid]), origin=WireOrigin()); joiner.run()
     assert joiner.memo[cid] == "Valid", "initiator connection must validate"
     return rid, cid
 
@@ -75,7 +75,7 @@ def test_mis_addressed_request_never_responds():
     _, wrong_ep = endpoint.current(other)        # seal to the wrong endpoint
     rid = req.bootstrap(joiner, wid, secret, iid, wrong_ep, b"127.0.0.1:9", b"127.0.0.1:7", 3)
     joiner.run()
-    host.admit(joiner.durable[rid]); host.run()
+    host.admit(joiner.durable[rid], origin=WireOrigin()); host.run()
     # host cannot open a request sealed to another endpoint: no respond, no connection
     assert conn.respond(host, rid, b"127.0.0.1:7", 4) is None
     assert host.memo.get(rid) in ("Parked", None)
@@ -92,7 +92,8 @@ def test_wrong_invite_signature_is_invalid():
         rid = req.bootstrap(joiner, wid, secret, iid, host_ep, b"127.0.0.1:9", b"127.0.0.1:7", 3)
     finally:
         req.sign = orig
-    host.admit(joiner.durable[rid]); host.run()
+    joiner.run()
+    host.admit(joiner.durable[rid], origin=WireOrigin()); host.run()
     assert host.memo[rid] == "Invalid", "a request not signed by the invite key is refused"
 
 def test_tampered_request_ciphertext_is_inert():
@@ -109,7 +110,7 @@ def test_tampered_request_ciphertext_is_inert():
         atoms.append(atom)
     bad = encode(fact(original.type_tag, *atoms))
     # structural CHECK still passes (widths intact); the host opens -> fails -> Parked, never responds
-    fid = host.admit(bad)
+    fid = host.admit(bytes(bad), origin=WireOrigin())
     if fid: host.run(); assert host.memo.get(fid) in ("Parked", "Invalid")
 
 if __name__ == "__main__":

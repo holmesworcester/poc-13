@@ -53,10 +53,10 @@ def flush(node, store, flushed):         # one transaction per host turn.
     for fid in reversed(new): store.add(node.durable[fid]); flushed.add(fid)
     store.commit()
 
-def cycle(node, inbox, now_ms, shipped, bound=BOUND, local=True):
-    """Admit each fact in `inbox`, then drain one bounded turn presenting `shipped`.
-    `local` is the inbox's provenance — the daemon passes False for peer bytes."""
-    for b in inbox: node.admit(b, local=local)
+def cycle(node, inbox, now_ms, shipped, bound=BOUND):
+    """Admit locally-authored `inbox`, then drain one bounded turn presenting `shipped`.
+    The daemon admits wire facts itself so each carries its bare/connection origin."""
+    for b in inbox: node.admit(b)
     node.turn(now_ms, shipped, bound)
     return node
 

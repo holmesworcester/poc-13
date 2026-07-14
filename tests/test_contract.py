@@ -56,6 +56,22 @@ def test_fact_atoms_use_the_closed_relationship_alphabet():
             assert node.args and isinstance(node.args[0], ast.Name), (p, node.lineno)
             assert node.args[0].id in relationships, (p, node.lineno)
 
+def test_provenance_shapes_have_an_intrinsic_check():
+    """Source policy is handler-local, but it must be canonical: any family
+    using a provenance atom has a one-argument CHECK that can reject a sender
+    who removes or substitutes that atom. No tag classification lives here."""
+    policy_names = {"remote_suppress", "bare_suppress",
+                    "connection_suppress", "connection_gather"}
+    for p in FACTS.rglob("*.py"):
+        if p.name == "__init__.py": continue
+        tree = ast.parse(p.read_text())
+        used = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)} & policy_names
+        if not used: continue
+        checks = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+                  and node.name == "check"]
+        assert len(checks) == 1, (p, used)
+        assert len(checks[0].args.args) == 1 and not checks[0].args.vararg, p
+
 def test_consumer_relationships_carry_no_values():
     """Ordinary Gather, Require, and SuppressIf atoms are match addresses,
     not payloads. The one carve-out is a reserved Gather: it is answered by a
@@ -88,5 +104,6 @@ def test_consumer_relationships_carry_no_values():
 if __name__ == "__main__":
     for t in (test_fact_contract, test_extract_contract_has_one_result,
               test_fact_atoms_use_the_closed_relationship_alphabet,
+              test_provenance_shapes_have_an_intrinsic_check,
               test_consumer_relationships_carry_no_values):
         t(); print(f"ok  {t.__name__}")

@@ -54,7 +54,7 @@ def _canonical(f):
         return None
 
 
-def check(f, local): return _canonical(f) is not None   # shareable content: provenance ignored
+def check(f): return _canonical(f) is not None
 
 
 # PROJECT — join one descriptor owner, then verify and expose the Bao proof.

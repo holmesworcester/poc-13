@@ -117,6 +117,12 @@ derived `leaf@sync/SELF` Provide returned by `sync_leaf()` in `Out.provides`. Lo
 secrets and connection anchors are durable but project no marker; protocol work
 such as sync compares and outbox sends is volatile and projects none.
 
+Wire source is graph input, not a special argument to family code. The host
+attaches transient engine-owned `remote` plus `bare` or `connection` Provides
+to an arriving fact. A family opts into source constraints in SHAPE with
+ordinary `SuppressIf`/`Gather` relationships; its optional one-argument CHECK
+remains source-blind and validates only intrinsic bytes and canonical shape.
+
 The projector is the fact family's semantic boundary. It runs only after every
 `SuppressIf` is empty and every `Require` is satisfied. Its context contains
 matching **validated** Provides for `Gather` and `Require`, including each
@@ -147,7 +153,9 @@ The main pieces are:
   projected-Provide `observe()` and reserved-Gather `answer()`.
 - [`facts/`](facts/) — one module per fact family. Each module owns SHAPE,
   EXTRACT, optional CHECK, PROJECT, COMMANDS, QUERIES, and CLI. Projectors are
-  also the routing tree, so protocol policy stays out of the kernel.
+  also the routing tree. Wire-source policy is expressed in SHAPE with ordinary
+  provenance `SuppressIf`/`Gather` relationships, so no tag policy table lives
+  in the kernel.
 - [`facts/sync/index.py`](facts/sync/index.py) — the sync family’s own
   rebuildable register: leaf membership, a history-independent Merkle treap,
   summary memo, and version counter, derived from validated sync-leaf Provides.
@@ -169,11 +177,10 @@ The main pieces are:
 ## Current scope
 
 The prototype has a global resident sync set per node. Workspace-scoped sync
-lanes and negative multi-workspace isolation are not implemented yet. Absence
-of a projected sync-leaf marker controls sync egress, but the peer inbox does not
-yet enforce a separate family-level ingress permission, so the present threat
-model assumes connected peers do not send node-private families. Retention-policy
-enforcement remains outside the implemented surface.
+lanes and negative multi-workspace isolation are not implemented yet. The host
+labels bare and authenticated-connection arrivals in the fact graph; protected
+family SHAPEs suppress the disallowed sources before they can become durable.
+Retention-policy enforcement remains outside the implemented surface.
 
 ## Quick start
 

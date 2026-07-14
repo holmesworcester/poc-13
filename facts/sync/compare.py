@@ -26,8 +26,9 @@ reaction: convergence is fingerprint agreement, every response is a projector Pr
 at the connection's outbox key, and a dropped frame just re-descends next cadence.
 Volatile (extract -> False): session state, never itself a leaf."""
 from bisect import bisect_left
-from kernel import (Atom, Exact, PROVIDE, Out, Range, GATHER, by, encode,
-                    fact, now_gather, shipped_gather, ts_atom, unframe)
+from kernel import (Atom, CONNECTION_NAME, Exact, PROVIDE, Out, Range, GATHER,
+                    bare_suppress, by, connection_gather, encode, fact,
+                    now_gather, shipped_gather, ts_atom, unframe)
 from facts.sync.index import SUM_NAME, summary_gather
 from facts.sync.need import need
 
@@ -51,7 +52,8 @@ def claims_within(claims, los, lo, hi):  # the claims fully inside [lo,hi), by b
 # with its own view AND, when windowed, the below-floor deps of each small range).
 def compare(cid, claims, floor=b"", pulse=False):   # claims: list of (name, lo, hi, payload)
     atoms = [ts_atom(0, SC), Atom(PROVIDE, b"cid", SC, Exact(cid)),
-             Atom(PROVIDE, b"floor", SC, Exact(cid), floor), shipped_gather]
+             Atom(PROVIDE, b"floor", SC, Exact(cid), floor), bare_suppress,
+             connection_gather, shipped_gather]
     if pulse:                            # an all-done reply: it will pulse confirmed@cid
         atoms += [now_gather(0),           # and gathers a next-tick wake plus sight of its
                   Atom(GATHER, b"confirmed", SC, Exact(cid))]   # own pulse to reap
@@ -63,10 +65,28 @@ def compare(cid, claims, floor=b"", pulse=False):   # claims: list of (name, lo,
 # EXTRACT — volatile session state.
 def extract(f): return False
 
+# CHECK — rebuild the complete bundled shape, including every summary Gather and
+# the provenance atoms, from its public claims.
+def check(f):
+    try:
+        cid = _tgt(f, b"cid")
+        floor = next(a.value for a in f.atoms if a.name == b"floor")
+        claims = [(a.name, a.target[0], a.target[1], a.value)
+                  for a in f.atoms
+                  if a.relationship == PROVIDE and a.name in (b"fp", b"ids", b"done")]
+        if any(name == b"ids" and any(len(fid) != 32 for fid in unframe(value))
+               for name, _lo, _hi, value in claims): return False
+        pulse = any(a.relationship == GATHER and a.name == b"confirmed" for a in f.atoms)
+        return f == compare(cid, claims, floor, pulse)
+    except Exception:
+        return False
+
 # PROJECT — reconcile each peer claim against my summary; emit my claims + pulls.
 def project(f, ctx):
-    if by(ctx, b"shipped"): return Out("Reap")
     cid = _tgt(f, b"cid")
+    carriers = [r.atom.value for r in by(ctx, CONNECTION_NAME)]
+    if carriers and carriers != [cid]: return Out("Reap")
+    if by(ctx, b"shipped"): return Out("Reap")
     floor = next((a.value for a in f.atoms if a.name == b"floor"), b"")   # the window floor rides for re-threading
     S = by(ctx, SUM_NAME)                                            # my view of each claimed range
     myfp   = {a.target: a.value for _, _, a in S if a.name == b"fp"}

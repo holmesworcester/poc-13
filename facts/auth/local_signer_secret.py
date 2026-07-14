@@ -5,7 +5,7 @@ one fact that must never sync. keygen admits one and refuses a second: the
 identity is single and stable. current() hands commands the (sk, pk) they
 sign with; whoami prints the public key. Trusting the durable file here is a
 local-integrity assumption, not a protocol one — see docs/DESIGN.md."""
-from kernel import Atom, PROVIDE, Out, SELF, encode, fact, now, ts_atom
+from kernel import Atom, PROVIDE, Out, SELF, encode, fact, now, remote_suppress, ts_atom, ts_of
 from crypto import ed25519_keygen as _keygen
 from facts.store import hydrate
 
@@ -14,15 +14,21 @@ TAG = b"auth.local_signer_secret"
 # SHAPE — the canonical atom set; the only place atoms are chosen.
 def secret(sk, pk, t):
     return fact(TAG, ts_atom(t, b"local"),
+                remote_suppress,
                 Atom(PROVIDE, b"sk", b"local", SELF, sk),
                 Atom(PROVIDE, b"pk", b"local", SELF, pk))
 
 # EXTRACT — content-pure durability. The projector emits no sync marker.
 def extract(f): return True
 
-# CHECK — local-only: the signing secret is authored here and must never be
-# admitted from a peer, or a peer could set our identity.
-def check(f, local): return local
+# CHECK — exact shape and the public key derived from the carried seed.
+def check(f):
+    try:
+        sk = next(a.value for a in f.atoms if a.name == b"sk")
+        pk = next(a.value for a in f.atoms if a.name == b"pk")
+        return _keygen(sk)[1] == pk and f == secret(sk, pk, ts_of(f))
+    except Exception:
+        return False
 
 # PROJECT — the only place this family's meaning lives.
 def project(f, ctx):

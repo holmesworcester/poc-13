@@ -7,7 +7,8 @@ from the invite link — the secret (keyed by its bootstrap_hash, mixed into the
 handshake IKM and whose keygen signs the joiner's request) plus the inviter's
 address and endpoint — so it doubles as the bootstrap-reconnect source. Both the
 creator (self-accepting its own first invite) and every joiner author one."""
-from kernel import Atom, Exact, H, PROVIDE, Out, encode, fact, frame, now, ts_atom, _rd
+from kernel import (Atom, Exact, H, PROVIDE, Out, encode, fact, frame, now,
+                    remote_suppress, ts_atom, ts_of, unframe, _rd)
 
 TAG = b"auth.invite_accepted"
 TOKEN = b"tinyp2p-bootstrap-token-v1"
@@ -17,6 +18,7 @@ bootstrap_hash = lambda secret: H(frame(TOKEN, secret))
 def invite_accepted(workspace_id, invite_id, secret, addr, endpoint_pk, t):
     bh = bootstrap_hash(secret)
     return fact(TAG, ts_atom(t, b"local"),
+                remote_suppress,
                 Atom(PROVIDE, b"workspace_accepted", b"auth", Exact(workspace_id)),
                 Atom(PROVIDE, b"invite_secret", b"local", Exact(bh), secret),
                 Atom(PROVIDE, b"invite_ref", b"local", Exact(bh),
@@ -25,11 +27,19 @@ def invite_accepted(workspace_id, invite_id, secret, addr, endpoint_pk, t):
 # EXTRACT — content-pure durability. Acceptance projects no sync marker.
 def extract(f): return True
 
-# CHECK — the bootstrap_hash it keys by must be the hash of the secret it carries.
-def check(f, local):                     # local-only: the trust anchor is accepted here, never off the wire
-    v = {a.name: (a.target, a.value) for a in f.atoms}
-    (tgt, secret) = v.get(b"invite_secret", (None, None))
-    return bool(secret) and tgt == Exact(bootstrap_hash(secret)) and local
+# CHECK — exact shape, including the secret/hash and reference mirrors.
+def check(f):
+    try:
+        accepted = next(a for a in f.atoms if a.name == b"workspace_accepted")
+        secret = next(a for a in f.atoms if a.name == b"invite_secret")
+        ref = next(a for a in f.atoms if a.name == b"invite_ref")
+        workspace_id, invite_id, addr, endpoint_pk = unframe(ref.value)
+        return (bool(secret.value) and accepted.target == Exact(workspace_id)
+                and secret.target == ref.target == Exact(bootstrap_hash(secret.value))
+                and f == invite_accepted(workspace_id, invite_id, secret.value,
+                                         addr, endpoint_pk, ts_of(f)))
+    except Exception:
+        return False
 
 # PROJECT — publish acceptance + the bootstrap context.
 def project(f, ctx):

@@ -34,7 +34,7 @@ so a reconnect re-ships (the connection id outlives the socket)."""
 import errno, os, select, signal, socket, sys, time
 BIN = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [BIN, os.path.dirname(BIN)]
-from kernel import Node, Store, _rd, frame, unframe
+from kernel import Node, Store, WireOrigin, _rd, frame, unframe
 from facts import ROOT
 from facts.sync import cadence
 from facts.auth import local_signer_secret, endpoint
@@ -170,22 +170,25 @@ def main(db, *argv):
                                 for _e, _a, cid, _w in conn.peers(node):     # forget what we shipped this addr,
                                     if _a.decode() == addr: sent.pop(cid, None)   # so a reconnect re-ships
                                 break
-            n, arrived, inbox = 0, [], []             # collect inbound, bounded per turn
+            n, arrived = 0, []                        # collect inbound, bounded per turn
             for src in inbound + [p for p in links.values() if p["s"]]:
                 if "inb" not in src: continue
-                for kind, body in messages(src):     # local=False: peer bytes — a family may refuse them
+                for kind, body in messages(src):     # host labels bare vs authenticated-connection provenance
                     if kind == BARE:                  # a handshake fact: admit now (idempotent), react after
-                        rid = node.admit(body, local=False)
+                        rid = node.admit(body, origin=WireOrigin())
                         if rid and node.facts[rid].type_tag == request.TAG: arrived.append(rid)
                     else:
-                        inbox += _open_frame(node, body)   # a sealed frame -> its inner fact bytes
+                        opened = _open_frame(node, body)   # a sealed frame -> (authenticated cid, inner facts)
+                        if opened:
+                            cid, inners = opened
+                            for inner in inners: node.admit(inner, origin=WireOrigin(cid))
                     n += 1; work = True
                     if n >= BOUND: break
                 if n >= BOUND: break
             # ENGINE DRAIN — admit the inbox and drain one bounded turn, presenting the wire's
             # flush reports: a flushed sender that Gathers shipped reaps this turn; keep
             # re-presenting until it does, then prune the acted-on. Leftover frontier is next turn.
-            cycle(node, inbox, now_ms(), to_ship, BOUND, local=False); work |= bool(node.frontier)
+            cycle(node, [], now_ms(), to_ship, BOUND); work |= bool(node.frontier)
             to_ship &= {o for o, _, _ in outbox(node)}     # keep only owners still Providing send/ship
             # respond seam: the onus is on the requester — its durable request re-dials on
             # a cadence; the responder just answers each ARRIVAL (no cadence of its own), so
@@ -240,9 +243,11 @@ def main(db, *argv):
 def _open_frame(node, body):             # a sealed data frame -> its inner fact bytes (opened by connection id)
     cid = frames.frame_cid(body)         # the daemon opens via a family query; it holds no sync policy
     r = conn.route(node, cid) if cid else None
-    if not r: return []                  # no session secret yet: drop (sync re-descends next cadence)
+    if not r: return None                # no session secret yet: drop (sync re-descends next cadence)
     blob = frames.open_frame(body, r[1])
-    return unframe(blob) if blob is not None else []   # tamper/wrong key -> whole-frame miss
+    if blob is None: return None         # tamper/wrong key -> whole-frame miss
+    try: return cid, unframe(blob)
+    except Exception: return None        # authenticated peer sent a malformed inner bundle: drop it whole
 
 if __name__ == "__main__":
     main(*sys.argv[1:])

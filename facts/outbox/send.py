@@ -4,18 +4,28 @@ the flush by presenting shipped@SELF, on which this fact reaps — a volatile ro
 that lives exactly from stage to flush, then vanishes with no receipt. The wire
 is best-effort (sync heals loss), so there is nothing to persist or retry here:
 this is poc-10's network_outgoing row — staged, flushed, deleted."""
-from kernel import Atom, Exact, PROVIDE, Out, by, encode, fact, now, shipped_gather, ts_atom
+from kernel import (Atom, Exact, PROVIDE, Out, by, encode, fact, now,
+                    remote_suppress, shipped_gather, ts_atom, ts_of)
 from facts.store import hydrate
 
 TAG = b"outbox.send"
 
 # SHAPE — the canonical atom set; the only place atoms are chosen.
 def send(dest, payload, t):
-    return fact(TAG, ts_atom(t, b"outbox"), shipped_gather,
+    return fact(TAG, ts_atom(t, b"outbox"), remote_suppress, shipped_gather,
                 Atom(PROVIDE, b"send", b"outbox", Exact(dest), payload))
 
 # EXTRACT — volatile one-shot work.
 def extract(f): return False
+
+# CHECK — exact one-shot shape. Only locally authored work lacks the remote
+# provenance Provide that matches remote_suppress.
+def check(f):
+    try:
+        row = next(a for a in f.atoms if a.name == b"send")
+        return row.target[0] == row.target[1] and f == send(row.target[0], row.value, ts_of(f))
+    except Exception:
+        return False
 
 # PROJECT — Provide the payload until the flush report, then reap with no residue.
 def project(f, ctx):

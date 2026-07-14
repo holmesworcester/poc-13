@@ -114,6 +114,11 @@ deletable — the invariant is checked once at the boundary instead of
 re-checked (incompletely) at use. Behavior change: facts violating the
 documented rule become inert misses instead of half-working.
 
+The later graph-provenance work adds one narrow exception in the v2 grammar:
+`remote`, `bare`, and `connection` may be `SuppressIf`, always at
+`origin@SELF`; `connection` may also be Gathered there. All other reserved
+names remain Gather-only, and reserved Provides remain impossible to decode.
+
 ## dec_atom / the codec
 
 ### 5. Let the re-encode check do the parsing work (~4 lines)

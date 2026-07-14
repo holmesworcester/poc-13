@@ -6,7 +6,7 @@ peers() reads the binding back as an auth column (member name, not anon)."""
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from kernel import Node, encode
+from kernel import Node, WireOrigin, encode
 from facts import ROOT
 from facts.auth import endpoint, local_signer_secret, user_invite, device
 from facts.auth import user as usermod, workspace as wsmod
@@ -41,10 +41,10 @@ def test_membership_reconnect_without_invite():
     # joiner reconnects with NO invite — a pure membership proof, signed by its member key
     rid = req.membership(joiner, wid, host_ep, b"127.0.0.1:9", b"127.0.0.1:7", 5); joiner.run()
     assert rid and joiner.memo[rid] == "Valid", "membership request validates on the initiator"
-    host.admit(joiner.durable[rid]); host.run()
+    host.admit(joiner.durable[rid], origin=WireOrigin()); host.run()
     cid = conn.respond(host, rid, b"127.0.0.1:7", 6); host.run()
     assert cid and host.memo[cid] == "Valid", "responder recognizes the member and connects"
-    joiner.admit(encode(host.facts[cid])); joiner.run()
+    joiner.admit(encode(host.facts[cid]), origin=WireOrigin()); joiner.run()
     assert joiner.memo[cid] == "Valid"
     assert conn.secret(host, cid) == conn.secret(joiner, cid) is not None
     assert len(conn.secret(host, cid)) == 32
@@ -62,7 +62,7 @@ def test_peers_shows_the_authenticated_member():
     wid = _members(host, joiner)
     _, host_ep = endpoint.current(host)
     rid = req.membership(joiner, wid, host_ep, b"127.0.0.1:9", b"127.0.0.1:7", 5); joiner.run()
-    host.admit(joiner.durable[rid]); host.run()
+    host.admit(joiner.durable[rid], origin=WireOrigin()); host.run()
     cid = conn.respond(host, rid, b"127.0.0.1:7", 6); host.run()
     # the host sees the connection's peer endpoint resolve to the joining member 'bo'
     who = {ep: w for ep, _a, _c, w in conn.peers(host)}
