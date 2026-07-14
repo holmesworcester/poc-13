@@ -114,6 +114,43 @@ def test_tag_alias_is_not_a_signature():
     assert Node(ROOT).admit(encode(honest)) is not None
     assert Node(ROOT).admit(encode(alias)) is None
 
+def test_content_projectors_reject_forged_authorship():
+    # The signed-content wave's whole point: a projector gate binds each fact to a
+    # member signature. A valid signature by a NON-member, or a member's fact
+    # re-attributed to someone else, must be Invalid — not admitted on shape alone.
+    from kernel import Exact
+    from facts.auth import local_signer_secret
+    from facts.content import (channel as channels, message, reaction,
+                               message_deletion, retention_policy)
+    n = Node(ROOT)
+    wid = wsmod.create(n, b"acme", 1); n.run()          # founder: member + admin; #general exists
+    _sk, pk = local_signer_secret.current(n)
+    uid = next(k for k, f in n.facts.items() if f.type_tag == b"auth.user")
+    cid = channels.resolve(n, wid, b"general")
+    zsk, zpk = e.ed25519_keygen(b"z" * 32)              # a stranger: never enrolled
+    def signed(f, sk, pk, t):                           # a fact + a real signature over its id by pk
+        fid = fact_id(f)
+        n.admit(encode(f)); n.admit(encode(signature(wid, pk, fid, e.ed25519_sign(sk, fid), t)))
+        n.run(); return fid
+
+    good = message.send(n, wid, cid, b"hi", 5); n.run()
+    assert n.memo[good] == "Valid"                      # baseline: a real member message admits
+
+    forged = signed(message.message(wid, cid, uid, b"forged", 6), zsk, zpk, 6)
+    assert n.memo[forged] == "Invalid"                  # author=founder but signed by a stranger key
+    stranger = signed(message.message(wid, cid, b"x" * 32, b"nope", 7), zsk, zpk, 7)
+    assert n.memo[stranger] == "Invalid"                # stranger posting as their own non-member id
+
+    react = signed(reaction.reaction(wid, good, uid, b":x:", 8), zsk, zpk, 8)
+    assert n.memo[react] == "Invalid"                   # a reaction the reactor did not sign
+
+    dead = signed(message_deletion.deletion(wid, good, 9), zsk, zpk, 9)
+    assert n.memo[dead] == "Invalid"                    # a non-member cannot delete
+    assert message.feed(n, wid, cid) == [b"hi"]         # ...and the message survives the forged deletion
+
+    policy = signed(retention_policy.policy(wid, 1440, 10), zsk, zpk, 10)
+    assert n.memo[policy] == "Invalid"                  # a non-admin (here a non-member) cannot set retention
+
 def test_user_parks_until_signature_lands_either_order():
     n = Node(ROOT); u, uid, s = _member(n, b"al", 4)   # chain present, member's own sig withheld
     n.admit(encode(u)); n.run()
@@ -148,6 +185,7 @@ if __name__ == "__main__":
               test_malformed_signature_never_crashes_the_gate,
               test_signature_fact_cannot_smuggle_pk_for_another_target,
               test_tag_alias_is_not_a_signature,
+              test_content_projectors_reject_forged_authorship,
               test_user_parks_until_signature_lands_either_order,
               test_replay_never_reverifies):
         t(); print(f"ok  {t.__name__}")

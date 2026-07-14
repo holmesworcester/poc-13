@@ -34,7 +34,7 @@ def project(f, ctx):
     except Exception:
         return Out("Invalid")
     signer, members = signature.blessed(ctx)
-    admins = {row[2].target[0] for row in by(ctx, b"admin")}
+    admins = {row[2].target[0] for row in by(ctx, b"admin") if row[2].target[0]}  # empty span never indexes
     if not signer & {members[a] for a in admins if a in members}: return Out("Invalid")
     return Out(offers=(r,))
 

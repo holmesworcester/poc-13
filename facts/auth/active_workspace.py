@@ -41,13 +41,15 @@ def current(node):
               key=lambda r: (r[1], r[0]), default=None)
     return row[2].value if row else None
 
-def default(node):
+def default(node, missing_ok=False):
     from facts.auth import workspace
     cur = current(node)
     if cur is not None: return cur
     idx = workspace.index(node)          # no selection: a lone workspace is unambiguous
     if len(idx) == 1: return idx[0][0]
-    if not idx: raise RuntimeError("no workspace yet; create or join one, or pass wid=<id>")
+    if not idx:                          # cold / not yet synced: a read may treat this as empty
+        if missing_ok: return None
+        raise RuntimeError("no workspace yet; create or join one, or pass wid=<id>")
     raise RuntimeError("multiple workspaces; select one with auth.active_workspace.use <wid>, or pass wid=<id>")
 
 # CLI — string boundary over COMMANDS/QUERIES.

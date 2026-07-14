@@ -73,32 +73,33 @@ def view(node, workspace_id, channel):
     return lines
 
 # CLI — string boundary over COMMANDS/QUERIES. Grammar: `[wid=] <channel>
-# <body...> [t=]`; the author is always the local signer. A not-yet-synced
-# channel name reads as an empty feed so polling can observe the channel arrive.
-def _resolve_or_empty(node, wid, ref, run):
+# <body> [t=]`; the author is always the local signer, the body is one token
+# (quote it if it has spaces). A read whose workspace or channel is not yet
+# resident is an empty feed, so polling can watch either arrive.
+def _read(node, kv, ref, run):
+    wid = cliargs.wid_of(node, kv, missing_ok=True)
+    if wid is None: return ""             # no workspace resolvable yet: nothing to show
     try: channel_id = channels.resolve(node, wid, ref)
     except RuntimeError as e:
         if str(e).startswith("unknown channel:"): return ""
         raise
-    return run(channel_id)
+    return run(wid, channel_id)
 
 def _cli_send(n, *argv):
     kv, pos = cliargs.split(argv)
-    if len(pos) < 2: raise RuntimeError("usage: content.message.send [wid=<id>] <channel> <body...> [t=<n>]")
+    if len(pos) != 2: raise RuntimeError("usage: content.message.send [wid=<id>] <channel> <body> [t=<n>]")
     wid = cliargs.wid_of(n, kv)
     channel_id = channels.resolve(n, wid, pos[0])
-    return send(n, wid, channel_id, " ".join(pos[1:]).encode(), cliargs.t_of(kv)).hex()
+    return send(n, wid, channel_id, pos[1].encode(), cliargs.t_of(kv)).hex()
 
 def _cli_feed(n, *argv):
     kv, pos = cliargs.split(argv)
     if len(pos) != 1: raise RuntimeError("usage: content.message.feed [wid=<id>] <channel>")
-    wid = cliargs.wid_of(n, kv)
-    return _resolve_or_empty(n, wid, pos[0], lambda cid: b"\n".join(feed(n, wid, cid)).decode())
+    return _read(n, kv, pos[0], lambda wid, cid: b"\n".join(feed(n, wid, cid)).decode())
 
 def _cli_view(n, *argv):
     kv, pos = cliargs.split(argv)
     if len(pos) != 1: raise RuntimeError("usage: content.message.view [wid=<id>] <channel>")
-    wid = cliargs.wid_of(n, kv)
-    return _resolve_or_empty(n, wid, pos[0], lambda cid: "\n".join(view(n, wid, cid)))
+    return _read(n, kv, pos[0], lambda wid, cid: "\n".join(view(n, wid, cid)))
 
 CLI = {"send": _cli_send, "feed": _cli_feed, "view": _cli_view}

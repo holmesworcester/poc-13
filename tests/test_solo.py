@@ -35,11 +35,11 @@ def test_solo_story():
         converge(db, "elsewhere", "content.message.feed", random, secs=0,
                  phase="separate channel feed by id")
         # the deterministic grammar: a numeric body is a body (not a t=), and a
-        # multi-word body joins — neither is inferred from a positional's shape
+        # body token that looks like a keyed flag stays text — never inferred from shape
         tiny(db, "content.channel.create", "trap", "t=5")
         tiny(db, "content.message.send", "trap", "42", "t=6")
-        tiny(db, "content.message.send", "trap", "meet", "at", "ten", "t=7")
-        converge(db, "42\nmeet at ten", "content.message.feed", "trap", secs=0, phase="numeric+multiword body")
+        tiny(db, "content.message.send", "trap", "see you at t=8", "t=7")   # 't=8' inside the body is literal
+        converge(db, "42\nsee you at t=8", "content.message.feed", "trap", secs=0, phase="numeric + flag-shaped body")
         # discovery + completion need no daemon at all
         assert "content.message.send" in _tiny("--commands").stdout
         assert "auth.active_workspace.use" in _tiny("--commands").stdout
