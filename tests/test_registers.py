@@ -1,13 +1,13 @@
-"""The two generic seams a family owns an index through — REG registers (one
-shared mutable dict per scope, consumed by projectors and promote hooks) and
-answer() (a family claims a reserved role) — plus sync's use of them: the
-one-line replication opt-in, tombstone membership, the Invalid minus, replay
-rebuilding the treap through the very same hook, and the floored summary memo's
-durable-count guard (which replaced the kernel's clear-on-every-admit)."""
+"""The two generic seams a family owns an index through — the settle() hook (a
+family sees every verdict its facts settle to and folds it into its shared
+register) and answer() (a family claims a reserved role) — plus sync's use of
+them: the one-line replication opt-in, tombstone membership, the Invalid minus,
+replay rebuilding the treap through the very same hook, and the floored summary
+memo's durable-count guard (which replaced the kernel's clear-on-every-admit)."""
 import os, sys, types
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from kernel import (Atom, Exact, NEED, OFFER, Out, Router, SELF, REQUIRE,
-                    SUPPRESS, WATCH, encode, fact, fact_id, ts_atom, Node, H, frame)
+                    SUPPRESS, WATCH, encode, fact, fact_id, ts_atom, Node)
 from facts.sync import index as sidx
 from facts.sync.index import summary_need, summary
 import kernel
@@ -26,24 +26,10 @@ def node(*fams):
 def leafkeys(n): return set(sidx.tree(n).keys)
 
 
-def test_reg_families_share_one_register_across_projections():
-    seen = []
-    def project_a(f, ctx, reg):
-        reg["hits"] = reg.get("hits", 0) + 1; seen.append(reg); return Out()
-    def project_b(f, ctx, reg):
-        reg["hits"] = reg.get("hits", 0) + 10; seen.append(reg); return Out()
-    a = fam(REG=b"toyscope", project=project_a, extract=lambda f: (False, False))
-    b = fam(REG=b"toyscope", project=project_b, extract=lambda f: (False, False))
-    n = node((b"a", a), (b"b", b))
-    n.admit(encode(toy(b"toy.a", 1))); n.admit(encode(toy(b"toy.b", 2))); n.run()
-    assert n.regs[b"toyscope"]["hits"] == 11          # both families folded into ONE dict
-    assert all(r is n.regs[b"toyscope"] for r in seen)   # the same object every projection
-
-
 def test_replication_is_the_one_line_opt_in():
     quiet = fam(project=lambda f, ctx: Out(), extract=lambda f: (True, True))
     loud = fam(project=lambda f, ctx: Out(), extract=lambda f: (True, True),
-               promote=sidx.promote)
+               settle=sidx.settle)
     n = node((b"q", quiet), (b"l", loud))
     n.admit(encode(toy(b"toy.q", 1))); n.admit(encode(toy(b"toy.l", 2))); n.run()
     ks = leafkeys(n)
@@ -59,7 +45,7 @@ def test_tombstone_stays_a_leaf_and_invalid_leaves():
         return [r for nn, rs in ctx.items() if nn.role == role for r in rs]
     f1 = toy(b"toy.l", 5, Atom(NEED, b"kill", b"t", SELF, effect=SUPPRESS),
              Atom(NEED, b"poison", b"t", SELF, effect=WATCH))
-    loud = fam(project=project, extract=lambda f: (True, True), promote=sidx.promote)
+    loud = fam(project=project, extract=lambda f: (True, True), settle=sidx.settle)
     killer = fam(project=lambda f, ctx: Out(offers=tuple(
                      a for a in f.atoms if a.kind == OFFER and a.role != b"ts")),
                  extract=lambda f: (False, False))
@@ -80,7 +66,7 @@ def test_tombstone_stays_a_leaf_and_invalid_leaves():
 
 def test_replay_rebuilds_the_treap_through_the_same_hook():
     loud = fam(project=lambda f, ctx: Out(), extract=lambda f: (True, True),
-               promote=sidx.promote)
+               settle=sidx.settle)
     n = node((b"l", loud))
     for i in range(20): n.admit(encode(toy(b"toy.l", 100 + i)))
     n.run()
@@ -101,7 +87,7 @@ def test_floored_memo_repins_on_closure_growth():
                    a for a in f.atoms if a.kind == OFFER and a.role == b"base")),
                extract=lambda f: (True, True))
     dep = fam(project=lambda f, ctx: Out(), extract=lambda f: (True, True),
-              promote=sidx.promote)
+              settle=sidx.settle)
     n = node((b"p", prov), (b"d", dep))
     p1 = toy(b"toy.p", 10, Atom(OFFER, b"base", b"t", Exact(b"x")))
     m1 = toy(b"toy.d", 1000, Atom(NEED, b"base", b"t", Exact(b"x"), effect=REQUIRE))

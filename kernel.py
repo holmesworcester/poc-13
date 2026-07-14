@@ -5,9 +5,10 @@ are the whole fact language. The kernel owns exactly four things: canonical
 identity, admission, matching, and the turn loop (which the host feeds `now`).
 Everything else — sync, queues, effects, content, retention — is a fact family
 under facts/; time alone is a turn primitive, not a family (see turn/now_need).
-Two generic seams let a family own an index the kernel never reads: a group
-REGISTER (regs; consumed by REG projectors and promote hooks, rebuilt by
-replay) and answer() (a family claims a reserved role and serves it itself).
+Two generic seams let a family own an index the kernel never reads: the
+settle() hook (a family sees every verdict its facts settle to and folds it
+into its register under regs — volatile, rebuilt by replay through the same
+hook) and answer() (a family claims a reserved role and serves it itself).
 
 Projectors ARE the routers: the kernel runs one root projector, and a Router
 is just a projector that dispatches on the next type-tag segment. Extraction
@@ -323,8 +324,8 @@ class Node:
         self.rows = {}                       # (kind,role,scope) -> Bucket: the asserted match index
         self.memo, self.clean = {}, {}       # id -> verdict ; (role,scope) -> [(owner, ts, atom)]
         self.owned = {}                      # id -> its clean rows, for owner-scoped replacement
-        self.regs = {}                       # scope -> one shared mutable register per REG family group;
-                                             # volatile derived state, rebuilt through the same hooks by replay
+        self.regs = {}                       # scope -> one shared mutable register per family group, written
+                                             # by settle() hooks; volatile derived state, rebuilt by replay
         self.frontier = deque()              # FIFO of fids to (re)step
         self._queued = set()                 # membership mirror of the frontier: O(1) dedup ('in' on a deque is O(n))
 
@@ -442,22 +443,16 @@ class Node:
             out = Out("Parked")
         else:                            # Context<Validated>; Watch never gates. Reserved index needs are
             ctx = {n: self._answer(n) for n in ns if n.effect in (REQUIRE, WATCH)}   # answered from the engine
-            if fam is not None and (R := getattr(fam, "REG", None)) is not None:
-                # A REG family's projector also consumes the group's shared mutable
-                # register (one dict per scope, across every family declaring it).
-                # Direct dispatch equals the routed run: routing is neutral.
-                out = fam.project(f, ctx, self.regs.setdefault(R, {})) or Out("Parked")
-            else:
-                out = self.root.project(f, ctx) or Out("Parked")
+            out = self.root.project(f, ctx) or Out("Parked")
         self._promote(fid, f, out, fam)
 
     def _promote(self, fid, f, out, fam=None):
         self.memo[fid] = out.verdict
-        # The family lifecycle hook: a family that declares promote() sees every
+        # The family lifecycle hook: a family that declares settle() sees every
         # verdict its fact settles to — including Suppressed and Parked, which
         # never reach project() — and maintains derived group state from it
         # (e.g. sync's leaf membership, where tombstones require the verdict).
-        if fam is not None and (hook := getattr(fam, "promote", None)):
+        if fam is not None and (hook := getattr(fam, "settle", None)):
             hook(self, fid, f, out.verdict)
         # Owner-scoped replacement: pull this fact's current rows from their
         # buckets, add the new ones — old and new output are never both visible.

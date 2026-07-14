@@ -19,7 +19,7 @@ def message(workspace_id, channel, author, body, t):
 
 # EXTRACT — content-pure: (durable, shareable).
 def extract(f): return True, True
-from facts.sync.index import promote     # opt in: these facts replicate (one line is the whole choice)
+from facts.sync.index import settle      # opt in: these facts replicate (one line is the whole choice)
 
 # PROJECT — the only place this family's meaning lives.
 def project(f, ctx):

@@ -5,7 +5,7 @@ by one batched `need`, which ships those facts. Both are unshareable session sta
 excluded from the leaves they reconcile, and target responses at the connection's
 outbox key — so sync has no daemon reaction, only projectors on the one send path.
 `index` holds the set they reconcile: the treap in the b"sync" register, fed by
-the promote hook each replicating family aliases, read via the `summary` need."""
+the settle hook each replicating family aliases, read via the `summary` need."""
 from kernel import Router
 from . import index, compare, need, cadence
 

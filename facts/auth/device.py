@@ -30,7 +30,7 @@ def device(workspace_id, label, endpoint_pk, signing_pk, t):
 
 # EXTRACT — content-pure: (durable, shareable). Endpoints must travel to peers.
 def extract(f): return True, True
-from facts.sync.index import promote     # opt in: these facts replicate (one line is the whole choice)
+from facts.sync.index import settle      # opt in: these facts replicate (one line is the whole choice)
 
 # PROJECT — the signer must be an enrolled member (its key is a published key).
 def project(f, ctx):

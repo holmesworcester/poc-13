@@ -454,12 +454,12 @@ standing demand).
 
 Sync reconciles facts, never atoms — and the whole of it, set included, lives
 in `facts/sync/`. The kernel's contribution is two GENERIC seams, not state:
-the promote hook (a family that declares `promote()` sees every verdict its
+the settle hook (a family that declares `settle()` sees every verdict its
 facts settle to — including `Suppressed` and `Parked`, which never reach
 `project()` — and maintains derived group state in its shared register) and
 `answer()` (a family claims a reserved role and serves the need from its own
 index). A family opts its facts into replication with one line — `from
-facts.sync.index import promote` — and `facts/sync/index.py` folds each
+facts.sync.index import settle` — and `facts/sync/index.py` folds each
 verdict into the leaf set: `(ts, FactId) -> leaf hash` over every fact that is
 durable, shareable, and `Valid|Suppressed`, held in a treap in the `b"sync"`
 register, plus `ver`, a monotonic counter (never a hash) a host can cheaply

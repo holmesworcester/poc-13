@@ -27,7 +27,7 @@ def workspace(name, root_pk, t):
 
 # EXTRACT — content-pure: (durable, shareable).
 def extract(f): return True, True
-from facts.sync.index import promote     # opt in: these facts replicate (one line is the whole choice)
+from facts.sync.index import settle      # opt in: these facts replicate (one line is the whole choice)
 
 # PROJECT — valid only if the embedded root key signed it (and it is accepted).
 def project(f, ctx):

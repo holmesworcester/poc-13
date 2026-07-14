@@ -1,13 +1,13 @@
 """facts/sync/index.py — the reconciliation set as FAMILY state: the treap, the
 leaf-membership rule, and the `summary` answerer, evicted whole from the kernel.
 
-The kernel's contribution is two generic seams. The PROMOTE hook: a family that
-declares promote() sees every verdict its facts settle to (including Suppressed
+The kernel's contribution is two generic seams. The SETTLE hook: a family that
+declares settle() sees every verdict its facts settle to (including Suppressed
 and Parked, which never reach project()) and maintains derived group state from
 it. And answer(): a family claims a reserved role and serves the need from its
 own index, injected into ctx like any engine answer. Sync uses both: a family
 opts its facts into replication with one line — `from facts.sync.index import
-promote` — and this module folds each verdict into the treap held in the b"sync"
+settle` — and this module folds each verdict into the treap held in the b"sync"
 register; compares and cadences read it back through the `summary` need. What
 replicates is therefore a FAMILY decision, made identically on every peer
 because every peer runs the same family code over the same fact — the kernel
@@ -166,7 +166,7 @@ summary_need = lambda lo, hi, floor=b"": Atom(NEED, SUM_ROLE, b"sync", Range(lo,
 
 # EXTRACT — nothing to extract: the index is pure register state, never a leaf.
 
-# PROJECT — none: the register is written by the promote hook below and read
+# PROJECT — none: the register is written by the settle hook below and read
 # through the summary answerer, not by a projector of its own.
 
 # COMMANDS — the writes. The register: one dict at scope b"sync", shared by
@@ -182,7 +182,7 @@ def _reg(node):
 # Its leaf hash is a constant per fid (fid/ts/bytes are all fixed), so
 # membership is the only thing that changes; the fid set detects the no-op so
 # a re-promotion neither re-hashes nor spuriously bumps ver.
-def promote(node, fid, f, verdict):
+def settle(node, fid, f, verdict):
     reg = _reg(node)
     should = (fid in node.durable and verdict in ("Valid", "Suppressed")
               and node.root.extract(f)[1])

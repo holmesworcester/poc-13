@@ -24,7 +24,7 @@ def signature(workspace_id, pk, target_id, sig, t):
 
 # EXTRACT — content-pure: (durable, shareable).
 def extract(f): return True, True
-from facts.sync.index import promote     # opt in: these facts replicate (one line is the whole choice)
+from facts.sync.index import settle      # opt in: these facts replicate (one line is the whole choice)
 
 # CHECK — optional self-verification at the admission gate: a pure function
 # of the fact's own bytes, run once and never on replay.
