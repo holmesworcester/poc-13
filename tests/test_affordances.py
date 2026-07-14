@@ -17,7 +17,7 @@ from facts.auth.workspace import workspace
 from facts.auth.invite_accepted import invite_accepted
 from facts.auth.signature import signature
 from facts.content.message import message
-from content_fixtures import flat, member_context, signed_message
+from content_fixtures import flat, member_context, signed_channel, signed_message
 
 RK, RPK = _c.ed25519_keygen(bytes(32))
 HOUR, MIN = 3_600, 60
@@ -27,6 +27,8 @@ WS = workspace(b"acme", RPK, T0); WID = fact_id(WS)
 WS_SIG = signature(b"auth", RPK, WID, _c.ed25519_sign(RK, WID), T0)
 ACCEPT = invite_accepted(WID, bytes(32), bytes(32), b"", RPK, T0)
 MEMBER = member_context(WID, RK, RPK, t=T0 + 1)
+CHANNEL, CHANNEL_SIG = signed_channel(MEMBER, WID, b"g", T0 + 2)
+CHANNEL_ID = fact_id(CHANNEL)
 
 def node(*fs):
     n = Node(ROOT); n.admit(encode(ACCEPT))               # locally accepted the workspace (gates validity)
@@ -34,30 +36,32 @@ def node(*fs):
     n.run(); return n
 
 def _role(rows, r): return [a for _, _, a in rows if a.role == r]
-def msg(body, t): return signed_message(MEMBER, WID, b"g", body, t)
+def msg(body, t): return signed_message(MEMBER, WID, CHANNEL_ID, body, t)
 
 def test_closure_includes_self_and_spine():
     m, s = msg(b"hi", T0 + HOUR); mid = fact_id(m)
-    c = node(WS, WS_SIG, *MEMBER.facts, m, s).closure(mid)
-    assert mid in c and WID in c and fact_id(WS_SIG) in c  # self + its Require/suppress spine, transitively
+    c = node(WS, WS_SIG, *MEMBER.facts, CHANNEL, CHANNEL_SIG, m, s).closure(mid)
+    assert {mid, fact_id(s), CHANNEL_ID, fact_id(CHANNEL_SIG), WID,
+            fact_id(WS_SIG)} <= c                           # signed message -> signed channel -> authority spine
 
 def test_deps_structural():
-    m, s = msg(b"hi", T0 + HOUR); n = node(WS, WS_SIG, *MEMBER.facts, m, s)
-    assert WID in n.deps(fact_id(m))                       # a direct edge owner (asserted, not validity-gated)
+    m, s = msg(b"hi", T0 + HOUR)
+    n = node(WS, WS_SIG, *MEMBER.facts, CHANNEL, CHANNEL_SIG, m, s)
+    assert CHANNEL_ID in n.deps(fact_id(m))                # direct structural edge; workspace is transitive
 
 def test_summary_small_range_is_one_id_list_with_closure():
-    m, s = msg(b"hi", T0 + HOUR); mid, sid = fact_id(m), fact_id(s)
-    n = node(WS, WS_SIG, *MEMBER.facts, m, s)              # 8 shareable leaves (<= T): the whole domain is "small"
+    n = node(WS, WS_SIG, *MEMBER.facts, CHANNEL, CHANNEL_SIG)  # exactly T shareable leaves
     rows = n._answer(summary_need(b"", HI))
     assert len(_role(rows, b"fp")) == 1                    # one prune-check fingerprint for the range
     cids = _role(rows, b"cids")
     assert len(cids) == 1 and not _role(rows, b"cfp")      # small: a single id list, no split
     ids = set(unframe(cids[0].value))
-    assert {mid, sid, WID, fact_id(WS_SIG)} <= ids         # leaves (message AND its signature) + spine, by id, deduped
+    assert {CHANNEL_ID, fact_id(CHANNEL_SIG), WID,
+            fact_id(WS_SIG)} <= ids                         # signed channel is a real closure edge
 
 def test_summary_large_range_splits_by_equal_count():
     bundles = [msg(b"m%d" % i, T0 + HOUR + i * MIN) for i in range(40)]
-    n = node(WS, WS_SIG, *MEMBER.facts, *flat(bundles))    # 80 (msg+sig) leaves > T: the domain must be split, not listed
+    n = node(WS, WS_SIG, *MEMBER.facts, CHANNEL, CHANNEL_SIG, *flat(bundles))
     rows = n._answer(summary_need(b"", HI))
     claims = _role(rows, b"cfp") + _role(rows, b"cids")
     assert 1 < len(claims) <= 16                           # a B-way (<= 16) partition, not one giant blob
@@ -65,7 +69,8 @@ def test_summary_large_range_splits_by_equal_count():
     assert all(rngs[i][1] <= rngs[i + 1][0] for i in range(len(rngs) - 1))   # disjoint, ordered: a partition
 
 def test_resident_present_and_absent():
-    m, s = msg(b"hi", T0 + HOUR); n = node(WS, WS_SIG, *MEMBER.facts, m, s)
+    m, s = msg(b"hi", T0 + HOUR)
+    n = node(WS, WS_SIG, *MEMBER.facts, CHANNEL, CHANNEL_SIG, m, s)
     assert n._answer(resident_need(fact_id(m)))            # I hold it
     assert not n._answer(resident_need(bytes(32)))         # I do not hold this one
     assert SUM_ROLE in RESERVED and RES_ROLE in RESERVED   # reserved: WATCH-only, never a gate

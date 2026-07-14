@@ -11,13 +11,22 @@ def test_solo_story():
     with tempfile.TemporaryDirectory() as d, fleet() as f:
         db = os.path.join(d, "w.facts")
         f.spawn(db)
-        # idempotent authorship, feed through the proxy
+        # workspace bootstrap authors a real replicated #general channel
         wid = con(db, "auth.workspace.create", "acme", "1")
+        general = con(db, "content.channel.id", wid, "general")
+        assert len(general) == 64
+        random = con(db, "content.channel.create", wid, "random", "2")
+        listing = con(db, "content.channel.list", wid).splitlines()
+        assert listing == [f"{general} general", f"{random} random"]
+        # idempotent authorship and channel-isolated feeds through the proxy
         m_hi = con(db, "content.message.send", wid, "general", "al", "hi", "2")
         assert con(db, "content.message.send", wid, "general", "al", "hi", "2") == m_hi, \
             "resending the same fact must return the same id"
         con(db, "content.message.send", wid, "general", "bo", "there", "3")
+        con(db, "content.message.send", wid, "random", "al", "elsewhere", "4")
         converge(db, "hi\nthere", "content.message.feed", wid, "general", secs=0, phase="feed")
+        converge(db, "elsewhere", "content.message.feed", wid, random, secs=0,
+                 phase="separate channel feed by id")
         # membership + authority: create ran the whole bootstrap DAG with an
         # ephemeral root key (then dropped), enrolling the founder as member+admin
         assert len(con(db, "auth.local_signer_secret.whoami")) == 64, "whoami must print the 32-byte pk hex"
@@ -25,8 +34,9 @@ def test_solo_story():
         converge(db, 1, "auth.admin.admins", wid, secs=0, phase="founder is the bootstrap admin")
         # signed content: a workspace this node is no member of refuses the send
         # client-side (it used to admit and park — authorship now needs membership)
+        ghost = "00" * 32
         r = subprocess.run([sys.executable, os.path.join(BIN, "con.py"), db,
-                            "content.message.send", "00" * 32, "general", "al", "ghost", "6"],
+                            "content.message.send", ghost, ghost, "al", "ghost", "6"],
                            capture_output=True, text=True)
         assert r.returncode != 0 and "local signer is not a workspace member" in r.stderr
         # reactions live and die with their message

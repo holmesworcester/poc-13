@@ -87,20 +87,23 @@ def test_flush_forgets_purged_fids():
     from facts.auth.invite_accepted import invite_accepted
     from facts.auth.signature import signature
     from facts.auth.workspace import workspace
-    from content_fixtures import member_context, signed_deletion, signed_message
+    from content_fixtures import member_context, signed_channel, signed_deletion, signed_message
     rk, rpk = _c.ed25519_keygen(bytes(32))
     ws = workspace(b"acme", rpk, 1); wid = fact_id(ws)
     member = member_context(wid, rk, rpk, t=2)
+    channel_bundle = signed_channel(member, wid, b"g", 3)
+    channel_id = fact_id(channel_bundle[0])
     auth = (ws, signature(b"auth", rpk, wid, _c.ed25519_sign(rk, wid), 1),
-            invite_accepted(wid, bytes(32), bytes(32), b"", rpk, 1), *member.facts)
+            invite_accepted(wid, bytes(32), bytes(32), b"", rpk, 1),
+            *member.facts, *channel_bundle)
     store, flushed = Store(), set()
     n = Node(ROOT, store)
-    m, ms = signed_message(member, wid, b"g", b"doomed", 5); mid = fact_id(m)
+    m, ms = signed_message(member, wid, channel_id, b"doomed", 5); mid = fact_id(m)
     cycle(n, [encode(f) for f in (*auth, m, ms)], 1000, ())
     flush(n, store, flushed)
     assert mid in flushed                                  # on disk, marked
     cycle(n, [encode(f) for f in signed_deletion(member, wid, mid, 6)], 1001, ())
-    x, xs = signed_message(member, wid, b"g", b"new", 7)   # the death key bit: purged
+    x, xs = signed_message(member, wid, channel_id, b"new", 7)   # the death key bit: purged
     cycle(n, [encode(x), encode(xs), encode(m)], 1002, (), bound=0)  # re-arrival lands BEHIND x, all
     flush(n, store, flushed)                               # unstepped (m's signature never died: it
     assert store.db.execute("SELECT 1 FROM facts WHERE fid=?",  # carries no death key). The purge

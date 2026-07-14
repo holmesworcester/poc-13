@@ -96,11 +96,23 @@ Then use the CLI from another terminal:
 ```text
 $ bin/con.py w.facts auth.workspace.create acme
 <workspace-id>
+$ bin/con.py w.facts content.channel.list <workspace-id>
+<channel-id> general
+$ bin/con.py w.facts content.channel.create <workspace-id> random
+<channel-id>
 $ bin/con.py w.facts content.message.send <workspace-id> general al "hello"
 <message-id>
 $ bin/con.py w.facts content.message.feed <workspace-id> general
 hello
 ```
+
+`auth.workspace.create` authors a replicated, member-signed `general` channel.
+Additional channels are `content.channel` facts: their fact ids are routing ids
+and their bounded UTF-8 names are display data. Message commands accept either
+a validated name or a 64-hex channel id. A message cannot validate until the
+exact channel fact, its signature, and its workspace authority closure are
+valid, so channel lists and isolated feeds converge across peers instead of
+depending on local aliases that happen to share a string.
 
 The daemon starts cold. A normal query faults only the keys it needs;
 `bin/con.py w.facts store.hydrate.pull` explicitly makes the complete durable

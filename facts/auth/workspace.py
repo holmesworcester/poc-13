@@ -55,7 +55,10 @@ def create(node, name, t):
     uid = user.join(node, wid, b"founder", t, invite=(iid, secret))     # founder joins via it
     aid = node.admit(encode(admin.admin(wid, uid, t)))
     signature.attest(node, wid, rsk, rpk, aid, t)               # root signs the bootstrap admin
-    node.run()                                       # rsk/rpk fall out of scope here: dropped
+    node.run()
+    from facts.content import channel
+    channel.create(node, wid, b"general", t); node.run() # replicated default, not a local alias
+                                                        # rsk/rpk fall out of scope here: dropped
     return wid
 
 # QUERIES — observations over validated state only, ordered by (ts, owner).

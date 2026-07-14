@@ -21,7 +21,7 @@ from facts.auth.workspace import workspace
 from facts.auth.invite_accepted import invite_accepted
 from facts.auth.signature import signature
 from facts.content.message import feed
-from content_fixtures import flat, member_context, signed_deletion, signed_message
+from content_fixtures import flat, member_context, signed_channel, signed_deletion, signed_message
 
 RK, RPK = _c.ed25519_keygen(bytes(32))                  # a fixed workspace root key
 DAY, HOUR, MIN = 86_400, 3_600, 60
@@ -30,7 +30,9 @@ WS = workspace(b"acme", RPK, T0); WID = fact_id(WS)
 WS_SIG = signature(b"auth", RPK, WID, _c.ed25519_sign(RK, WID), T0)
 _ACCEPT = invite_accepted(WID, bytes(32), bytes(32), b"", RPK, T0)
 MEMBER = member_context(WID, RK, RPK, t=T0 + 1)         # the enrolled author every message binds to
-BASE = (WS, WS_SIG, *MEMBER.facts)                      # workspace + the member's enrollment chain
+CHANNEL, CHANNEL_SIG = signed_channel(MEMBER, WID, b"g", T0 + 2)
+CH_ID = fact_id(CHANNEL)
+BASE = (WS, WS_SIG, *MEMBER.facts, CHANNEL, CHANNEL_SIG)
 CID = b"\x11" * 32                                      # a fixed connection id for the in-process pair
 SYNC = {cmp.TAG, _need.TAG}
 
@@ -73,7 +75,7 @@ def reconcile(a, b, maxr=6000, lo=0):
     return frames[0]
 
 def leaves(n): return {(int.from_bytes(k[:8], "big"), k[8:]) for k in sidx.tree(n).keys}  # (ts, fid) per leaf
-def msg(body, t): return signed_message(MEMBER, WID, b"g", body, t)  # a (message, signature) bundle
+def msg(body, t): return signed_message(MEMBER, WID, CH_ID, body, t)  # a (message, signature) bundle
 
 def cidsunframe(n, lo, hi, floor):      # the fact ids a summary advertises as cids over [lo,hi) at this floor
     out = set()
@@ -104,7 +106,7 @@ def test_fresh_peer_gets_dependency_closure():
     a, b = node(*BASE, *bundle), node()
     reconcile(a, b)                                # full range (floor 0): the spine are in-range leaves of their
     assert set(a.durable) == set(b.durable)        # own, enumerated and pulled directly — no closure ride needed
-    assert feed(b, WID, b"g") == [b"hi"]
+    assert feed(b, WID, CH_ID) == [b"hi"]
 
 def test_deletion_travels_and_the_content_dies():
     m, ms = msg(b"doomed", T0 + HOUR)
@@ -113,7 +115,7 @@ def test_deletion_travels_and_the_content_dies():
     reconcile(a, b)
     assert fact_id(m) not in a.durable             # purged at the source the moment the deletion landed
     assert fact_id(m) not in b.facts               # so the peer bootstraps the deletion, never the content
-    assert feed(b, WID, b"g") == []
+    assert feed(b, WID, CH_ID) == []
     assert leaves(a) == leaves(b)                  # both sets carry the deletion leaf, neither the dead one
 
 def test_sync_facts_volatile_and_excluded():
@@ -154,14 +156,15 @@ def test_full_range_advertises_leaves_only_windowed_carries_the_spine():
     signature doubles the leaves — the message and its signature both sit in range. A
     windowed round (floor>0) additionally carries that leaf's below-floor SHAREABLE
     spine as closure ids (the window won't enumerate it) — now including the author's
-    enrollment chain, so we pin the anchor pair as a subset — but never a local-only
+    enrollment chain and signed channel, so we pin that spine as a subset — but never a local-only
     fact like invite_accepted, which must not travel."""
     recent = msg(b"recent", T0 + 30 * DAY)
     a = node(*BASE, *recent)                                     # node() also holds a local invite_accepted (_ACCEPT)
     lo = (T0 + 29 * DAY).to_bytes(8, "big") + b"\x00" * 32       # a range starting after the T0-founded spine
     rid, sid = fact_id(recent[0]), fact_id(recent[1])
     assert cidsunframe(a, lo, HI, b"") == {rid, sid}                # full: just the in-range leaves, no deps repeated
-    assert {rid, sid, WID, fact_id(WS_SIG)} <= cidsunframe(a, lo, HI, lo)  # windowed: + shareable below-floor spine
+    assert {rid, sid, CH_ID, fact_id(CHANNEL_SIG), WID,
+            fact_id(WS_SIG)} <= cidsunframe(a, lo, HI, lo)
     assert fact_id(_ACCEPT) not in cidsunframe(a, lo, HI, lo)       # local-only invite_accepted never rides
 
 def test_windowed_in_range_facts_and_their_deps_reconcile():
@@ -175,9 +178,9 @@ def test_windowed_in_range_facts_and_their_deps_reconcile():
     b = node()
     reconcile(a, b, lo=T0 + 29 * DAY)                             # window ~ the last day
     assert all(fact_id(f) in set(b.durable) for f in recent), "the in-range fact and its signature reconciled"
-    assert {WID, fact_id(WS_SIG)} <= set(b.durable), \
-        "its below-floor spine deps arrived as closure ids, though founded at T0"
-    assert feed(b, WID, b"g") == [b"recent"]
+    assert {CH_ID, fact_id(CHANNEL_SIG), WID, fact_id(WS_SIG)} <= set(b.durable), \
+        "its channel and auth spine arrived as closure ids, though founded at T0"
+    assert feed(b, WID, CH_ID) == [b"recent"]
 
 def test_windowed_out_of_range_content_is_not_reconciled():
     """Out of range: old content that nothing recent depends on sits below the
@@ -190,10 +193,11 @@ def test_windowed_out_of_range_content_is_not_reconciled():
     b = node()
     reconcile(a, b, lo=T0 + 29 * DAY)
     assert all(fact_id(f) not in b.durable for f in stale), "the window never shipped the stale bundle"
-    assert feed(b, WID, b"g") == [b"recent"]
+    assert feed(b, WID, CH_ID) == [b"recent"]
     c = node()                                                   # no window: the stale bundle reconciles
     reconcile(a, c, lo=0)
-    assert all(fact_id(f) in c.durable for f in stale) and feed(c, WID, b"g") == [b"stale", b"recent"]
+    assert all(fact_id(f) in c.durable for f in stale)
+    assert feed(c, WID, CH_ID) == [b"stale", b"recent"]
 
 def test_windowed_bulk_converges_and_withholds():
     """A window carrying many facts over a shared below-floor spine: every in-range
@@ -207,8 +211,9 @@ def test_windowed_bulk_converges_and_withholds():
         reconcile(a, b, lo=T0 + 29 * DAY)
         assert all(fact_id(f) in b.durable for bundle in recent for f in bundle), "every in-range fact reconciled"
         assert not any(fact_id(f) in b.durable for bundle in stale for f in bundle), "below-floor content withheld"
-        assert {WID, fact_id(WS_SIG)} <= set(b.durable), "the shared spine rode in via closure ids"
-        assert feed(b, WID, b"g") == [b"r%d" % i for i in range(40)]
+        assert {CH_ID, fact_id(CHANNEL_SIG), WID,
+                fact_id(WS_SIG)} <= set(b.durable), "the shared spine rode in via closure ids"
+        assert feed(b, WID, CH_ID) == [b"r%d" % i for i in range(40)]
 
 def test_frame_count_is_sublinear():
     """A one-fact diff over a 100-fact set costs O(depth) wire frames, not O(n): the

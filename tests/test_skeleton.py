@@ -14,16 +14,18 @@ from facts.auth.invite_accepted import invite_accepted
 from facts.auth.signature import signature
 from facts.content.message import message
 from facts.outbox.send import send
-from content_fixtures import member_context, signed_deletion, signed_message
+from content_fixtures import member_context, signed_channel, signed_deletion, signed_message
 
 RK, RPK = _c.ed25519_keygen(bytes(32))                  # a fixed workspace root key
 WS = workspace(b"acme", RPK, 1)
-WID, CH = fact_id(WS), b"general"
+WID = fact_id(WS)
 # The facts that make WS Valid: its root self-signature + a local acceptance.
 WS_CHAIN = [WS, signature(b"auth", RPK, WID, _c.ed25519_sign(RK, WID), 1),
             invite_accepted(WID, bytes(32), bytes(32), b"", RPK, 1)]
 MEMBER = member_context(WID, RK, RPK, t=2)
-AUTH_CHAIN = WS_CHAIN + list(MEMBER.facts)
+CHANNEL, CHANNEL_SIG = signed_channel(MEMBER, WID, b"general", 3)
+CH = fact_id(CHANNEL)
+AUTH_CHAIN = WS_CHAIN + list(MEMBER.facts) + [CHANNEL, CHANNEL_SIG]
 
 def test_identity_and_admission():
     a1 = Atom(OFFER, b"msg", WID, Exact(CH), b"hi")
@@ -50,7 +52,7 @@ def test_requires_suppression_and_wakes():
     n.run()
     for f in (m1, s1, m2, s2): n.admit(encode(f))
     n.run()
-    assert n.memo[fact_id(m1)] == "Parked"                    # no workspace yet: Require gates
+    assert n.memo[fact_id(m1)] == "Parked"                    # no channel/workspace yet: Require gates
     for f in AUTH_CHAIN: n.admit(encode(f))                   # authority root + membership lands
     n.run()                                                   # wakes both messages
     assert n.memo[fact_id(m1)] == "Valid"

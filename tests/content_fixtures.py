@@ -8,6 +8,7 @@ from kernel import fact_id
 from facts.auth.signature import signature
 from facts.auth.user import user
 from facts.auth.user_invite import user_invite
+from facts.content.channel import channel
 from facts.content.message import message
 from facts.content.message_deletion import deletion
 
@@ -26,6 +27,12 @@ def signed_message(member, wid, channel, body, t):
     m = message(wid, channel, member.uid, body, t)
     mid = fact_id(m)
     return m, signature(wid, member.pk, mid, _c.ed25519_sign(member.sk, mid), t)
+
+
+def signed_channel(member, wid, name, t):
+    c = channel(wid, name, t)
+    cid = fact_id(c)
+    return c, signature(wid, member.pk, cid, _c.ed25519_sign(member.sk, cid), t)
 
 
 def signed_deletion(member, wid, target_id, t):

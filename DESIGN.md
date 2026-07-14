@@ -701,10 +701,17 @@ overhead during bulk catch-up while preserving per-inner admission checks.
 `facts/content/` is the messaging surface. Every command below authors a
 content fact plus its detached Ed25519 signature:
 
+- `channel` is replicated structural state whose fact id is the routing id and
+  whose bounded UTF-8 name is only display data. It Requires its workspace,
+  its detached signature, and the workspace member keys; any enrolled member
+  may create one. A workspace bootstrap creates `general` through this same
+  command path.
 - `message` carries workspace, channel, body, author member id, and its own
-  death key. It Requires the workspace, its signature key, and the workspace's
-  member-key offers. PROJECT rebuilds the canonical SHAPE and accepts only when
-  the key blessed for the claimed author is one of the actual signers.
+  death key. It Requires the exact channel fact id, its signature key, and the
+  workspace's member-key offers. PROJECT rebuilds the canonical SHAPE and
+  accepts only when the key blessed for the claimed author is one of the actual
+  signers. The channel edge brings the workspace and channel signature into the
+  message's transitive closure.
 - `reaction` Requires the target message's valid `posted` offer, carries the
   target's death key, and binds its claimed reactor member id to the signer.
   It parks without the message and is physically suppressed when the message

@@ -37,7 +37,7 @@ from runtime import cycle, outbox, pump, TTLSet, SENT_TTL
 from facts.auth.workspace import workspace
 from facts.auth.invite_accepted import invite_accepted
 from facts.auth.signature import signature
-from content_fixtures import flat, member_context, signed_message
+from content_fixtures import flat, member_context, signed_channel, signed_message
 
 RK, RPK = _c.ed25519_keygen(bytes(32)); T0 = 1_700_000_000
 WS = workspace(b"acme", RPK, T0); WID = fact_id(WS)
@@ -45,6 +45,8 @@ WS_SIG = signature(b"auth", RPK, WID, _c.ed25519_sign(RK, WID), T0)
 ACCEPT = invite_accepted(WID, bytes(32), bytes(32), b"", RPK, T0)
 AL = member_context(WID, RK, RPK, b"al", T0 + 1)   # ONE member authors everything; bodies name the sender
 MEMBER = AL.facts                        # invite + its sig + user + its sig: the 4-fact chain a message leans on
+CHANNEL, CHANNEL_SIG = signed_channel(AL, WID, b"g", T0 + 2)
+CH_ID = fact_id(CHANNEL)
 CID = b"\x11" * 32
 W = 4000                                 # the default anchor period (cadence.TIERS)
 SYNC_TAGS = (cmp.TAG, _need.TAG)
@@ -52,10 +54,12 @@ SYNC_TAGS = (cmp.TAG, _need.TAG)
 def node(*fs):
     n = Node(ROOT); n.admit(encode(ACCEPT))
     for f in fs: n.admit(encode(f))
+    if WS in fs and CHANNEL not in fs:
+        for f in (CHANNEL, CHANNEL_SIG): n.admit(encode(f)) # a workspace fixture includes structural #g
     n.run(); return n
 
 def msgs(author, t0, k):                 # k signed messages = 2k facts: each rides with its member signature
-    return flat(signed_message(AL, WID, b"g", author + b" m%d" % i, t0 + i) for i in range(k))
+    return flat(signed_message(AL, WID, CH_ID, author + b" m%d" % i, t0 + i) for i in range(k))
 
 def leaves(n): return set(_sidx.tree(n).keys)
 
@@ -136,9 +140,9 @@ def test_bulk_catchup_then_duplication_does_not_amplify():
         w.settle(); no_residue(w)
         return w
     w1 = run(1)
-    assert w1.emitted["ship"] <= 506 + 8            # each fact leaves the source ~once (TTL >> catch-up);
+    assert w1.emitted["ship"] <= 508 + 8            # each fact leaves the source ~once (TTL >> catch-up);
                                                     # signatures double the messages (250 msg + 250 sig),
-                                                    # + ws/its sig + the 4-fact member chain = 506
+                                                    # + ws/its sig + member chain + channel/sig = 508
     e1 = sum(w1.emitted.values())
     w2 = run(2)                                     # every frame delivered twice
     e2 = sum(w2.emitted.values())
@@ -169,8 +173,8 @@ def test_partition_heals_within_anchor_bound():
     assert w.run_until(w.converged, 30_000)          # b now holds the member chain too: it can author
     down[0] = True                                   # total partition; both sides keep authoring
     for i in range(10):                              # each authoring is a msg + its signature: two facts
-        for f in signed_message(AL, WID, b"g", b"p%d" % i, T0 + 1000 + i): w.nodes["a"].admit(encode(f))
-        for f in signed_message(AL, WID, b"g", b"q%d" % i, T0 + 2000 + i): w.nodes["b"].admit(encode(f))
+        for f in signed_message(AL, WID, CH_ID, b"p%d" % i, T0 + 1000 + i): w.nodes["a"].admit(encode(f))
+        for f in signed_message(AL, WID, CH_ID, b"q%d" % i, T0 + 2000 + i): w.nodes["b"].admit(encode(f))
         w.step(); w.step()
     w.run_until(lambda: False, w.t + 2 * W)          # dark for two more anchor periods
     assert not w.converged()
@@ -201,7 +205,7 @@ def _churn(w, until, every=500):
     while w.t < until:
         if w.t % every == 0:
             for s, base in (("a", T0 + 10), ("b", T0 + 10_000)):
-                for f in signed_message(AL, WID, b"g", s.encode() + b" c%d" % k, base + k):
+                for f in signed_message(AL, WID, CH_ID, s.encode() + b" c%d" % k, base + k):
                     w.nodes[s].admit(encode(f)); authored.append((w.t, fact_id(f), s))
             k += 1
         w.step()
@@ -252,7 +256,7 @@ def test_certificate_synced_flips_with_the_set():
     w = World(node(WS, WS_SIG, *ms), node(WS, WS_SIG, *ms))
     assert w.run_until(lambda: cadence.synced(w.nodes["a"], CID), 30_000)
     assert w.run_until(lambda: cadence.synced(w.nodes["b"], CID), 30_000)
-    for f in signed_message(AL, WID, b"g", b"new", T0 + 999):
+    for f in signed_message(AL, WID, CH_ID, b"new", T0 + 999):
         w.nodes["a"].admit(encode(f))
     w.nodes["a"].run()
     assert not cadence.synced(w.nodes["a"], CID)     # my split moved: certificate retired

@@ -15,19 +15,24 @@ from runtime import next_wake
 from facts.auth.workspace import workspace
 from facts.auth.invite_accepted import invite_accepted
 from facts.auth.signature import signature
-from facts.content.message import message
+from content_fixtures import member_context, signed_channel, signed_message
 
 RK, RPK = _c.ed25519_keygen(bytes(32)); T0 = 1_700_000_000
 WS = workspace(b"acme", RPK, T0); WID = fact_id(WS)
 WS_SIG = signature(b"auth", RPK, WID, _c.ed25519_sign(RK, WID), T0)
 ACCEPT = invite_accepted(WID, bytes(32), bytes(32), b"", RPK, T0)
+MEMBER = member_context(WID, RK, RPK, t=T0 + 1)
+CHANNEL, CHANNEL_SIG = signed_channel(MEMBER, WID, b"g", T0 + 2)
+CH_ID = fact_id(CHANNEL)
+MESSAGE, MESSAGE_SIG = signed_message(MEMBER, WID, CH_ID, b"hi", T0 + 3600)
 CID = b"\x22" * 32
 PERIOD = 500
 ONE = ((b"", PERIOD, cadence.ANCHOR),)   # a single unconditional tier: the old semantics
 
 def node():
     n = Node(ROOT); n.admit(encode(ACCEPT))
-    for f in (WS, WS_SIG, message(WID, b"g", b"al", b"hi", T0 + 3600)): n.admit(encode(f))
+    for f in (WS, WS_SIG, *MEMBER.facts, CHANNEL, CHANNEL_SIG, MESSAGE, MESSAGE_SIG):
+        n.admit(encode(f))
     n.run(); return n
 
 def _compares(n):                                       # send offers carrying a compare frame, at Exact(CID)
