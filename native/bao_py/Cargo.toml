@@ -1,11 +1,11 @@
 [package]
-name = "poc13-bao"
+name = "tinyp2p-bao"
 version = "0.1.0"
 edition = "2021"
 license = "CC0-1.0 OR Apache-2.0"
 
 [lib]
-name = "poc13_bao"
+name = "tinyp2p_bao"
 crate-type = ["cdylib"]
 
 [dependencies]

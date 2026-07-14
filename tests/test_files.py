@@ -2,7 +2,7 @@
 cold hydration, verified export, and terminal deletion of every payload byte."""
 import os, sys, tempfile
 from blake3 import blake3
-import poc13_bao
+import tinyp2p_bao
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(HERE)
 sys.path[:0] = [ROOT_DIR, HERE, os.path.join(ROOT_DIR, "bin")]
@@ -32,11 +32,11 @@ def _proofs(path):
     size = os.path.getsize(path); root = blake3(open(path, "rb").read()).digest()
     with tempfile.TemporaryDirectory() as directory:
         outboard = os.path.join(directory, "source.obao")
-        assert bytes(poc13_bao.prepare_file(path, outboard)) == root
+        assert bytes(tinyp2p_bao.prepare_file(path, outboard)) == root
         proofs = []
         for index, start in enumerate(range(0, size, file.SLICE_BYTES)):
             count = min(file.SLICE_BYTES, size - start)
-            proof = bytes(poc13_bao.extract_slice(path, outboard, start, count))
+            proof = bytes(tinyp2p_bao.extract_slice(path, outboard, start, count))
             assert file_slice.verified_bytes(proof, root, index, size) == \
                 open(path, "rb").read()[start:start + count]
             proofs.append(proof)
@@ -54,14 +54,14 @@ def test_send_view_save_roundtrip_atomized_descriptor_and_cold_hydration():
         source = os.path.join(directory, "payload.bin")
         payload = _write(source, file.SLICE_BYTES + 37_979)
         receipt = file.send(n, wid, channel_id, b"al", b"see attached", source,
-                            "application/x-poc13", 2); n.run()
+                            "application/x-tinyp2p", 2); n.run()
 
         assert message.feed(n, wid, channel_id) == [b"see attached"]
         assert message.view(n, wid, channel_id) == [
             "see attached", "  file: payload.bin (300123 bytes, complete)"]
         [row] = file.files(n, wid)
         assert row["slices_received"] == row["total_slices"] == 2 and row["complete"]
-        assert row["mime_type"] == b"application/x-poc13"
+        assert row["mime_type"] == b"application/x-tinyp2p"
         assert file.resolve(n, wid, "1") == file.resolve(n, wid, "#1") == row
         assert file.resolve(n, wid, receipt["file_fact_id"].hex()) == row
 

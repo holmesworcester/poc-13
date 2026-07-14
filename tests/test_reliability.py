@@ -2,7 +2,7 @@
 argument must rest only on the kernel handling facts correctly (docs/anchor-sync.md).
 
 The harness is two real nodes driven through the real runtime seam (cycle -> prune ->
-pump, exactly cond.py's loop) with a simulated clock and a faulty duplex channel:
+pump, exactly tinyd.py's loop) with a simulated clock and a faulty duplex channel:
 frames can be dropped (loss, partition), duplicated, reordered, or truncated to a
 prefix (a full outbox). Rounds are opened ONLY by the real sync.cadence tiers — no
 test-side open_round — so what is exercised is the shipped design: an unconditional
@@ -65,7 +65,7 @@ def leaves(n): return set(_sidx.tree(n).keys)
 
 class World:
     """Two nodes on a faulty duplex channel, stepped on a simulated clock. Mirrors
-    cond.py's iteration: deliver inbox -> cycle (drain to quiescence) -> prune the
+    tinyd.py's iteration: deliver inbox -> cycle (drain to quiescence) -> prune the
     to_ship set -> pump through the real TTL sent-memory. Faults apply per inner
     fact-frame at the emission boundary; `emitted` counts what actually left the
     pump (post-dedup), `delivered` what survived the channel."""
@@ -99,7 +99,7 @@ class World:
                         self.chan[other].append(blob)
                         self.delivered[self._kind(blob)] += 1
             return k
-        # pump after EVERY turn, as cond does: a cadence due-fire is a transient
+        # pump after EVERY turn, as tinyd does: a cadence due-fire is a transient
         # offer the next clock presentation erases, so a drain-then-pump harness
         # silently drops any opener fired before the drain's last turn.
         cycle(n, inbox, self.t, tuple(self.fired[me]), 4096)

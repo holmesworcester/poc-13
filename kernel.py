@@ -1,4 +1,4 @@
-"""poc-13 kernel: the atom model engine, one file (design: DESIGN.md).
+"""TinyP2P kernel: the atom model engine, one file (design: DESIGN.md).
 
 Facts are the unit of identity, atoms the unit of matching, and needs/offers
 are the whole fact language. The kernel owns exactly four things: canonical
@@ -29,7 +29,7 @@ import sqlite3, time
 try:
     from blake3 import blake3 as _b3
 except ImportError as e:                 # the repo's one non-crypto-suite dependency
-    raise ImportError("poc-13 needs blake3 (pip install blake3)") from e
+    raise ImportError("TinyP2P needs blake3 (pip install blake3)") from e
 
 H = lambda b: _b3(b).digest()
 now = lambda: int(time.time())           # host convenience; never engine input
@@ -87,7 +87,7 @@ class Fact:
 def fact(tag, *atoms):                   # canonicalize: sort + dedup + validate
     return Fact(tag, tuple(dec_atom(e) for e in sorted({enc_atom(a) for a in atoms})))
 
-DOMAIN = b"poc13.fact.v1"                # the only dialect marker, forever
+DOMAIN = b"tinyp2p.fact.v1"                # the only dialect marker, forever
 _blob = lambda f: b"".join(frame(enc_atom(a)) for a in f.atoms)
 fact_id = lambda f: H(frame(DOMAIN, f.type_tag, _blob(f)))
 encode = lambda f: frame(f.type_tag) + _blob(f)

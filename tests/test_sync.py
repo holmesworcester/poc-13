@@ -1,7 +1,7 @@
 """Decomposed dependency-aware sync: the negentropy descent expressed as three
 tiny volatile families — compare (one-range fingerprint descent), have (advertise
 a held id), need (pull one id) — reconciled over a manual daemon loop that mirrors
-bin/cond.py's cycle (admit inbox + present shipped) and pump (deliver send/ship
+bin/tinyd.py's cycle (admit inbox + present shipped) and pump (deliver send/ship
 offers, fire owners). No round state: convergence is fingerprint agreement,
 re-checked on leaf change. Mirrors the poc-12 quantifiers — shuffled admission
 orders converge to bit-identical derived state; a one-fact diff ships exactly that

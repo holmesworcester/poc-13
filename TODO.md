@@ -7,7 +7,7 @@ deleted, invite_accepted acceptance gate) — all green IN-PROCESS
 in-process, test_clock, test_hydrate, test_contract).
 
 RED until M7 wires the daemon: the black-box story tests (test_solo, test_pair,
-test_trio, test_sync's daemon leg). Rewire cond.py to poc-10's ADDRESS-KEYED
+test_trio, test_sync's daemon leg). Rewire tinyd.py to poc-10's ADDRESS-KEYED
 transport — the daemon is a stateless byte queue keyed by destination address;
 NO per-socket session object, NO cid<->socket binding (facts name addresses and
 inbound frames self-describe their connection_id):
@@ -84,7 +84,7 @@ Node `_sumcache` lets the static source answer repeated re-opens from cache.
 The residual after those four (catch-up ~O(n^1.3)) was the sink re-fingerprinting
 on each re-descend: the flat sorted-list `Skeleton.fp` was O(range).
 
-Treap landed 2026-07-05 — the principled finish, following the paper poc-13 cites
+Treap landed 2026-07-05 — the principled finish, following the paper TinyP2P cites
 (Meyer & Scherer, "RBSR Without Homomorphic Hashing"). `kernel.Skeleton` (sorted
 list) → `kernel.Treap`: a history-independent, clamping-invariant treap. Range fp is
 the CLAMPED Merkle label (walk the two boundary spines), a canonical function of the
@@ -116,7 +116,7 @@ valid_offers is now a 0.1 µs bucket lookup).
 
 STILL superlinear after CleanBucket (200k/100k ≈ 4.3×): a SECOND O(n²) in the
 re-descend structure. The sink re-opens a root compare on every leaf_ver change
-(cond.py); each re-descend re-finds the (still large) remaining diff and the peer
+(tinyd.py); each re-descend re-finds the (still large) remaining diff and the peer
 re-advertises/re-ships facts already in the sink's inbox → the cost shows up as
 codec (re-decoding re-sent compares/facts). Damping the immediate re-open was
 tried and BACKFIRED (200k 143.8 s → 271.6 s: the immediate open is load-bearing —
@@ -159,7 +159,7 @@ relation (bytes derived: reconstruct → re-encode → re-hash); the engine's
 fault leg checks each stepped need key once against it and admits cold owners
 (`Node.checked` memo; the reserved `\x00all` total demand ends faulting for
 the session). Boot is the insertion of ONE hydrate fact — and the daemon
-doesn't even author it: cond boots cold, and `store.hydrate.pull` (a client
+doesn't even author it: tinyd boots cold, and `store.hydrate.pull` (a client
 verb) makes a full replica; sync reconciles the resident set.
 Existence in the store is the persisted certificate: boot re-verifies 0
 signatures (benched). Standing (verdicts) is never persisted.
@@ -169,7 +169,7 @@ confirmed 4 distinct bugs, all fixed + pinned as tests:
 - add() swallowed transient sqlite write errors while flush marked the fact
   flushed → silent permanent loss with a false `+ok` (regression vs main).
   Write errors now propagate whole; bad BYTES remain a miss.
-- cond's signal handler raises SystemExit; landing between add()'s two
+- tinyd's signal handler raises SystemExit; landing between add()'s two
   inserts it escaped `except Exception` and RELEASE committed a torn
   half-fact that INSERT OR IGNORE then refused to heal → BaseException.
 - A canonical zero-atom durable fact was stored but unreadable
@@ -196,7 +196,7 @@ in nine commits, each suite-green:
   cannot target its own id; the re-hash certifies). covers() is point-in-span.
 - deps() is pure (the _deps memo cleared whole on every admit — worthless).
 - turn() presents now/shipped directly (wrappers inlined).
-- cond: phantom RETAIN_FLOOR knob deleted; bare-message peek deleted (admit
+- tinyd: phantom RETAIN_FLOOR knob deleted; bare-message peek deleted (admit
   is the only door for wire bytes).
 - cadence: idempotent (no first field, no daemon armed marker) and FIXED —
   the not-due branch used to wipe its tick slice and re-fire off the stale
@@ -223,5 +223,5 @@ auth.local_signer_secret (identity selection: current() takes the first
 sk/pk rows independently) and auth.invite_accepted (the trust anchor gating
 workspace validity). The invariant to land: a fact family that never syncs
 out is never admitted from the wire either — a one-line refusal at the
-inbox seam (cond knows provenance; the kernel must not). Until then the
+inbox seam (tinyd knows provenance; the kernel must not). Until then the
 threat model assumes connected peers are honest about locals.

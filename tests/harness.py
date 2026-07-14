@@ -1,7 +1,7 @@
 """tests/harness.py — shared black-box idioms with self-describing failures.
 
-spawn/stop/con drive real cond.py/con.py subprocesses; sock() sends one framed
-verb straight down a daemon's unix socket (con.py semantics without a process
+spawn/stop/tiny drive real tinyd.py/tiny.py subprocesses; sock() sends one framed
+verb straight down a daemon's unix socket (tiny.py semantics without a process
 per call — for bulk authoring, same precedent as bench.py's uverb). The story
 tests are only acceptable because failures self-describe: converge() names the
 phase, the node, what was expected and what was last observed; fleet() tracks
@@ -27,7 +27,7 @@ def reboot(node, seed=0):
     return m
 
 def spawn(db, *args, pull=True):         # -> (proc, announced addr)
-    p = subprocess.Popen([sys.executable, os.path.join(BIN, "cond.py"), db, *args],
+    p = subprocess.Popen([sys.executable, os.path.join(BIN, "tinyd.py"), db, *args],
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     line = p.stdout.readline()
     assert line.startswith("listening:"), (line, p.poll() and p.stderr.read())
@@ -39,8 +39,8 @@ def stop(p):
     except ProcessLookupError: pass
     except subprocess.TimeoutExpired: p.kill(); p.wait(5)
 
-def con(db, *args):                      # one con.py process: proxy if a daemon holds the db, else cold
-    r = subprocess.run([sys.executable, os.path.join(BIN, "con.py"), db, *args],
+def tiny(db, *args):                      # one tiny.py process: proxy if a daemon holds the db, else cold
+    r = subprocess.run([sys.executable, os.path.join(BIN, "tiny.py"), db, *args],
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     return r.stdout.strip()
@@ -66,13 +66,13 @@ def port():                              # grab an OS-assigned port, then free i
 
 # --- self-describing assertions -----------------------------------------------
 def converge(db, want, *verb, secs=10, phase=""):
-    """Poll `con(db, *verb)` until the output satisfies want; return the output.
+    """Poll `tiny(db, *verb)` until the output satisfies want; return the output.
     want: exact string | int (exact line count, "" = 0 lines) | predicate.
     secs=0 asserts a single immediate read. On timeout the error names the
     phase, the node, the verb, the expectation, and the last observed output."""
     deadline = time.time() + secs
     while True:
-        got = con(db, *verb)
+        got = tiny(db, *verb)
         if _ok(got, want): return got
         if time.time() >= deadline: break
         time.sleep(0.05)
@@ -81,10 +81,10 @@ def converge(db, want, *verb, secs=10, phase=""):
                             " ".join(verb), _got(got), secs))
 
 def never(db, bad, *verb, secs=1, phase=""):
-    """Assert `con(db, *verb)` does NOT satisfy bad at any point within secs."""
+    """Assert `tiny(db, *verb)` does NOT satisfy bad at any point within secs."""
     deadline = time.time() + secs
     while time.time() < deadline:
-        got = con(db, *verb)
+        got = tiny(db, *verb)
         if _ok(got, bad):
             raise AssertionError("%s: %s wrongly showed %s via `%s`: %s"
                                  % (phase or "never", os.path.basename(db),

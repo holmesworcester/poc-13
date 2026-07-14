@@ -18,14 +18,14 @@ parallel structures — the intake overlay and the leafset — deleted):
 Deferred, with reasons: **item 5** is subsumed by item 7. **Item 10** kept —
 the `test_sql_pull_mirrors_covers` mirror documents the coverage relation well.
 **Items 11, 12** deferred to the residency/sync split, which reshapes that
-kernel↔runtime↔cond boundary anyway. **Items 13, 14** are boundary rules
+kernel↔runtime↔tinyd boundary anyway. **Items 13, 14** are boundary rules
 (sync policy stays out of runtime; frame crypto stays a daemon callback) —
 respected, nothing to change.
 
 ---
 
 Read-only survey of `kernel.py` (524 lines), 2026-07-05. Ranked by payoff.
-poc-13 is pre-freeze, so format-changing items are in scope (fact ids may
+TinyP2P is pre-freeze, so format-changing items are in scope (fact ids may
 change; DESIGN.md's "version-free forever" line applies from freeze, not now).
 Nothing here has been applied. Estimated total: 50–70 lines off the kernel and
 two whole parallel structures deleted, with items 4 and 7 the only ones that
@@ -62,7 +62,7 @@ set:
 - maintain `leaf_xor` off the same insert/remove,
 - delete `self.leafset`.
 
-External users: `leaf_xor` is read by `bin/cond.py` and `tests/test_sync.py` —
+External users: `leaf_xor` is read by `bin/tinyd.py` and `tests/test_sync.py` —
 keep it. `leafset` itself is only read by `test_sync.py::leaves()`
 (`set(n.leafset)`), which can read `tree` keys instead (or keep a one-line
 property that adapts `tree.h` keys back to `(ts, fid)` tuples).
@@ -204,7 +204,7 @@ role+scope key, not just target-covering ones) — irrelevant at poc scale, and
 `match_ix(role, scope, lo, ts)` still prunes most of it. Counter-argument:
 the mirror test documents the relation well. Decide by taste.
 
-## Kernel / runtime / cond overlap
+## Kernel / runtime / tinyd overlap
 
 ### 11. Make host signals an explicit runtime responsibility
 
@@ -226,14 +226,14 @@ into `runtime.cycle()`. That gives the boundary one clear shape:
 
 - kernel: canonical bytes, admission, matching, derived state, engine stepping;
 - runtime: one socket-free host cycle, including transient host feedback;
-- cond: sockets, select, request/response I/O, and callbacks.
+- tinyd: sockets, select, request/response I/O, and callbacks.
 
 Tests: `tests/test_clock.py` should still prove time does not persist across
 replay, and `tests/test_runtime.py` should own the shipped/reap sequencing.
 
-### 12. Move `to_ship` pruning out of `cond.py`
+### 12. Move `to_ship` pruning out of `tinyd.py`
 
-`bin/cond.py` currently performs runtime bookkeeping around lines 153-178:
+`bin/tinyd.py` currently performs runtime bookkeeping around lines 153-178:
 
 ```python
 cycle(node, inbox, now_ms(), to_ship, BOUND)
@@ -244,7 +244,7 @@ to_ship |= fired
 
 That is not socket policy; it is the outbox lifecycle. Give `bin/runtime.py` a
 small helper that owns "present previously fired owners, prune owners that
-reaped, pump new rows, return next pending shipped set". Then `cond.py` can stay
+reaped, pump new rows, return next pending shipped set". Then `tinyd.py` can stay
 closer to:
 
 ```python
@@ -260,14 +260,14 @@ no-route parking, and backpressure/refused delivery.
 
 ### 13. Keep sync policy out of `runtime.py`
 
-The `leaf_xor` guard in `cond.py` is sync policy:
+The `leaf_xor` guard in `tinyd.py` is sync policy:
 
 ```python
 if node.leaf_xor != synced.get(cid):
     sync.open_round(node, cid, lo)
 ```
 
-Do not move that into runtime. Either leave it in `cond.py` as daemon policy, or
+Do not move that into runtime. Either leave it in `tinyd.py` as daemon policy, or
 eventually make cadence/sync facts own it. `runtime.py` should remain the generic
 socket-free host turn: admit inbox, present transient feedback, expose/pump
 validated outbox rows.
@@ -275,7 +275,7 @@ validated outbox rows.
 ### 14. Keep frame crypto as daemon callbacks, not kernel state
 
 The current `pump()` callback shape is good: runtime resolves validated
-send/ship rows into inner fact bytes, while `cond.py` supplies `route` and
+send/ship rows into inner fact bytes, while `tinyd.py` supplies `route` and
 `deliver` callbacks that query connection/frame families for routing and sealing.
 Do not push socket buffers, frame packing, or AEAD wrappers into the kernel.
 That would reduce apparent daemon LOC at the cost of making the engine know
@@ -298,10 +298,10 @@ transport details.
 2. Land item 4 with a focused reserved-role test. This is a small behavior
    change: malformed reserved-role facts become inert misses.
 3. Land items 11-12 with `tests/test_runtime.py` covering shipped/reap
-   burn-down, no-route parking, and refused delivery. `cond.py` should lose
+   burn-down, no-route parking, and refused delivery. `tinyd.py` should lose
    lifecycle bookkeeping, not socket behavior.
 4. Treat item 13 as a boundary rule while editing: sync policy stays in
-   sync/cadence or `cond.py`, not in runtime.
+   sync/cadence or `tinyd.py`, not in runtime.
 5. Do item 7 last and alone, since it flips every fact id. Re-run the full
    suite plus bench's replay-divergence assertions after it.
 6. Commit the completed work on this same worktree branch before handoff or

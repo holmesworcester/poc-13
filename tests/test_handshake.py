@@ -3,7 +3,7 @@ connection over a simulated wire and must derive the SAME connection_secret,
 the responder's authoring must be deterministic across a reboot, and every forged
 or mis-addressed variant must be refused. Mirrors poc-10
 poc10_connection_handler_test.rs — secret agreement, responder determinism,
-mis-addressed and bad-signature refusals — in poc-13's atom model."""
+mis-addressed and bad-signature refusals — in TinyP2P's atom model."""
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

@@ -10,7 +10,7 @@ creator (self-accepting its own first invite) and every joiner author one."""
 from kernel import Atom, Exact, H, OFFER, Out, encode, fact, frame, now, ts_atom, _rd
 
 TAG = b"auth.invite_accepted"
-TOKEN = b"poc13-bootstrap-token-v1"
+TOKEN = b"tinyp2p-bootstrap-token-v1"
 bootstrap_hash = lambda secret: H(frame(TOKEN, secret))
 
 # SHAPE — the canonical atom set; the only place atoms are chosen.

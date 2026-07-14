@@ -5,7 +5,7 @@ a canonical Bao proof against it. Descriptor and slices directly carry the
 message death key, so semantic deletion physically purges the attachment."""
 import mimetypes, os, tempfile
 from blake3 import blake3
-import poc13_bao
+import tinyp2p_bao
 from kernel import (Atom, Exact, H, NEED, OFFER, Out, REQUIRE, SELF, SUPPRESS,
                     by, encode, fact, fact_id, frame, now, ts_atom, ts_of)
 from facts.auth import signature
@@ -13,7 +13,7 @@ from facts.store import hydrate
 
 TAG = b"content.file"
 ENCODING_CLEAR = b"clear-v1"
-FILE_ID_DOMAIN = b"poc13.file.id.v2"
+FILE_ID_DOMAIN = b"tinyp2p.file.id.v2"
 SLICE_BYTES = 256 * 1024
 MAX_FILE_BYTES = 10 * 1024 * 1024 * 1024
 MAX_FILENAME_BYTES = 255
@@ -132,15 +132,15 @@ def send(node, workspace_id, channel_id, author, body, path, mime_type=None, t=N
     message_fact = message.message(workspace_id, channel_id, author_id, body, t)
     message_id = fact_id(message_fact)
 
-    with tempfile.TemporaryDirectory(prefix="poc13-bao-") as directory, \
+    with tempfile.TemporaryDirectory(prefix="tinyp2p-bao-") as directory, \
             tempfile.TemporaryFile() as spool:
         outboard = os.path.join(directory, "source.obao")
-        root = bytes(poc13_bao.prepare_file(source_path, outboard))
+        root = bytes(tinyp2p_bao.prepare_file(source_path, outboard))
         file_id = file_id_for(workspace_id, message_id, root, filename, mime_bytes)
         for index in range(total_slices):
             start = index * SLICE_BYTES
             count = min(SLICE_BYTES, read_bytes - start)
-            proof = bytes(poc13_bao.extract_slice(source_path, outboard, start, count))
+            proof = bytes(tinyp2p_bao.extract_slice(source_path, outboard, start, count))
             verified = file_slice.verified_bytes(proof, root, index, read_bytes, SLICE_BYTES)
             if len(verified) != count: raise RuntimeError("Bao returned a short slice")
             spool.write(len(proof).to_bytes(4, "big")); spool.write(proof)
@@ -184,7 +184,7 @@ def save(node, workspace_id, selector, output_path):
                          (record["slices_received"], record["total_slices"]))
     proofs = _slices(node, record["file_id"])
     target = os.path.abspath(os.fspath(output_path)); directory = os.path.dirname(target) or "."
-    fd, temporary = tempfile.mkstemp(prefix=".poc13-file-", dir=directory)
+    fd, temporary = tempfile.mkstemp(prefix=".tinyp2p-file-", dir=directory)
     try:
         written, hasher = 0, blake3()
         with os.fdopen(fd, "wb") as output:

@@ -43,14 +43,14 @@ while implementing (a mechanic I reasoned through but haven't run).
 `compare.answer_of`, admits a `reply` fact that offers `send`/`ship@outbox`, Reaps on
 shipped. `open_round`.
 
-**bin/cond.py** (~243): single-threaded select loop. `serve` (45, CLI verb inline),
+**bin/tinyd.py** (~243): single-threaded select loop. `serve` (45, CLI verb inline),
 `_admit_bare` (201), `_admit_frame` (206, peeks `frame_cid`, `conn.route(cid)→secret`,
 `frames.open_frame`, admits inners, **calls `sreply.answer(node,fid,cid,...)` for
 compares** — the sync reaction we delete), `_pump_data` (220, reads `watched(send/ship,
 outbox)`, groups by owner, `conn.route`, `frames.pack`+`seal`, `enqueue` into `p["out"]`
 up to `OUTCAP`, adds owner to `to_ship`). Cadence markers `redial/compared/active/synced`,
 `CADENCE`, `QUIET` (108, 171-186). `next(...)`/select timeout fixed `0.05`.
-**bin/con.py**: `load`/`flush`; `proxy` (daemon mode); `main` — **daemonless
+**bin/tiny.py**: `load`/`flush`; `proxy` (daemon mode); `main` — **daemonless
 crash-and-demand branch** at 40-49 (open Store cold, run verb, flush) when no `.sock`.
 **facts/outbox/send.py**: the one-shot courier pattern to copy — `send(dest,payload,t)`
 offers `send@outbox@Exact(dest)`, `shipped_need`, `project` Reaps on `by(ctx,shipped)`.
@@ -305,7 +305,7 @@ optional fp-changed slice. Teardown via `SUPPRESS closed@cid`.
 
 ## 5. Daemon: the new loop (concrete)
 
-`bin/cond.py` `main` loop, replacing 78-195 + helpers:
+`bin/tinyd.py` `main` loop, replacing 78-195 + helpers:
 
 ```python
 inbox = []
@@ -336,28 +336,28 @@ the daemon to author the connection fact and ship its bytes — that's M3, not M
 Each leaves the suite green. Order: M1–M5 (in/out), M6 (sync), M7 (cadence).
 
 **M1 — `runtime.py` seam.** New `bin/runtime.py` with `cycle`/`outbox`/`pump` (pump still
-staging to `p["out"]` initially — behavior-preserving). Rewire `cond.py` to call them.
+staging to `p["out"]` initially — behavior-preserving). Rewire `tinyd.py` to call them.
 `tests/test_runtime.py`: build a `Node(ROOT)`, admit two `outbox.send` facts via `cycle`,
 assert `outbox(node)` shows two `send` rows, `cycle(node, [], now, [fid1,fid2])`, assert
-both reaped. *No sockets.* Files: `bin/runtime.py` (+), `bin/cond.py` (~). LOC ~neutral.
+both reaped. *No sockets.* Files: `bin/runtime.py` (+), `bin/tinyd.py` (~). LOC ~neutral.
 
 **M2 — offers-as-queue.** `pump` → pull-to-fill (delete `OUTCAP` staging + `p["out"]`
 backlog, keep partial-write tail); `to_ship`=fired; add `_dedup`. `tests/test_runtime.py`:
 + burn-down (offers reap as fired) and a backpressure case (fill returns False → offer
-stays, no crash). Files: `bin/runtime.py`, `bin/cond.py`. LOC −.
+stays, no crash). Files: `bin/runtime.py`, `bin/tinyd.py`. LOC −.
 
 **M3 — unify OUT door.** `conn.respond` authors a volatile courier emitting
 `send@outbox@Exact(addr)`; `pump` seals-iff-secret (bare when `route` has no secret).
 Delete the bespoke `enqueue(BARE, _enc(...))` branch. `tests/test_handshake.py` (existing,
 adapt): a handshake and a sync frame both leave via `pump`; handshake bare, sync sealed.
-Files: `facts/connection/connection.py`, `bin/cond.py`. LOC −.
+Files: `facts/connection/connection.py`, `bin/tinyd.py`. LOC −.
 
-**M4 — drop daemonless.** `bin/con.py` `main`: if no `.sock`, `sys.exit("no daemon")` —
+**M4 — drop daemonless.** `bin/tiny.py` `main`: if no `.sock`, `sys.exit("no daemon")` —
 delete the Store/Node crash-and-demand branch (40-49). Drop `busy_timeout` reliance in
 `kernel.Store` (keep WAL). Adapt any test that ran verbs daemonless to spin a daemon or use
-`Node(ROOT)` directly. Files: `bin/con.py`, `kernel.py`. LOC −.
+`Node(ROOT)` directly. Files: `bin/tiny.py`, `kernel.py`. LOC −.
 
-**M5 — document the boundary.** Headers in `cond.py` (two doors, authors-nothing-outbound,
+**M5 — document the boundary.** Headers in `tinyd.py` (two doors, authors-nothing-outbound,
 crypto-as-queries), `frame.py` (why daemon-opened), `connection.py` (admit-in + ship-out).
 Docs only.
 
@@ -379,19 +379,19 @@ Docs only.
   - `test_two_workspaces_walled`: authorized prefix clip; b never receives the other ws.
   - `test_convergence_with_dup_frames`: replay/duplicate `compare`/`have`/`need` → still
     converges once (content-addressing), no round state.
-- Files: `kernel.py`, `facts/sync/{compare,have,need,__init__}.py`, `bin/cond.py`,
+- Files: `kernel.py`, `facts/sync/{compare,have,need,__init__}.py`, `bin/tinyd.py`,
   `facts/sync/reply.py` (−). LOC: roughly flat (three tiny families ≈ old bundled one +
   reply, minus `answer_of` complexity; kernel +~40).
 
 **M7 — cadence as facts.**
-- `runtime`/`cond`: `next_wake(node, now_ms)` = earliest `wake@clock` deadline − now →
+- `runtime`/`tinyd`: `next_wake(node, now_ms)` = earliest `wake@clock` deadline − now →
   select timeout; delete `CADENCE`/`redial`/`compared`/`active`/`synced`.
 - `facts/sync/cadence.py` (§4.4): volatile per-(cid,tier); `now_need(0)` + `wake@` + slice
   deadline + `SUPPRESS closed@cid`; daemon admits the `TIERS` on connect (staggered).
 - `tests/test_cadence.py`: on connect, roots fire narrow→wide in stagger order; each
   re-arms at its period (drive `turn(now=…)` forward); earliest `wake@` computed right;
   `closed@cid` reaps all tier facts (offers gone); volatile → dropped on a fresh `Node`.
-- Files: `facts/sync/cadence.py` (+), `facts/sync/__init__.py`, `bin/cond.py`,
+- Files: `facts/sync/cadence.py` (+), `facts/sync/__init__.py`, `bin/tinyd.py`,
   `bin/runtime.py`. LOC: + small (one family), − the daemon markers.
 
 ---
@@ -434,7 +434,7 @@ Docs only.
    frame(peer_ep, peer_addr)` is **side-specific**: `project` computes the peer as *the
    other side* from whichever keys are resident (lines 103-108), so `route(cid)` (line 168)
    resolves per-side to that side's peer addr + shared secret. My §4 (offers at
-   `Exact(cid)`, pump `conn.route(cid)`) is exactly `_pump_data` today (cond.py:227); the
+   `Exact(cid)`, pump `conn.route(cid)`) is exactly `_pump_data` today (tinyd.py:227); the
    only addition — sync frames *carry* cid so the responder targets `Exact(cid)` back — is
    the `cid` atom in `compare`/`have`/`need`. **Confirmed in poc-10** (`create_connection.rs`,
    `author.rs` `deterministic_responder_output`, `send_facts_on_connection.rs`): cid =
@@ -442,7 +442,7 @@ Docs only.
    the *identical* bytes (same id). One precision to keep: the actual socket routing is **by
    address**, not by cid — cid is a *handle*. `route(cid)` reads the connection row (which
    carries *both* return addresses) and picks the peer's addr by comparing the local
-   endpoint to `from/to_endpoint`, plus `connection_secret` for sealing. poc-13's `route`
+   endpoint to `from/to_endpoint`, plus `connection_secret` for sealing. TinyP2P's `route`
    (line 168) + side-specific `project` already do exactly this, so §4's `Exact(cid)` offers
    → `conn.route(cid)` → (peer addr, secret) is the poc-10 shape. End-to-end check still
    belongs in `test_handshake`.

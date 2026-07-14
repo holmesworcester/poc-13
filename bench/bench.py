@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""bench/bench.py — poc-13 performance harness.  Run: python3 bench/bench.py
+"""bench/bench.py — TinyP2P performance harness.  Run: python3 bench/bench.py
 
 One file, stdlib only. Measures the load paths that matter, prints a table, and
 exits nonzero if any budget is violated (so it can gate CI). A budget is a
@@ -62,8 +62,8 @@ def report(name, val, unit, budget, hi_ok=False):
 def section(t): print(f"\n{t}")
 
 # --- daemon plumbing ----------------------------------------------------------
-def spawn(db, *a):                       # a cond.py daemon; returns (proc, announced addr)
-    p = subprocess.Popen([sys.executable, os.path.join(BIN, "cond.py"), db, *a],
+def spawn(db, *a):                       # a tinyd.py daemon; returns (proc, announced addr)
+    p = subprocess.Popen([sys.executable, os.path.join(BIN, "tinyd.py"), db, *a],
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     line = p.stdout.readline()
     assert line.startswith("listening:"), (line, p.poll() and p.stderr.read())
@@ -82,8 +82,8 @@ def uverb(sockpath, path, *args):        # one proxy roundtrip over the daemon's
     if not r.startswith(b"+"): raise RuntimeError(r[1:].decode())
     return r[1:].decode()
 
-def cli(db, *args):                      # a full con.py invocation (subprocess proxy to the daemon)
-    r = subprocess.run([sys.executable, os.path.join(BIN, "con.py"), db, *args],
+def cli(db, *args):                      # a full tiny.py invocation (subprocess proxy to the daemon)
+    r = subprocess.run([sys.executable, os.path.join(BIN, "tiny.py"), db, *args],
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     return r.stdout.strip()
@@ -152,7 +152,7 @@ def bench_cli(db):
         t = time.time(); uverb(db + ".sock", "store.hydrate.pull")        # residency is a verb
         report("hydrate everything (one verb)", time.time() - t, "s", 3.5)
         t = time.time(); cli(db, "content.message.send", WID.hex(), "c0", "al", "warm", "98")
-        report("daemon-proxy con.py (one verb)", time.time() - t, "s", 0.2)
+        report("daemon-proxy tiny.py (one verb)", time.time() - t, "s", 0.2)
     finally: stop(p)
 
 # --- 3. query under load ------------------------------------------------------
@@ -341,7 +341,7 @@ def bench_crypto():
     finally: signature.verify = orig
 
 def main():
-    print("poc-13 bench  |  python", sys.version.split()[0], " facts:", N)
+    print("TinyP2P bench  |  python", sys.version.split()[0], " facts:", N)
     n = bench_engine()
     bench_chain()
     with tempfile.TemporaryDirectory() as d:

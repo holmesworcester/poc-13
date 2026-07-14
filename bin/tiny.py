@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""con — the poc-13 CLI.  Usage: con <db> <scope.fact.verb> [args...]
+"""tiny — the TinyP2P CLI.  Usage: tiny <db> <scope.fact.verb> [args...]
 
 The db is sqlite holding the persisted atom relation the kernel Store owns —
 one row per atom, canonical bytes derived on read. A daemon owns the db
-exclusively (<db>.sock); con's only job is to proxy the
+exclusively (<db>.sock); tiny's only job is to proxy the
 verb to it: one framed request out, one framed +ok/-err reply back. With no
-daemon reachable there is nobody to answer, so con refuses and names the
+daemon reachable there is nobody to answer, so tiny refuses and names the
 daemon to start — it never opens the db itself."""
 import os, socket, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -23,7 +23,7 @@ def proxy(s, path, args):                # the daemon owns the db; just ask it
 def main(db, path, *args):
     s = socket.socket(socket.AF_UNIX)
     try: s.connect(db + ".sock")
-    except OSError: sys.exit("no daemon for %s (start: cond %s)" % (db, db))
+    except OSError: sys.exit("no daemon for %s (start: tinyd %s)" % (db, db))
     return proxy(s, path, args)
 
 if __name__ == "__main__":

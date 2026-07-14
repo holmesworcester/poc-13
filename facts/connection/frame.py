@@ -19,7 +19,7 @@ SC = b"conn"
 TARGET = 48 << 10                        # bundle small facts to ~48 KiB; one oversized content
                                          # fact remains legal and gets a frame of its own
 VERSION = 1
-PURPOSE = b"poc13 connection frame v1"
+PURPOSE = b"tinyp2p connection frame v1"
 
 # SHAPE — none: a frame is sealed onto the wire, never admitted as a fact.
 

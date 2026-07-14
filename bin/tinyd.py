@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""cond — the poc-13 daemon.  Usage: cond <db> [--listen HOST:PORT]
+"""tinyd — the TinyP2P daemon.  Usage: tinyd <db> [--listen HOST:PORT]
 
 Owns the db exclusively and boots COLD: it loads nothing and decides no
 residency policy. Residency is demanded — a verb's queries fault the keys
 they read, and hydration at any scale is a client verb like any other
-(`con <db> store.hydrate.pull` faults everything; sync reconciles the
+(`tiny <db> store.hydrate.pull` faults everything; sync reconciles the
 resident set, so pull before expecting full coverage). It serves verbs over
-a unix socket at <db>.sock (con.py proxies to it) and reconciles facts with
+a unix socket at <db>.sock (tiny.py proxies to it) and reconciles facts with
 peers over TCP. One single-threaded select loop over the runtime seam (bin/runtime.py):
 each iteration collects an inbox, `cycle`s it (HOST IN admit + ENGINE DRAIN one
 turn), then `pump`s the validated outbox offers (HOST OUT). The daemon decides no

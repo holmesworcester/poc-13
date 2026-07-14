@@ -1,10 +1,10 @@
-# The Atom Model — poc-13 Design
+# The Atom Model — TinyP2P Design
 
 This document is the design of record for the protocol implemented in this
 repository. Ground truth is the running code in `kernel.py`, `facts/`, and
 `bin/`, with executable claims pinned by `tests/` and `bench/bench.py`.
 
-poc-13 is a compact protocol runtime for local-first collaboration. Facts are
+TinyP2P is a compact protocol runtime for local-first collaboration. Facts are
 the units of identity and wire transfer, atoms are the units of durable storage
 and matching, and the needs/offers language is the fact language. Commands,
 queries, authority, content, connections, hydration, and synchronization all
@@ -105,7 +105,7 @@ atoms, ordered byte-lexicographically on the canonical atom encoding.
 LE length). Each atom contributes its own framed canonical byte form.
 
 ```text
-FactId = H("poc13.fact.v1" ‖ type_tag ‖ atoms)
+FactId = H("tinyp2p.fact.v1" ‖ type_tag ‖ atoms)
 ```
 
 `H` is BLAKE3-256 (32 bytes, via the `blake3` package). The encoding is one fixed
@@ -178,7 +178,7 @@ With a `Store` attached, a session admits nothing at boot and pays only for
 what its facts and queries ask about (see Hydration); the total demand is
 the degenerate case that faults everything.
 
-`bin/cond.py` owns the database exclusively and constructs a cold node: it
+`bin/tinyd.py` owns the database exclusively and constructs a cold node: it
 performs no database-wide load and decides no application residency policy.
 Startup demands only its local signer and endpoint identity. Other residency is
 demanded — a verb's queries
@@ -360,7 +360,7 @@ report) and drives no retirement itself: the policy — reap, or re-arm a retry
 — lives in the family, never in the pump. Persistence is the same shape
 inverted: the host's other completion set, `flushed`, tracks which durable
 facts have reached the db, but a durable fact must *survive*, so it is written
-by `con.flush` and never reaped.
+by `runtime.flush` and never reaped.
 
 Recurrence is central but the onus is on one party: everything that must
 happen repeats, and the repeating side drives it. Sync's periodic re-descend
@@ -374,7 +374,7 @@ process-local in the daemon.
 
 ## The CLI
 
-`bin/con.py`: `con <db> <scope.fact.verb> [args...]`. It is a thin client:
+`bin/tiny.py`: `tiny <db> <scope.fact.verb> [args...]`. It is a thin client:
 resolve nothing locally, just proxy to the daemon that owns the db. `<db>.sock`
 accepts, the verb path and args go out as one framed request, and one framed
 `+ok`/`-err` reply comes back after any authored durable facts reach SQLite.
@@ -502,7 +502,7 @@ they read — and the engine answers it exactly the way it answers every
 need, through the fault leg (Hydration, Part I): the family adds no
 machinery, it only names a key. The total demand (the reserved `\x00all`
 key) is the whole boot story — and the daemon itself doesn't even author
-it: it boots cold, and `con <db> store.hydrate.pull` (one verb, one fact)
+it: it boots cold, and `tiny <db> store.hydrate.pull` (one verb, one fact)
 makes a full replica. Queries may author volatile demand and drain; they still never
 author durable facts. Persistent standing demand and pins are outside the
 implemented family.
@@ -806,7 +806,7 @@ feed mutations and assert inert misses; treap tests pin history independence,
 clamping invariance, deletion, and degenerate-spine safety; reliability tests
 exercise loss, duplication, reordering, partitions, TTL dedup, anchor liveness,
 and convergence certificates. The source-contract test keeps every fact file
-in the prescribed module shape. Black-box stories drive `bin/con.py` and real
+in the prescribed module shape. Black-box stories drive `bin/tiny.py` and real
 daemon subprocesses over Unix and TCP sockets. Hydration tests compare
 demand-selected verdicts with a fully resident node, including suppression
 across the cold boundary and authority closure for signed content.

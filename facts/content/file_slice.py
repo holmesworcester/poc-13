@@ -5,7 +5,7 @@ The slice Requires that descriptor and carries the message death key directly,
 so deletion physically purges every proof and payload byte."""
 from kernel import (Atom, Exact, NEED, OFFER, Out, REQUIRE, SELF, SUPPRESS,
                     by, fact, ts_atom, ts_of)
-import poc13_bao
+import tinyp2p_bao
 
 TAG = b"content.file_slice"
 SLICE_BYTES = 256 * 1024
@@ -93,7 +93,7 @@ def verified_bytes(proof, root, index, blob_bytes, slice_bytes=SLICE_BYTES):
         raise ValueError("slice index outside descriptor")
     start = index * slice_bytes
     count = min(slice_bytes, blob_bytes - start)
-    return poc13_bao.decode_slice(proof, root, start, count, blob_bytes)
+    return tinyp2p_bao.decode_slice(proof, root, start, count, blob_bytes)
 
 
 # CLI — slices have no independent human surface.

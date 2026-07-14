@@ -80,7 +80,7 @@ fn decode_slice(
 }
 
 #[pymodule]
-fn poc13_bao(module: &Bound<'_, PyModule>) -> PyResult<()> {
+fn tinyp2p_bao(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(prepare_file, module)?)?;
     module.add_function(wrap_pyfunction!(extract_slice, module)?)?;
     module.add_function(wrap_pyfunction!(decode_slice, module)?)?;

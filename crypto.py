@@ -1,4 +1,4 @@
-"""poc-13 crypto facade over PyNaCl/libsodium (poc-10: src/core/crypto.rs).
+"""TinyP2P crypto facade over PyNaCl/libsodium (poc-10: src/core/crypto.rs).
 
 Primitives only — no protocol labels; every derivation label lives in the
 fact family that owns it. The suite: BLAKE3-256 keyed hashing (matching
@@ -14,11 +14,11 @@ try:
     from nacl import bindings as _na
     from nacl.signing import SigningKey, VerifyKey
 except ImportError as e:                               # PyNaCl + blake3
-    raise ImportError("poc-13 needs PyNaCl and blake3 (pip install pynacl blake3)") from e
+    raise ImportError("TinyP2P needs PyNaCl and blake3 (pip install pynacl blake3)") from e
 
 from kernel import H, frame
 
-X25519_KEY_INFO = b"poc13 x25519 xchacha20poly1305 key"
+X25519_KEY_INFO = b"tinyp2p x25519 xchacha20poly1305 key"
 
 
 def keyed_hash(key32, domain, info):                   # deterministic derivation (BLAKE3 keyed)

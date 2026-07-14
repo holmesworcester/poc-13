@@ -217,7 +217,7 @@ class _Flaky:
 def test_a_failed_write_propagates_and_tears_nothing():
     """Bad bytes are a miss, but a failed WRITE propagates whole: the caller
     keeps the fact unflushed (never a silent +ok over nothing) and no torn
-    half-fact blocks the retry — SystemExit (cond's signal handler) included."""
+    half-fact blocks the retry — SystemExit (tinyd's signal handler) included."""
     import sqlite3
     for exc in (sqlite3.OperationalError("disk I/O error"), SystemExit(0)):
         s = Store()

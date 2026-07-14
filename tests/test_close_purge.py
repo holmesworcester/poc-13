@@ -58,7 +58,7 @@ def test_sever_reclaims_secrets_from_disk():
     store = Store()
     for b in host.durable.values(): store.add(b)                 # persist the session
     store.commit()
-    host.store = store                   # production wires the store at boot (cond.py)
+    host.store = store                   # production wires the store at boot (tinyd.py)
     ephs = _ephemerals(host)
     close.sever(host, cid, 5); host.run()
     assert set(host.purged) >= set(ephs), "the kernel reports what left disk, for flush bookkeeping"

@@ -27,7 +27,7 @@ from facts.auth import endpoint, invite_accepted as ish
 TAG = b"connection.request"
 SC = b"conn"
 SEAL_VERSION = 1
-REQUEST_PURPOSE = b"poc13-sealed-connection-request-v2"
+REQUEST_PURPOSE = b"tinyp2p-sealed-connection-request-v2"
 BOOTSTRAP, MEMBERSHIP = 1, 2
 
 # --- plaintext codec (shared with connection.py) --------------------------------

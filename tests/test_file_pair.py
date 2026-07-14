@@ -3,15 +3,15 @@ sealed transport, survives receiver restart, saves byte-for-byte, then a synced
 message deletion physically removes the message and complete attachment tree on
 both databases while leaving an already exported user file alone."""
 import os, tempfile
-from harness import con, converge, fleet, port, sock
+from harness import tiny, converge, fleet, port, sock
 from kernel import Store
 
 
 def _bootstrap(dba, dbb, wid, addr_a, addr_b):
-    link = con(dba, "auth.user_invite.invite", wid)
+    link = tiny(dba, "auth.user_invite.invite", wid)
     invite_id, secret = link.split(":")
-    endpoint = con(dba, "auth.endpoint.endpoint")
-    con(dbb, "connection.request.connect", wid, invite_id, secret, endpoint, addr_a, addr_b)
+    endpoint = tiny(dba, "auth.endpoint.endpoint")
+    tiny(dbb, "connection.request.connect", wid, invite_id, secret, endpoint, addr_a, addr_b)
 
 
 def _field(output, name):
@@ -26,7 +26,7 @@ def test_file_attachment_sync_restart_save_and_real_delete():
         addr_a, addr_b = port(), port()
         f.spawn(alice, "--listen", addr_a)
         f.spawn(bob, "--listen", addr_b)
-        wid = con(alice, "auth.workspace.create", "files", "1")
+        wid = tiny(alice, "auth.workspace.create", "files", "1")
         _bootstrap(alice, bob, wid, addr_a, addr_b)
         converge(bob, lambda output: wid in output, "auth.workspace.index",
                  phase="bob accepts the workspace")
@@ -34,7 +34,7 @@ def test_file_attachment_sync_restart_save_and_real_delete():
         source = os.path.join(directory, "payload.bin")
         payload = bytes(i % 251 for i in range(300_123))
         with open(source, "wb") as output: output.write(payload)
-        sent = con(alice, "content.file.send", wid, "general", "al", "see attached",
+        sent = tiny(alice, "content.file.send", wid, "general", "al", "see attached",
                    source, "application/octet-stream", "2")
         message_id = _field(sent, "message_id")
         assert _field(sent, "filename") == "payload.bin"
@@ -46,7 +46,7 @@ def test_file_attachment_sync_restart_save_and_real_delete():
                  "content.message.view", wid, "general", secs=0,
                  phase="message view includes attachment")
         target = os.path.join(directory, "bob-copy.bin")
-        saved = con(bob, "content.file.save", wid, "#1", target)
+        saved = tiny(bob, "content.file.save", wid, "#1", target)
         assert _field(saved, "bytes_written") == str(len(payload))
         assert open(target, "rb").read() == payload
 
@@ -54,10 +54,10 @@ def test_file_attachment_sync_restart_save_and_real_delete():
         converge(bob, lambda output: "1. complete payload.bin" in output,
                  "content.file.list", wid, secs=0, phase="attachment survives bob restart")
         after_restart = os.path.join(directory, "bob-copy-after-restart.bin")
-        con(bob, "content.file.save", wid, "1", after_restart)
+        tiny(bob, "content.file.save", wid, "1", after_restart)
         assert open(after_restart, "rb").read() == payload
 
-        con(alice, "content.message_deletion.delete", wid, message_id, "3")
+        tiny(alice, "content.message_deletion.delete", wid, message_id, "3")
         converge(alice, "FILES (0 total):", "content.file.list", wid, secs=0,
                  phase="source attachment is physically deleted")
         converge(bob, "FILES (0 total):", "content.file.list", wid, secs=30,

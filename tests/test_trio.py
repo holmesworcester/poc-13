@@ -1,5 +1,5 @@
 """Three real daemons in a hub over sealed connections, black box through
-con.py: bob and carol each bootstrap-connect to alice, so every bob<->carol leg
+tiny.py: bob and carol each bootstrap-connect to alice, so every bob<->carol leg
 relays through her (a node ships every durable+shareable fact it holds to each
 of its own peers, not just its own authorship). Ports poc-10's three-daemon
 late-joiner story and poc-7's offline-delta rejoin, scaled to a ~1k delta
@@ -11,15 +11,15 @@ offline and her file freezes -> alice and bob author the delta plus a tail
 marker -> carol rejoins (her durable request re-handshakes) and catches the
 whole delta -> live sends from all three still deliver everywhere."""
 import os, tempfile
-from harness import con, converge, fleet, port, sock
+from harness import tiny, converge, fleet, port, sock
 
 DELTA = 500                              # per author; the "one k" offline delta
 
 def _join(dba, wid, addr_a, ep_a, db, addr, name, t):
-    link = con(dba, "auth.user_invite.invite", wid)   # alice mints + retains the invite
+    link = tiny(dba, "auth.user_invite.invite", wid)   # alice mints + retains the invite
     iid, secret = link.split(":")
-    con(db, "connection.request.connect", wid, iid, secret, ep_a, addr_a, addr)   # bootstrap dial
-    con(db, "auth.user.join", wid, name, link, t)  # join as a member on the same link
+    tiny(db, "connection.request.connect", wid, iid, secret, ep_a, addr_a, addr)   # bootstrap dial
+    tiny(db, "auth.user.join", wid, name, link, t)  # join as a member on the same link
 
 def test_trio_story():
     with tempfile.TemporaryDirectory() as d, fleet() as f:
@@ -27,13 +27,13 @@ def test_trio_story():
         A, B, C = port(), port(), port()             # fixed ports: a rejoin reuses its address
         addr_a = f.spawn(dba, "--listen", A)
         addr_b = f.spawn(dbb, "--listen", B)
-        wid = con(dba, "auth.workspace.create", "acme", "1")
-        ep_a = con(dba, "auth.endpoint.endpoint")
+        wid = tiny(dba, "auth.workspace.create", "acme", "1")
+        ep_a = tiny(dba, "auth.endpoint.endpoint")
         # bob bootstrap-connects to alice on the first invite, then joins
         _join(dba, wid, addr_a, ep_a, dbb, addr_b, "bo", "5")
         converge(dba, "founder\nbo", "auth.user.roster", wid, secs=15, phase="bob's join reaches alice")
-        con(dba, "content.message.send", wid, "general", "al", "steady-al", "6")
-        con(dbb, "content.message.send", wid, "general", "bo", "steady-bo", "7")
+        tiny(dba, "content.message.send", wid, "general", "al", "steady-al", "6")
+        tiny(dbb, "content.message.send", wid, "general", "bo", "steady-bo", "7")
         converge(dba, 2, "content.message.feed", wid, "general", secs=15, phase="steady traffic on alice")
         converge(dbb, 2, "content.message.feed", wid, "general", secs=15, phase="steady traffic on bob")
         # carol joins late; her chain and bob's cross-relay through alice
@@ -42,13 +42,13 @@ def test_trio_story():
         trio = ((dba, "alice"), (dbb, "bob"), (dbc, "carol"))
         for db, who in trio:
             converge(db, "founder\nbo\nca", "auth.user.roster", wid, secs=25, phase="full roster on " + who)
-        con(dba, "content.message.send", wid, "general", "al", "probe-al", "11")
-        con(dbb, "content.message.send", wid, "general", "bo", "probe-bo", "12")
-        con(dbc, "content.message.send", wid, "general", "ca", "probe-ca", "13")
+        tiny(dba, "content.message.send", wid, "general", "al", "probe-al", "11")
+        tiny(dbb, "content.message.send", wid, "general", "bo", "probe-bo", "12")
+        tiny(dbc, "content.message.send", wid, "general", "ca", "probe-ca", "13")
         for db, who in trio:
             converge(db, 5, "content.message.feed", wid, "general", secs=25,
                      phase="probes relayed to " + who)
-        # carol offline: pin her at the pre-offline count while still up (con.py no
+        # carol offline: pin her at the pre-offline count while still up (tiny.py no
         # longer cold-reads a stopped daemon's file), then freeze her by stopping
         converge(dbc, 5, "content.message.feed", wid, "general", secs=0, phase="carol pinned pre-offline")
         f.stop(dbc)
@@ -70,12 +70,12 @@ def test_trio_story():
                        phase="carol rejoin catch-up")
         assert "tail-al" in got and "tail-bo" in got, "carol caught the count but not both tails"
         # post-rejoin liveness in every direction
-        con(dba, "content.message.send", wid, "general", "al", "post-al", "4001")
-        con(dbb, "content.message.send", wid, "general", "bo", "post-bo", "4002")
+        tiny(dba, "content.message.send", wid, "general", "al", "post-al", "4001")
+        tiny(dbb, "content.message.send", wid, "general", "bo", "post-bo", "4002")
         for db, who in trio:
             converge(db, total + 2, "content.message.feed", wid, "general", secs=40,
                      phase="post-rejoin sends reach " + who)
-        con(dbc, "content.message.send", wid, "general", "ca", "post-ca", "4003")
+        tiny(dbc, "content.message.send", wid, "general", "ca", "post-ca", "4003")
         converge(dba, total + 3, "content.message.feed", wid, "general", secs=40,
                  phase="carol's send reaches alice")
         converge(dbb, total + 3, "content.message.feed", wid, "general", secs=40,

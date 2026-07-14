@@ -27,13 +27,13 @@ from facts.outbox.send import send
 TAG = b"connection.connection"
 SC = b"conn"
 SEAL_VERSION = 1
-CONNECTION_PURPOSE = b"poc13-sealed-connection-v2"
-BOOTSTRAP_PURPOSE = b"poc13-connection-bootstrap-handshake-v2"
-MEMBERSHIP_PURPOSE = b"poc13-connection-membership-handshake-v2"
-SECRET_PURPOSE = b"poc13-connection-secret-v2"
-TRANSCRIPT_LABEL = b"poc13-connection-handshake-transcript-v2"
-RESP_EPH_LABEL = b"poc13:create-connection:responder-ephemeral:v1"
-NONCE_LABEL = b"poc13:create-connection:seal-nonce:v1"
+CONNECTION_PURPOSE = b"tinyp2p-sealed-connection-v2"
+BOOTSTRAP_PURPOSE = b"tinyp2p-connection-bootstrap-handshake-v2"
+MEMBERSHIP_PURPOSE = b"tinyp2p-connection-membership-handshake-v2"
+SECRET_PURPOSE = b"tinyp2p-connection-secret-v2"
+TRANSCRIPT_LABEL = b"tinyp2p-connection-handshake-transcript-v2"
+RESP_EPH_LABEL = b"tinyp2p:create-connection:responder-ephemeral:v1"
+NONCE_LABEL = b"tinyp2p:create-connection:seal-nonce:v1"
 
 # --- connection plaintext codec + handshake math --------------------------------
 _C = ("from_ep", "to_ep", "request_id", "resp_addr", "init_addr", "init_eph_id",

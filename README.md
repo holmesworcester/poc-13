@@ -1,6 +1,6 @@
-# poc-13 — the atom model
+# TinyP2P — the atom model
 
-poc-13 is an executable proof of concept for a small local-first, peer-to-peer
+TinyP2P is an executable proof of concept for a small local-first, peer-to-peer
 backend for collaboration applications such as team chat. It explores whether
 identity, validation, storage, demand-driven loading, synchronization, transport,
 and application behavior can share one data language instead of accumulating a
@@ -57,12 +57,12 @@ The main pieces are:
   frame-bundle, close, and ephemeral-secret families. A durable answered
   request remains the known-peer anchor and redials only when its session is
   down.
-- [`bin/cond.py`](bin/cond.py) and [`bin/runtime.py`](bin/runtime.py) — the
+- [`bin/tinyd.py`](bin/tinyd.py) and [`bin/runtime.py`](bin/runtime.py) — the
   single-writer daemon and its socket-free host-turn seam. The daemon performs
   no database-wide boot load; it demands local identity plus whatever later
   queries and hydrate facts request from the atom store.
-- [`bin/con.py`](bin/con.py) — a thin client for
-  `con <db> <scope.fact.verb> [args...]` over `<db>.sock`.
+- [`bin/tiny.py`](bin/tiny.py) — a thin client for
+  `tiny <db> <scope.fact.verb> [args...]` over `<db>.sock`.
 - [`tests/`](tests/) — kernel contracts, randomized order and adversarial
   storage cases, hydration, sync and reliability properties, and real
   multi-daemon stories over sockets.
@@ -87,21 +87,21 @@ python3 -m pip install pynacl blake3 pytest ./native/bao_py
 Start the daemon in one terminal:
 
 ```bash
-bin/cond.py w.facts --listen 127.0.0.1:41000
+bin/tinyd.py w.facts --listen 127.0.0.1:41000
 ```
 
 Then use the CLI from another terminal:
 
 ```text
-$ bin/con.py w.facts auth.workspace.create acme
+$ bin/tiny.py w.facts auth.workspace.create acme
 <workspace-id>
-$ bin/con.py w.facts content.channel.list <workspace-id>
+$ bin/tiny.py w.facts content.channel.list <workspace-id>
 <channel-id> general
-$ bin/con.py w.facts content.channel.create <workspace-id> random
+$ bin/tiny.py w.facts content.channel.create <workspace-id> random
 <channel-id>
-$ bin/con.py w.facts content.message.send <workspace-id> general al "hello"
+$ bin/tiny.py w.facts content.message.send <workspace-id> general al "hello"
 <message-id>
-$ bin/con.py w.facts content.message.feed <workspace-id> general
+$ bin/tiny.py w.facts content.message.feed <workspace-id> general
 hello
 ```
 
@@ -114,7 +114,7 @@ valid, so channel lists and isolated feeds converge across peers instead of
 depending on local aliases that happen to share a string.
 
 The daemon starts cold. A normal query faults only the keys it needs;
-`bin/con.py w.facts store.hydrate.pull` explicitly makes the complete durable
+`bin/tiny.py w.facts store.hydrate.pull` explicitly makes the complete durable
 set resident, which is also required before claiming full sync coverage.
 
 Run the tests and performance harness with:
@@ -127,7 +127,7 @@ python3 bench/bench.py
 Attach, inspect, and save a file through the same daemon-owned fact store:
 
 ```
-$ bin/con.py w.facts content.file.send <wid> general al "see attached" ./notes.txt text/plain
+$ bin/tiny.py w.facts content.file.send <wid> general al "see attached" ./notes.txt text/plain
 message_id: <message-fact-id>
 file_fact_id: <descriptor-fact-id>
 file_id: <content-instance-id>
@@ -135,13 +135,13 @@ filename: notes.txt
 mime: text/plain
 blob_bytes: 1234
 total_slices: 1
-$ bin/con.py w.facts content.message.view <wid> general
+$ bin/tiny.py w.facts content.message.view <wid> general
 see attached
   file: notes.txt (1234 bytes, complete)
-$ bin/con.py w.facts content.file.list <wid>
+$ bin/tiny.py w.facts content.file.list <wid>
 FILES (1 total):
 1. complete notes.txt (1234 bytes, 1/1 slices, 100%)
-$ bin/con.py w.facts content.file.save <wid> 1 ./saved-notes.txt
+$ bin/tiny.py w.facts content.file.save <wid> 1 ./saved-notes.txt
 ```
 
 Attachments are ordinary descriptor and 256 KiB slice facts, capped at 10 GiB.
