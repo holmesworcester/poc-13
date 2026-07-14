@@ -27,7 +27,7 @@ Each test is one quantifier of the informal proof:
 import os, random, sys
 from collections import Counter
 HERE = os.path.dirname(os.path.abspath(__file__)); ROOT_DIR = os.path.dirname(HERE)
-sys.path[:0] = [ROOT_DIR, os.path.join(ROOT_DIR, "bin")]
+sys.path[:0] = [HERE, ROOT_DIR, os.path.join(ROOT_DIR, "bin")]
 import crypto as _c
 from kernel import Node, decode, encode, fact_id
 from facts import ROOT
@@ -37,12 +37,14 @@ from runtime import cycle, outbox, pump, TTLSet, SENT_TTL
 from facts.auth.workspace import workspace
 from facts.auth.invite_accepted import invite_accepted
 from facts.auth.signature import signature
-from facts.content.message import message
+from content_fixtures import flat, member_context, signed_message
 
 RK, RPK = _c.ed25519_keygen(bytes(32)); T0 = 1_700_000_000
 WS = workspace(b"acme", RPK, T0); WID = fact_id(WS)
 WS_SIG = signature(b"auth", RPK, WID, _c.ed25519_sign(RK, WID), T0)
 ACCEPT = invite_accepted(WID, bytes(32), bytes(32), b"", RPK, T0)
+AL = member_context(WID, RK, RPK, b"al", T0 + 1)   # ONE member authors everything; bodies name the sender
+MEMBER = AL.facts                        # invite + its sig + user + its sig: the 4-fact chain a message leans on
 CID = b"\x11" * 32
 W = 4000                                 # the default anchor period (cadence.TIERS)
 SYNC_TAGS = (cmp.TAG, _need.TAG)
@@ -52,8 +54,8 @@ def node(*fs):
     for f in fs: n.admit(encode(f))
     n.run(); return n
 
-def msgs(author, t0, k):
-    return [message(WID, b"g", author, b"m%d" % i, t0 + i) for i in range(k)]
+def msgs(author, t0, k):                 # k signed messages = 2k facts: each rides with its member signature
+    return flat(signed_message(AL, WID, b"g", author + b" m%d" % i, t0 + i) for i in range(k))
 
 def leaves(n): return set(_sidx.tree(n).keys)
 
@@ -84,9 +86,6 @@ class World:
         n = self.nodes[me]
         inbox, self.chan[me] = self.chan[me], []
         if self.reorder: self.rng.shuffle(inbox)
-        cycle(n, inbox, self.t, tuple(self.fired[me]), 4096)
-        while n.frontier: n.turn(self.t, tuple(self.fired[me]), 4096)
-        self.fired[me] &= {o for o, _, _ in outbox(n)}
         def deliver(cid, addr, secret, inners):
             k = len(inners) if self.cap is None else min(self.cap, len(inners))
             for blob in inners[:k]:
@@ -96,8 +95,16 @@ class World:
                         self.chan[other].append(blob)
                         self.delivered[self._kind(blob)] += 1
             return k
-        self.fired[me] |= pump(n, lambda c: (b"peer", None), deliver,
-                               self.fired[me], self.sent[me], self.t)
+        # pump after EVERY turn, as cond does: a cadence due-fire is a transient
+        # offer the next clock presentation erases, so a drain-then-pump harness
+        # silently drops any opener fired before the drain's last turn.
+        cycle(n, inbox, self.t, tuple(self.fired[me]), 4096)
+        while True:
+            self.fired[me] &= {o for o, _, _ in outbox(n)}
+            self.fired[me] |= pump(n, lambda c: (b"peer", None), deliver,
+                                   self.fired[me], self.sent[me], self.t)
+            if not n.frontier: break
+            n.turn(self.t, tuple(self.fired[me]), 4096)
 
     def step(self, dt=100):
         self.t += dt
@@ -124,12 +131,14 @@ def no_residue(w):                       # volatile couriers must not outlive th
 # --- bulk + duplication ----------------------------------------------------------
 def test_bulk_catchup_then_duplication_does_not_amplify():
     def run(dup):
-        w = World(node(WS, WS_SIG, *msgs(b"al", T0 + 100, 250)), node(), dup=dup, seed=1)
+        w = World(node(WS, WS_SIG, *MEMBER, *msgs(b"al", T0 + 100, 250)), node(), dup=dup, seed=1)
         assert w.run_until(w.converged, 60_000)
         w.settle(); no_residue(w)
         return w
     w1 = run(1)
-    assert w1.emitted["ship"] <= 252 + 8            # each fact leaves the source ~once (TTL >> catch-up)
+    assert w1.emitted["ship"] <= 506 + 8            # each fact leaves the source ~once (TTL >> catch-up);
+                                                    # signatures double the messages (250 msg + 250 sig),
+                                                    # + ws/its sig + the 4-fact member chain = 506
     e1 = sum(w1.emitted.values())
     w2 = run(2)                                     # every frame delivered twice
     e2 = sum(w2.emitted.values())
@@ -138,16 +147,16 @@ def test_bulk_catchup_then_duplication_does_not_amplify():
 def test_random_loss_still_converges():
     for seed in (2, 3):
         rng = random.Random(seed)
-        w = World(node(WS, WS_SIG, *msgs(b"al", T0 + 100, 40)),
-                  node(WS, WS_SIG, *msgs(b"bo", T0 + 500, 40)),
+        w = World(node(WS, WS_SIG, *MEMBER, *msgs(b"al", T0 + 100, 40)),
+                  node(WS, WS_SIG, *MEMBER, *msgs(b"bo", T0 + 500, 40)),
                   seed=seed, drop=lambda s, t, blob: rng.random() < 0.35)
         assert w.run_until(w.converged, 180_000), f"no convergence under loss, seed {seed}"
         w.settle(); no_residue(w)
 
 def test_reorder_duplication_loss_combined():
     rng = random.Random(7)
-    w = World(node(WS, WS_SIG, *msgs(b"al", T0 + 100, 25)),
-              node(WS, WS_SIG, *msgs(b"bo", T0 + 500, 25)),
+    w = World(node(WS, WS_SIG, *MEMBER, *msgs(b"al", T0 + 100, 25)),
+              node(WS, WS_SIG, *MEMBER, *msgs(b"bo", T0 + 500, 25)),
               seed=7, dup=2, reorder=True, drop=lambda s, t, blob: rng.random() < 0.25)
     assert w.run_until(w.converged, 180_000)
     w.settle(); no_residue(w)
@@ -155,13 +164,13 @@ def test_reorder_duplication_loss_combined():
 # --- partitions and lost openers --------------------------------------------------
 def test_partition_heals_within_anchor_bound():
     down = [False]
-    w = World(node(WS, WS_SIG, *msgs(b"al", T0 + 100, 10)), node(),
+    w = World(node(WS, WS_SIG, *MEMBER, *msgs(b"al", T0 + 100, 10)), node(),
               drop=lambda s, t, blob: down[0])
-    assert w.run_until(w.converged, 30_000)
+    assert w.run_until(w.converged, 30_000)          # b now holds the member chain too: it can author
     down[0] = True                                   # total partition; both sides keep authoring
-    for i in range(10):
-        w.nodes["a"].admit(encode(message(WID, b"g", b"al", b"p%d" % i, T0 + 1000 + i)))
-        w.nodes["b"].admit(encode(message(WID, b"g", b"bo", b"q%d" % i, T0 + 2000 + i)))
+    for i in range(10):                              # each authoring is a msg + its signature: two facts
+        for f in signed_message(AL, WID, b"g", b"p%d" % i, T0 + 1000 + i): w.nodes["a"].admit(encode(f))
+        for f in signed_message(AL, WID, b"g", b"q%d" % i, T0 + 2000 + i): w.nodes["b"].admit(encode(f))
         w.step(); w.step()
     w.run_until(lambda: False, w.t + 2 * W)          # dark for two more anchor periods
     assert not w.converged()
@@ -172,7 +181,7 @@ def test_partition_heals_within_anchor_bound():
 def test_lost_opener_healed_by_anchor_only_because_dedup_expires():
     def run(ttl):
         dark = [True]
-        w = World(node(WS, WS_SIG, *msgs(b"al", T0 + 100, 3)), node(),
+        w = World(node(WS, WS_SIG, *MEMBER, *msgs(b"al", T0 + 100, 3)), node(),
                   ttl=ttl, drop=lambda s, t, blob: dark[0])
         w.run_until(lambda: False, 3000)             # every gated opener (and the mirror) is lost;
         dark[0] = False                              # nothing changes after, so the gates stay silent forever
@@ -186,19 +195,20 @@ def test_lost_opener_healed_by_anchor_only_because_dedup_expires():
 
 # --- gate starvation under churn ---------------------------------------------------
 def _churn(w, until, every=500):
-    """Author one message per side per `every` ms; return [(t, fid, source-side)]."""
+    """Author one signed message per side per `every` ms; return [(t, fid, source-side)]
+    for BOTH facts of each bundle — the signature must cross exactly like its message."""
     authored, k = [], 0
     while w.t < until:
         if w.t % every == 0:
             for s, base in (("a", T0 + 10), ("b", T0 + 10_000)):
-                m = message(WID, b"g", s.encode(), b"c%d" % k, base + k)
-                w.nodes[s].admit(encode(m)); authored.append((w.t, fact_id(m), s))
+                for f in signed_message(AL, WID, b"g", s.encode() + b" c%d" % k, base + k):
+                    w.nodes[s].admit(encode(f)); authored.append((w.t, fact_id(f), s))
             k += 1
         w.step()
     return authored
 
 def test_both_sided_churn_anchor_bounds_the_lag():
-    w = World(node(WS, WS_SIG), node(WS, WS_SIG))
+    w = World(node(WS, WS_SIG, *MEMBER), node(WS, WS_SIG, *MEMBER))
     authored = _churn(w, 20_000)
     for t, fid, s in authored:                       # every fact older than 2 anchor periods has crossed
         if t <= w.t - 2 * W:
@@ -207,7 +217,7 @@ def test_both_sided_churn_anchor_bounds_the_lag():
     assert w.run_until(w.converged, w.t + 2 * W + 2000)   # churn over: full convergence within ~an anchor
 
 def test_churn_starves_the_gated_tier_without_an_anchor():
-    w = World(node(WS, WS_SIG), node(WS, WS_SIG),
+    w = World(node(WS, WS_SIG, *MEMBER), node(WS, WS_SIG, *MEMBER),
               tiers=((b"", 500, cadence.GATED),))    # the fast tier alone — no liveness anchor
     authored = _churn(w, 20_000)
     stalled = [t for t, fid, s in authored
@@ -242,7 +252,8 @@ def test_certificate_synced_flips_with_the_set():
     w = World(node(WS, WS_SIG, *ms), node(WS, WS_SIG, *ms))
     assert w.run_until(lambda: cadence.synced(w.nodes["a"], CID), 30_000)
     assert w.run_until(lambda: cadence.synced(w.nodes["b"], CID), 30_000)
-    w.nodes["a"].admit(encode(message(WID, b"g", b"al", b"new", T0 + 999)))
+    for f in signed_message(AL, WID, b"g", b"new", T0 + 999):
+        w.nodes["a"].admit(encode(f))
     w.nodes["a"].run()
     assert not cadence.synced(w.nodes["a"], CID)     # my split moved: certificate retired
     assert w.run_until(lambda: w.converged() and cadence.synced(w.nodes["a"], CID), 30_000)

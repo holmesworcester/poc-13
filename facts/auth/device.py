@@ -10,7 +10,7 @@ key). It publishes `endpoint_shared@auth` — the frame(endpoint, signing_pk, wi
 the sealed request opens a membership handshake against — and `endpoint_key` for
 the reverse endpoint->member lookup peers() shows."""
 from kernel import (Atom, Exact, NEED, OFFER, Out, REQUIRE, SELF, by, encode,
-                    fact, frame, now, ts_atom, unframe)
+                    fact, frame, now, ts_atom, ts_of, unframe)
 from facts.auth import endpoint, local_signer_secret, signature
 from facts.store import hydrate
 
@@ -32,11 +32,19 @@ def device(workspace_id, label, endpoint_pk, signing_pk, t):
 def extract(f): return True, True
 from facts.sync.index import settle      # opt in: these facts replicate (one line is the whole choice)
 
-# PROJECT — the signer must be an enrolled member (its key is a published key).
+# PROJECT — the embedded signing key must have signed this fact and be an
+# enrolled member's key. Canonical form is the SHAPE rebuilt: every cross-field
+# constraint (scopes, the endpoint_key mirror, the frame layout) comes for free.
 def project(f, ctx):
-    signer = {r[2].value for r in by(ctx, b"pk")}
-    members = {r[2].value for r in by(ctx, b"key")}
-    if not (signer & members): return Out("Invalid")
+    try:
+        d = next(a for a in f.atoms if a.role == b"device")
+        s = next(a for a in f.atoms if a.role == b"endpoint_shared")
+        epk, spk, wid = unframe(s.value)
+        if f != device(wid, d.value, epk, spk, ts_of(f)): return Out("Invalid")
+    except Exception:
+        return Out("Invalid")
+    signer, members = signature.blessed(ctx)
+    if spk not in signer or spk not in set(members.values()): return Out("Invalid")
     return Out(offers=tuple(a for a in f.atoms
                             if a.role in (b"device", b"endpoint_shared", b"endpoint_key")))
 

@@ -45,7 +45,7 @@ def test_pair_story():
         converge(dbb, "founder\nbo", "auth.user.roster", wid, phase="A's membership on B")
         # reaction closure re-derives on B
         con(dba, "content.reaction.react", wid, mids[0], ":+1:", "9")
-        converge(dbb, ":+1:", "content.reaction.on", wid, mids[0], phase="reaction closure")
+        converge(dbb, ":+1: founder", "content.reaction.on", wid, mids[0], phase="reaction closure")
         # concurrent disjoint authorship merges to one (ts, owner) feed
         b1 = con(dbb, "content.message.send", wid, "general", "bo", "b1", "10")
         a1 = con(dba, "content.message.send", wid, "general", "al", "a1", "11")

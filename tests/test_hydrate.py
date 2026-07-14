@@ -26,7 +26,7 @@ def _build():                            # the corpus is a REAL signed workspace
     local_signer_secret.keygen(n, 0)
     wid = workspace.create(n, b"acme", 1); n.run()   # founder is auto member + bootstrap admin
     uid = next(k for k, f in n.facts.items() if f.type_tag == b"auth.user")
-    mids = [message.send(n, wid, CH, b"al", b"m%d" % i, 10 + i) for i in range(5)]
+    mids = [message.send(n, wid, CH, b"m%d" % i, 10 + i) for i in range(5)]
     message_deletion.delete(n, wid, mids[2], 99)
     return n.run(), wid, uid, mids
 
@@ -62,10 +62,12 @@ def test_suppression_across_the_cold_boundary():
     assert MIDS[2] not in n.facts                            # the deletion was faulted in and bit: purged
     assert n.memo[MIDS[3]] == "Valid"
 
-def test_unrelated_facts_stay_cold():
+def test_signed_content_pulls_authority_closure():
+    # The locality trade of signed content, pinned: a message Requires its
+    # author's blessed key, so a channel feed faults membership resident too.
     n = Node(ROOT, store_of(CORPUS))
     feed(n, WID, CH)
-    assert UID not in n.facts            # a channel feed faults message closure, not membership
+    assert UID in n.facts                # the author's membership rode the Require closure
 
 def test_hydration_is_only_ever_a_fact():
     """The demand IS the mechanism: content-addressed (the same demand twice
@@ -352,7 +354,7 @@ def test_sql_owners_mirrors_covers():
 if __name__ == "__main__":
     for t in (test_demand_agrees_with_the_fully_resident_node,
               test_gating_needs_pull_their_closure,
-              test_suppression_across_the_cold_boundary, test_unrelated_facts_stay_cold,
+              test_suppression_across_the_cold_boundary, test_signed_content_pulls_authority_closure,
               test_hydration_is_only_ever_a_fact, test_boot_is_one_fact,
               test_the_seed_is_the_only_boot, test_a_checked_total_ends_faulting,
               test_a_flushed_key_is_already_resident,

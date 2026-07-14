@@ -27,8 +27,9 @@ def test_bootstrap_connect_and_sync():
                 "workspace + message must sync to the joiner over the sealed connection"
             # and it validated on the joiner only because connect authored acceptance
             assert wid in sock(dbb, "auth.workspace.index")
-            # reverse direction: a message from the joiner reaches the host
-            sock(dbb, "content.message.send", wid, "general", "bo", "hi-from-joiner", "6")
+            # reverse direction: the joiner must become a signed member before authoring
+            sock(dbb, "auth.user.join", wid, "bo", iid + ":" + secret, "6")
+            sock(dbb, "content.message.send", wid, "general", "bo", "hi-from-joiner", "7")
             assert until(lambda: sock(dba, "content.message.feed", wid, "general")
                          == "hi-from-host\nhi-from-joiner", secs=10)
 

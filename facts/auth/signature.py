@@ -16,7 +16,7 @@ carry nothing beyond the one claim the gate verified: extra atoms could smuggle
 an unverified pk at a foreign id past the one check. Canonical form is enforced
 by rebuilding through SHAPE and comparing — the builder is the only shape
 authority, so the gate can never drift from it."""
-from kernel import Atom, Exact, OFFER, Out, encode, fact, now, ts_atom, ts_of
+from kernel import Atom, Exact, OFFER, Out, by, encode, fact, now, ts_atom, ts_of
 from crypto import ed25519_sign as sign, ed25519_verify as verify
 from facts.store import hydrate
 
@@ -56,9 +56,30 @@ def project(f, ctx):                     # publish only the canonical signer pk 
 # a fact Requires b"pk" at its own id to pull WHO signed it into ctx, then a
 # projector value-compares that pk against the pk its authority chain blessed.
 
+# The signing context a member-gated projector compares against: who signed
+# this fact (b"pk" at its id), and every member's blessed key by member id.
+def blessed(ctx):
+    return ({r[2].value for r in by(ctx, b"pk")},
+            {r[0]: r[2].value for r in by(ctx, b"key")})
+
 # COMMANDS — build a fact, admit it, stop.
 def attest(node, workspace_id, sk, pk, target_id, t):
     return node.admit(encode(signature(workspace_id, pk, target_id, sign(sk, target_id), t)))
+
+# Author a member-signed fact: the local signer must be an enrolled member of
+# the workspace; the fact is admitted and its signature attested in one step.
+def signed_admit(node, workspace_id, build, t):
+    from facts.auth import local_signer_secret
+    local = local_signer_secret.current(node)
+    if not local: raise RuntimeError("no local signer key: run auth.local_signer_secret.keygen first")
+    sk, pk = local
+    hydrate.demand(node, b"key", workspace_id)
+    member_id = next((o for o, _, a in node.watched(b"key", workspace_id)
+                      if a.target == Exact(workspace_id) and a.value == pk), None)
+    if member_id is None: raise RuntimeError("local signer is not a workspace member")
+    fid = node.admit(encode(build(member_id)))
+    attest(node, workspace_id, sk, pk, fid, t)
+    return fid
 
 # QUERIES — observations over validated state only.
 def signed(node, workspace_id, target_id):

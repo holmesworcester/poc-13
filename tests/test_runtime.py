@@ -4,7 +4,7 @@ each owner through route+deliver and reports which fired. Plain callbacks stand 
 for the daemon's sockets, so the host turn is testable without a wire."""
 import os, sys
 HERE = os.path.dirname(os.path.abspath(__file__)); ROOT_DIR = os.path.dirname(HERE)
-sys.path[:0] = [ROOT_DIR, os.path.join(ROOT_DIR, "bin")]
+sys.path[:0] = [ROOT_DIR, os.path.join(ROOT_DIR, "bin"), HERE]
 from kernel import Node, encode, fact_id
 from facts import ROOT
 from facts.outbox.send import send
@@ -78,26 +78,36 @@ def test_pump_overflow_tail_is_unmarked_and_reships():
 def test_flush_forgets_purged_fids():
     """Purge undoes "on disk": the fid must leave the flushed set, or its
     re-arrival hides behind the stale mark and every fact admitted earlier in
-    the same cycle silently misses the disk (the tail scan stops at it)."""
+    the same cycle silently misses the disk (the tail scan stops at it).
+    Content is member-signed now, so the purge only bites through a VALID
+    deletion: one member context authors everything over a real workspace."""
+    import crypto as _c
     from kernel import Store
     from runtime import flush
-    from facts.content.message import message
-    from facts.content.message_deletion import deletion
-    wid = b"\x07" * 32
+    from facts.auth.invite_accepted import invite_accepted
+    from facts.auth.signature import signature
+    from facts.auth.workspace import workspace
+    from content_fixtures import member_context, signed_deletion, signed_message
+    rk, rpk = _c.ed25519_keygen(bytes(32))
+    ws = workspace(b"acme", rpk, 1); wid = fact_id(ws)
+    member = member_context(wid, rk, rpk, t=2)
+    auth = (ws, signature(b"auth", rpk, wid, _c.ed25519_sign(rk, wid), 1),
+            invite_accepted(wid, bytes(32), bytes(32), b"", rpk, 1), *member.facts)
     store, flushed = Store(), set()
     n = Node(ROOT, store)
-    m = message(wid, b"g", b"al", b"doomed", 5); mid = fact_id(m)
-    cycle(n, [encode(m)], 1000, ())
+    m, ms = signed_message(member, wid, b"g", b"doomed", 5); mid = fact_id(m)
+    cycle(n, [encode(f) for f in (*auth, m, ms)], 1000, ())
     flush(n, store, flushed)
     assert mid in flushed                                  # on disk, marked
-    cycle(n, [encode(deletion(wid, mid, 6))], 1001, ())    # the death key bites: purged
-    x = message(wid, b"g", b"al", b"new", 7)
-    cycle(n, [encode(x), encode(m)], 1002, (), bound=0)    # re-arrival lands BEHIND x, both unstepped
-    flush(n, store, flushed)                               # the purge unmarked mid, so the tail scan
-    assert store.db.execute("SELECT 1 FROM facts WHERE fid=?",
-                            (fact_id(x),)).fetchone(), "the newer fact reached disk"
-    n.run(); flush(n, store, flushed)                      # the re-arrival dies on arrival...
-    assert store.db.execute("SELECT 1 FROM facts WHERE fid=?", (mid,)).fetchone() is None
+    cycle(n, [encode(f) for f in signed_deletion(member, wid, mid, 6)], 1001, ())
+    x, xs = signed_message(member, wid, b"g", b"new", 7)   # the death key bit: purged
+    cycle(n, [encode(x), encode(xs), encode(m)], 1002, (), bound=0)  # re-arrival lands BEHIND x, all
+    flush(n, store, flushed)                               # unstepped (m's signature never died: it
+    assert store.db.execute("SELECT 1 FROM facts WHERE fid=?",  # carries no death key). The purge
+                            (fact_id(x),)).fetchone(), "the newer fact reached disk"  # unmarked mid,
+    n.run(); flush(n, store, flushed)                      # so the tail scan passed it and the
+    assert store.db.execute("SELECT 1 FROM facts WHERE fid=?",  # re-arrival dies on arrival...
+                            (mid,)).fetchone() is None
     assert mid not in n.facts and mid not in n.durable     # ...and leaves no residue anywhere
 
 if __name__ == "__main__":

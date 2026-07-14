@@ -4,8 +4,8 @@ down the socket; the restart phase proves the daemon flushes durable facts and a
 fresh daemon replays them from the file. Collapses the old test_blackbox.py
 (content/outbox/workspace roundtrips) and test_daemon.py's proxy-and-restart
 test."""
-import os, tempfile
-from harness import con, converge, fleet
+import os, subprocess, sys, tempfile
+from harness import BIN, con, converge, fleet
 
 def test_solo_story():
     with tempfile.TemporaryDirectory() as d, fleet() as f:
@@ -23,12 +23,15 @@ def test_solo_story():
         assert len(con(db, "auth.local_signer_secret.whoami")) == 64, "whoami must print the 32-byte pk hex"
         converge(db, "founder", "auth.user.roster", wid, secs=0, phase="founder enrolled by create")
         converge(db, 1, "auth.admin.admins", wid, secs=0, phase="founder is the bootstrap admin")
-        # a scope with no workspace parks its messages
-        con(db, "content.message.send", "00" * 32, "general", "al", "ghost", "6")
-        converge(db, "", "content.message.feed", "00" * 32, "general", secs=0, phase="ghost workspace parks")
+        # signed content: a workspace this node is no member of refuses the send
+        # client-side (it used to admit and park — authorship now needs membership)
+        r = subprocess.run([sys.executable, os.path.join(BIN, "con.py"), db,
+                            "content.message.send", "00" * 32, "general", "al", "ghost", "6"],
+                           capture_output=True, text=True)
+        assert r.returncode != 0 and "local signer is not a workspace member" in r.stderr
         # reactions live and die with their message
         con(db, "content.reaction.react", wid, m_hi, ":+1:", "7")
-        converge(db, ":+1:", "content.reaction.on", wid, m_hi, secs=0, phase="reaction lands")
+        converge(db, ":+1: founder", "content.reaction.on", wid, m_hi, secs=0, phase="reaction lands")
         con(db, "content.message_deletion.delete", wid, m_hi, "8")
         converge(db, "there", "content.message.feed", wid, "general", secs=0, phase="deletion suppresses")
         converge(db, "", "content.reaction.on", wid, m_hi, secs=0, phase="reaction dies with its message")

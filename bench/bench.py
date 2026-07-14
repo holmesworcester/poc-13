@@ -28,14 +28,20 @@ from facts.auth import signature
 from facts.auth.invite_accepted import invite_accepted
 import crypto as ed
 
-N = 10_000                               # the standard load: facts admitted + run
+N = 10_000                               # the standard load: N messages (signed: 2N facts)
 CHANS = [b"c%d" % i for i in range(5)]   # a few channels, messages fanned across them
 RK, RPK = ed.ed25519_keygen(bytes(32))
 WS = workspace(b"acme", RPK, 1); WID = fact_id(WS)
-# the facts that make WS Valid: root self-signature (shareable) + local acceptance
+# the facts that make WS Valid: root self-signature (shareable) + local acceptance,
+# plus one enrolled member — signed content: every message travels with its signature.
+sys.path.insert(0, os.path.join(ROOT_DIR, "tests"))
+from content_fixtures import member_context, signed_message
+MEMBER = member_context(WID, RK, RPK, t=1)
 WSPRE = [encode(WS), encode(signature.signature(b"auth", RPK, WID, ed.ed25519_sign(RK, WID), 1)),
-         encode(invite_accepted(WID, bytes(32), bytes(32), b"", RPK, 1))]
-MSGS = [encode(message(WID, CHANS[i % 5], b"al", b"m%d" % i, i + 2)) for i in range(N)]
+         encode(invite_accepted(WID, bytes(32), bytes(32), b"", RPK, 1))] + \
+        [encode(f) for f in MEMBER.facts]
+MSGS = [encode(f) for i in range(N)
+        for f in signed_message(MEMBER, WID, CHANS[i % 5], b"m%d" % i, i + 2)]
 BIN = os.path.join(ROOT_DIR, "bin")
 
 # --- table + budgets ----------------------------------------------------------
@@ -85,22 +91,22 @@ def peer(sa, sb, wid, addr_a, addr_b):   # B bootstrap-dials A; both daemons mus
 
 # --- 1. in-process engine: admit + run, then linear replay --------------------
 def bench_engine():
-    section("1. in-process engine (%d facts)" % N)
+    section("1. in-process engine (%d facts: %d signed messages)" % (len(MSGS), N))
     n = Node(ROOT)
     for b in WSPRE: n.admit(b)
     n.run()
     t = time.time()
     for b in MSGS: n.admit(b)
     n.run(); dt = time.time() - t
-    report("admit+run", dt, "s", 1.2)                 # MEASURED 0.4-0.6s
-    report("  per fact", dt / N * 1e3, "ms", None)
+    report("admit+run", dt, "s", 3.0)                 # signed: 2N facts + N gate verifies
+    report("  per fact", dt / len(MSGS) * 1e3, "ms", None)
     from facts.store import hydrate
     hydrate.demand(n)                                 # same seed fact on both sides
     st = Store()
     for b in n.durable.values(): st.add(b)
     t = time.time(); m = Node(ROOT, st); hydrate.demand(m); rp = time.time() - t
     assert m.derived() == n.derived(), "boot diverged"
-    report("boot (one total demand)", rp, "s", 2.6)   # MEASURED ~1.1-1.3s (reconstruct + re-hash)
+    report("boot (one total demand)", rp, "s", 5.0)   # MEASURED ~2.9s at 2N signed facts (reconstruct + re-hash)
     return n
 
 # --- 1b. deep Require chain: author it, then fault it back through one demand -
@@ -152,7 +158,8 @@ def bench_query(n):
     t = time.time()
     for _ in range(R): rows = feed(n, WID, b"c0")
     report("feed() / watched() scan", (time.time() - t) / R * 1e3, "ms", 5.0)  # MEASURED 1.0ms
-    need = message(WID, b"c0", b"al", b"x", 1).atoms[1]                          # the workspace REQUIRE
+    need = next(a for a in message(WID, b"c0", MEMBER.uid, b"x", 1).atoms
+                if a.role == b"workspace")                                       # the workspace REQUIRE
     t = time.time()
     for _ in range(R): n.valid_offers(need)
     report("valid_offers() bucket lookup", (time.time() - t) / R * 1e6, "us", None)
@@ -334,6 +341,8 @@ def main():
     with tempfile.TemporaryDirectory() as d:
         db = os.path.join(d, "big.facts")
         st = Store(db)
+        from facts.auth.local_signer_secret import secret
+        st.add(encode(secret(MEMBER.sk, MEMBER.pk, 1)))   # the daemon signs as the member
         for b in WSPRE: st.add(b)
         for b in MSGS: st.add(b)
         st.commit(); st.db.close()

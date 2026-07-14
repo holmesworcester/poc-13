@@ -1,14 +1,19 @@
-"""facts/content/message_deletion.py — semantic deletion. A valid `dead`
-offer at the target's id flips every fact carrying that death key to
-Suppressed. Require-free on purpose: a suppressor that could park could be
-raced by the thing it must kill."""
-from kernel import Atom, Exact, OFFER, Out, encode, fact, now, ts_atom
+"""facts/content/message_deletion.py — semantic deletion, member-signed. A
+valid `dead` offer at the target's id flips every fact carrying that death key
+to Suppressed. Target-free on purpose: a suppressor that depended on the thing
+it must kill could be raced by it. The pk/key Requires gate the deleter — any
+enrolled member may delete; per-author deletion is a policy for a later wave."""
+from kernel import (Atom, Exact, NEED, OFFER, Out, REQUIRE, SELF, encode, fact,
+                    now, ts_atom, ts_of)
+from facts.auth import signature
 
 TAG = b"content.message_deletion"
 
 # SHAPE — the canonical atom set; the only place atoms are chosen.
 def deletion(workspace_id, target_id, t):
     return fact(TAG, ts_atom(t, workspace_id),
+                Atom(NEED, b"pk", workspace_id, SELF, effect=REQUIRE),
+                Atom(NEED, b"key", workspace_id, Exact(workspace_id), effect=REQUIRE),
                 Atom(OFFER, b"dead", workspace_id, Exact(target_id)))
 
 # EXTRACT — content-pure: (durable, shareable). Deletions must travel.
@@ -17,11 +22,19 @@ from facts.sync.index import settle      # opt in: these facts replicate (one li
 
 # PROJECT — the only place this family's meaning lives.
 def project(f, ctx):
-    return Out(offers=tuple(a for a in f.atoms if a.role == b"dead"))
+    try:
+        d = next(a for a in f.atoms if a.role == b"dead")
+        if f != deletion(d.scope, d.target[0], ts_of(f)): return Out("Invalid")
+    except Exception:
+        return Out("Invalid")
+    signer, members = signature.blessed(ctx)
+    if not signer & set(members.values()): return Out("Invalid")   # a member signed it
+    return Out(offers=(d,))
 
 # COMMANDS — build a fact, admit it, stop.
 def delete(node, workspace_id, target_id, t):
-    return node.admit(encode(deletion(workspace_id, target_id, t)))
+    return signature.signed_admit(
+        node, workspace_id, lambda _mid: deletion(workspace_id, target_id, t), t)
 
 # QUERIES — none yet.
 
