@@ -213,3 +213,15 @@ but has no production call sites — it is the tested spec of the bucket/SQL).
 Known gap left deliberately: the set-moved counter (leaf_ver, now
 facts.sync.index.ver) is polled by bench/tests only; the daemon relies on
 the cadence (DESIGN.md prose softened to match).
+
+# TODO — LocalOnly ingress
+
+LocalOnly gates egress only: extract()'s shareable bit keeps a fact from
+syncing OUT, but cycle() admits every inbound wire byte with no provenance
+filter, so a connected peer can write into b"local" scope — including
+auth.local_signer_secret (identity selection: current() takes the first
+sk/pk rows independently) and auth.invite_accepted (the trust anchor gating
+workspace validity). The invariant to land: a fact family that never syncs
+out is never admitted from the wire either — a one-line refusal at the
+inbox seam (cond knows provenance; the kernel must not). Until then the
+threat model assumes connected peers are honest about locals.

@@ -9,8 +9,14 @@ CHECK part) over exactly the 32-byte target id: the id IS the whole canonical
 fact, so signing it covers everything. Wrong math is falsy at the gate — an
 inert miss, never a bad fact, and replay never re-verifies. Durable and
 shareable: a signature must travel with what it signs, and being a Require
-dep it ships automatically under dep-aware sync."""
-from kernel import Atom, Exact, OFFER, Out, encode, fact, now, ts_atom
+dep it ships automatically under dep-aware sync.
+
+A pk offer IS an authority claim ("this key signed that id"), so the fact must
+carry nothing beyond the one claim the gate verified: extra atoms could smuggle
+an unverified pk at a foreign id past the one check. Canonical form is enforced
+by rebuilding through SHAPE and comparing — the builder is the only shape
+authority, so the gate can never drift from it."""
+from kernel import Atom, Exact, OFFER, Out, encode, fact, now, ts_atom, ts_of
 from crypto import ed25519_sign as sign, ed25519_verify as verify
 from facts.store import hydrate
 
@@ -28,16 +34,25 @@ from facts.sync.index import settle      # opt in: these facts replicate (one li
 
 # CHECK — optional self-verification at the admission gate: a pure function
 # of the fact's own bytes, run once and never on replay.
-def check(f):                            # verify over the sig offer's own target —
-    pk = sig = tgt = None                # exactly the id a Require will match on
-    for a in f.atoms:
-        if a.role == b"pk": pk = a.value
-        elif a.role == b"sig" and a.target and a.target[0] == a.target[1]: sig, tgt = a.value, a.target[1]
-    return bool(pk and sig and tgt and verify(pk, tgt, sig))
+def _canonical(f):                       # the free parameters, or None if f is not
+    try:                                 # exactly SHAPE over them (tag included)
+        pk = next(a for a in f.atoms if a.role == b"pk")
+        sig = next(a for a in f.atoms if a.role == b"sig")
+        tgt = pk.target[0]               # SELF is (): the miss lands in the except
+        if f != signature(pk.scope, pk.value, tgt, sig.value, ts_of(f)): return None
+        ok = len(pk.value) == 32 and len(sig.value) == 64 and len(tgt) == 32
+        return (pk, sig, tgt) if ok else None
+    except Exception:
+        return None
+
+def check(f):                            # verify over the exact target a Require will match
+    parts = _canonical(f)
+    return bool(parts and verify(parts[0].value, parts[2], parts[1].value))
 
 # PROJECT — the only place this family's meaning lives.
-def project(f, ctx):                 # publish both the signer pk and the sig:
-    return Out(offers=tuple(a for a in f.atoms if a.role in (b"pk", b"sig")))
+def project(f, ctx):                     # publish only the canonical signer pk and sig
+    parts = _canonical(f)
+    return Out(offers=parts[:2]) if parts else Out("Invalid")
 # a fact Requires b"pk" at its own id to pull WHO signed it into ctx, then a
 # projector value-compares that pk against the pk its authority chain blessed.
 

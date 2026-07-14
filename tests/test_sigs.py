@@ -88,6 +88,32 @@ def test_malformed_signature_never_crashes_the_gate():
                 Atom(OFFER, b"sig", WID, SELF, e.ed25519_sign(SK, b"whatever")))
     assert Node(ROOT).admit(encode(junk)) is None
 
+def test_signature_fact_cannot_smuggle_pk_for_another_target():
+    from kernel import Exact, OFFER
+    # A pk offer is an authority claim. One fact, one verified claim: a second
+    # pk atom at a foreign id must not ride the honest pair past the one check.
+    ask, apk = e.ed25519_keygen(b"a" * 32)
+    _, vpk = e.ed25519_keygen(b"v" * 32)
+    x, y = b"x" * 32, b"y" * 32
+    smuggled = fact(b"auth.signature", ts_atom(3, WID),
+                    Atom(OFFER, b"pk", WID, Exact(x), vpk),      # the victim's key at a foreign id
+                    Atom(OFFER, b"pk", WID, Exact(y), apk),
+                    Atom(OFFER, b"sig", WID, Exact(y), e.ed25519_sign(ask, y)))
+    assert Node(ROOT).admit(encode(smuggled)) is None            # gate: inert miss
+
+    n = Node(ROOT)                                     # checked replay skips the gate:
+    sid = n.admit(encode(smuggled), checked=True); n.run()       # the projector must also hold
+    assert n.memo[sid] == "Invalid"
+    assert not n.watched(b"pk", WID)
+
+def test_tag_alias_is_not_a_signature():
+    # Canonical form includes the type tag: the same honest atoms under a longer
+    # tag route to this family but are a different fact id — refuse them.
+    honest = _sig(SK, PK, b"y" * 32, 3)
+    alias = fact(b"auth.signature.x", *honest.atoms)
+    assert Node(ROOT).admit(encode(honest)) is not None
+    assert Node(ROOT).admit(encode(alias)) is None
+
 def test_user_parks_until_signature_lands_either_order():
     n = Node(ROOT); u, uid, s = _member(n, b"al", 4)   # chain present, member's own sig withheld
     n.admit(encode(u)); n.run()
@@ -120,6 +146,8 @@ if __name__ == "__main__":
     for t in (test_rfc8032_vectors, test_roundtrip_and_bad_inputs,
               test_tampered_signature_is_inert_at_gate,
               test_malformed_signature_never_crashes_the_gate,
+              test_signature_fact_cannot_smuggle_pk_for_another_target,
+              test_tag_alias_is_not_a_signature,
               test_user_parks_until_signature_lands_either_order,
               test_replay_never_reverifies):
         t(); print(f"ok  {t.__name__}")
