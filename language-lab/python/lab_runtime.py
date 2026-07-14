@@ -81,14 +81,18 @@ class WireDecoder:
     def feed(self, data: bytes) -> list[tuple[int, bytes]]:
         self.buffer.extend(data)
         messages: list[tuple[int, bytes]] = []
-        while len(self.buffer) >= 4:
-            size = int.from_bytes(self.buffer[:4], "big")
-            if len(self.buffer) < 4 + size:
+        offset = 0
+        while len(self.buffer) - offset >= 4:
+            size = int.from_bytes(self.buffer[offset : offset + 4], "big")
+            end = offset + 4 + size
+            if len(self.buffer) < end:
                 break
-            payload = bytes(self.buffer[4 : 4 + size])
-            del self.buffer[: 4 + size]
+            payload = bytes(self.buffer[offset + 4 : end])
+            offset = end
             if payload:
                 messages.append((payload[0], payload[1:]))
+        if offset:
+            del self.buffer[:offset]
         return messages
 
 
@@ -110,6 +114,8 @@ class OutLink:
         return True
 
     def take(self, size: int) -> bytes:
+        if size <= 0:
+            return b""
         end = min(len(self.buffer), self.offset + size)
         data = bytes(self.buffer[self.offset:end])
         self.offset = end

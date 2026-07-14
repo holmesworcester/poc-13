@@ -121,6 +121,23 @@ class LanguageLabTest(unittest.TestCase):
         self.assertNotIn(victim_id, node.durable)
         self.assertEqual(node.watched(b"live", b"s"), [])
 
+        precedence_victim = make_fact(
+            b"pass",
+            need(b"dead-priority", b"s", SELF, Effect.SUPPRESS),
+            need(b"missing", b"s", exact(b"nothing"), Effect.REQUIRE),
+            offer(b"never", b"s", SELF),
+        )
+        precedence_id = fact_id(precedence_victim)
+        precedence_killer = make_fact(
+            b"pass", offer(b"dead-priority", b"s", exact(precedence_id))
+        )
+        node.admit(encode(precedence_killer))
+        node.run()
+        node.admit(encode(precedence_victim))
+        node.run()
+        self.assertNotIn(precedence_id, node.facts)
+        self.assertEqual(node.watched(b"never", b"s"), [])
+
     def test_clock_watch_and_bound(self):
         node = Node(DemoRoot())
         clocked = make_fact(
@@ -133,6 +150,10 @@ class LanguageLabTest(unittest.TestCase):
         self.assertEqual(node.watched(b"ready", b"s"), [])
         node.turn(100, bound=1)
         self.assertEqual(len(node.watched(b"ready", b"s")), 1)
+        node.turn(101, bound=1)
+        now_rows = node.watched(b"now", b"clock")
+        self.assertEqual(len(now_rows), 1)
+        self.assertEqual(now_rows[0].atom.target.lo, (101).to_bytes(8, "big"))
         node.admit(encode(make_fact(b"pass", offer(b"a", b"s", SELF))))
         node.admit(encode(make_fact(b"pass", offer(b"b", b"s", SELF))))
         node.turn(bound=1)
@@ -156,7 +177,23 @@ class LanguageLabTest(unittest.TestCase):
         )
         self.assertEqual(got, [b"hello"])
         self.assertEqual(fired, {courier_id})
-        cycle(node, [], 2, tuple(fired))
+        node.admit(encode(make_fact(b"pass", offer(b"backlog-a", b"s", SELF))))
+        node.admit(encode(make_fact(b"pass", offer(b"backlog-b", b"s", SELF))))
+        cycle(node, [], 2, tuple(fired), bound=1)
+        self.assertIn(courier_id, node.facts)
+        redelivered = []
+        self.assertEqual(
+            pump(
+                node,
+                lambda cid: (b"127.0.0.1:9", b"secret") if cid == b"peer" else None,
+                lambda _cid, _address, _secret, inners: redelivered.extend(inners) or len(inners),
+                fired,
+            ),
+            set(),
+        )
+        self.assertEqual(redelivered, [])
+        cycle(node, [], 3, tuple(fired), bound=1)
+        cycle(node, [], 4, tuple(fired), bound=1)
         self.assertNotIn(courier_id, node.facts)
         self.assertEqual(outbox(node), [])
 
@@ -168,21 +205,31 @@ class LanguageLabTest(unittest.TestCase):
         node.admit(encode(first))
         node.admit(encode(second))
         node.run()
-        shipper = make_fact(
-            b"courier",
-            offer(b"ship", b"outbox", exact(b"peer"), frame(first_id, second_id)),
-            need(b"shipped", b"wire", SELF, Effect.WATCH),
-        )
-        cycle(node, [encode(shipper)], 1)
+        def shipper(round_id):
+            return make_fact(
+                b"courier",
+                offer(b"ship", b"outbox", exact(b"peer"), frame(first_id, second_id)),
+                offer(b"round", b"test", SELF, round_id),
+                need(b"shipped", b"wire", SELF, Effect.WATCH),
+            )
+
+        first_shipper = shipper(b"one")
+        first_shipper_id = fact_id(first_shipper)
+        cycle(node, [encode(first_shipper)], 1)
         sent = {}
         got = []
         fired = pump(node, lambda _: (b"a", None), lambda *args: got.extend(args[-1][:1]) or 1, set(), sent)
         self.assertEqual(got, [encode(first)])
         self.assertEqual(sent[b"peer"], {first_id})
+        self.assertEqual(fired, {first_shipper_id})
+        cycle(node, [], 2, tuple(fired))
+        self.assertNotIn(first_shipper_id, node.facts)
+
+        second_shipper = shipper(b"two")
+        cycle(node, [encode(second_shipper)], 3)
         got.clear()
         pump(node, lambda _: (b"a", None), lambda *args: got.extend(args[-1]) or len(args[-1]), set(), sent)
         self.assertEqual(got, [encode(second)])
-        self.assertTrue(fired)
 
     def test_fragmented_wire_and_bounded_output(self):
         decoder = WireDecoder()
@@ -194,6 +241,8 @@ class LanguageLabTest(unittest.TestCase):
         self.assertTrue(link.enqueue(0, b"hello"))
         self.assertTrue(link.enqueue(1, b"world"))
         self.assertFalse(link.enqueue(1, b"overflow"))
+        self.assertEqual(link.take(-1), b"")
+        self.assertEqual(link.pending, len(wire))
         self.assertEqual(link.take(3) + link.take(10_000), wire)
         self.assertEqual(link.pending, 0)
 

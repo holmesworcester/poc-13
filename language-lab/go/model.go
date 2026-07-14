@@ -47,7 +47,12 @@ type Target struct {
 }
 
 func Exact(value Blob) Target { return Target{Tag: TargetExact, Lo: value, Hi: value} }
-func Span(lo, hi Blob) Target { return Target{Tag: TargetRange, Lo: lo, Hi: hi} }
+func Span(lo, hi Blob) Target {
+	if lo == hi {
+		return Exact(lo)
+	}
+	return Target{Tag: TargetRange, Lo: lo, Hi: hi}
+}
 
 var Self = Target{Tag: TargetSelf}
 
@@ -150,16 +155,17 @@ func EncodeAtom(atom Atom) ([]byte, error) {
 	if len(atom.Role) != 0 && atom.Role[0] == 0 && (atom.Kind != Need || atom.Effect != Watch) {
 		return nil, errors.New("reserved role")
 	}
-	parts := []Blob{Blob(string([]byte{byte(atom.Kind), byte(atom.Effect), byte(atom.Target.Tag)})), atom.Role, atom.Scope}
-	switch atom.Target.Tag {
+	targetTag := atom.Target.Tag
+	if targetTag == TargetRange && atom.Target.Lo == atom.Target.Hi {
+		targetTag = TargetExact
+	}
+	parts := []Blob{Blob(string([]byte{byte(atom.Kind), byte(atom.Effect), byte(targetTag)})), atom.Role, atom.Scope}
+	switch targetTag {
 	case TargetExact:
 		parts = append(parts, atom.Target.Lo)
 	case TargetSelf:
 		// SELF has no target parts.
 	case TargetRange:
-		if atom.Target.Lo == atom.Target.Hi {
-			return nil, errors.New("degenerate range")
-		}
 		parts = append(parts, atom.Target.Lo, atom.Target.Hi)
 	default:
 		return nil, errors.New("bad target tag")

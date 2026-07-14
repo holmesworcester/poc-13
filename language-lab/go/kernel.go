@@ -360,14 +360,22 @@ func (node *Node) settle(owner ID, fact Fact, output Out) {
 }
 
 func changedRows(old, fresh []Row) map[Row]struct{} {
-	changed := make(map[Row]struct{}, len(old)+len(fresh))
+	oldSet := make(map[Row]struct{}, len(old))
 	for _, row := range old {
-		changed[row] = struct{}{}
+		oldSet[row] = struct{}{}
 	}
+	freshSet := make(map[Row]struct{}, len(fresh))
 	for _, row := range fresh {
-		if _, exists := changed[row]; exists {
-			delete(changed, row)
-		} else {
+		freshSet[row] = struct{}{}
+	}
+	changed := make(map[Row]struct{}, len(oldSet)+len(freshSet))
+	for row := range oldSet {
+		if _, unchanged := freshSet[row]; !unchanged {
+			changed[row] = struct{}{}
+		}
+	}
+	for row := range freshSet {
+		if _, unchanged := oldSet[row]; !unchanged {
 			changed[row] = struct{}{}
 		}
 	}

@@ -244,6 +244,9 @@ fn clock_watch_reprojects_and_turns_are_bounded() {
         1,
         "re-projection replaces this owner's prior offer"
     );
+    let now_rows = node.watched(b"now", b"clock");
+    assert_eq!(now_rows.len(), 1);
+    assert_eq!(now_rows[0].atom.target, exact(101_u64.to_be_bytes()));
 
     node.admit(&encode(&pass(vec![offer(b"a", b"s", SELF, None)])).unwrap());
     node.admit(&encode(&pass(vec![offer(b"b", b"s", SELF, None)])).unwrap());
@@ -280,13 +283,26 @@ fn inline_pump_then_shipped_signal_reaps() {
     assert_eq!(received, vec![b"hello".to_vec()]);
     assert_eq!(fired, HashSet::from([courier_id]));
 
-    cycle(
-        &mut node,
-        &[],
-        2,
-        &fired.iter().copied().collect::<Vec<_>>(),
-        BOUND,
-    );
+    node.admit(&encode(&pass(vec![offer(b"backlog-a", b"s", SELF, None)])).unwrap());
+    node.admit(&encode(&pass(vec![offer(b"backlog-b", b"s", SELF, None)])).unwrap());
+    let shipped = fired.iter().copied().collect::<Vec<_>>();
+    cycle(&mut node, &[], 2, &shipped, 1);
+    assert!(node.facts.contains_key(&courier_id));
+    let mut redelivered = Vec::new();
+    let refired = pump(
+        &node,
+        |cid| (cid == b"peer").then(|| (b"127.0.0.1:9".to_vec(), Some(b"secret".to_vec()))),
+        |_, _, _, inners| {
+            redelivered.extend_from_slice(inners);
+            inners.len()
+        },
+        &fired,
+        None,
+    )
+    .unwrap();
+    assert!(refired.is_empty() && redelivered.is_empty());
+    cycle(&mut node, &[], 3, &shipped, 1);
+    cycle(&mut node, &[], 4, &shipped, 1);
     assert!(!node.facts.contains_key(&courier_id));
     assert!(outbox(&node).is_empty());
 }
@@ -303,15 +319,20 @@ fn by_reference_dedup_records_prefix_and_retries_tail() {
     node.run().unwrap();
 
     let ids = frame(&[&first_id, &second_id]).unwrap();
-    let shipper = make_fact(
-        b"courier",
-        vec![
-            offer(b"ship", b"outbox", exact(b"peer"), Some(&ids)),
-            need(b"shipped", b"wire", SELF, Effect::Watch),
-        ],
-    )
-    .unwrap();
-    cycle(&mut node, &[encode(&shipper).unwrap()], 1, &[], BOUND);
+    let shipper = |round: &[u8]| {
+        make_fact(
+            b"courier",
+            vec![
+                offer(b"ship", b"outbox", exact(b"peer"), Some(&ids)),
+                offer(b"round", b"test", SELF, Some(round)),
+                need(b"shipped", b"wire", SELF, Effect::Watch),
+            ],
+        )
+        .unwrap()
+    };
+    let first_shipper = shipper(b"one");
+    let first_shipper_id = fact_id(&first_shipper).unwrap();
+    cycle(&mut node, &[encode(&first_shipper).unwrap()], 1, &[], BOUND);
 
     let mut sent = Sent::new();
     let mut received = Vec::new();
@@ -328,8 +349,24 @@ fn by_reference_dedup_records_prefix_and_retries_tail() {
     .unwrap();
     assert_eq!(received, vec![encode(&first).unwrap()]);
     assert_eq!(sent[b"peer".as_slice()], HashSet::from([first_id]));
-    assert!(!fired.is_empty());
+    assert_eq!(fired, HashSet::from([first_shipper_id]));
+    cycle(
+        &mut node,
+        &[],
+        2,
+        &fired.iter().copied().collect::<Vec<_>>(),
+        BOUND,
+    );
+    assert!(!node.facts.contains_key(&first_shipper_id));
 
+    let second_shipper = shipper(b"two");
+    cycle(
+        &mut node,
+        &[encode(&second_shipper).unwrap()],
+        3,
+        &[],
+        BOUND,
+    );
     received.clear();
     pump(
         &node,

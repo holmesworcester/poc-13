@@ -56,12 +56,12 @@ defmodule TinyP2P.LanguageLab.Bucket do
 
   @spec add(t(), Row.t()) :: t()
   def add(%__MODULE__{} = bucket, %Row{atom: %{target: {:exact, point}}} = row) do
-    exact = Map.update(bucket.exact, point, [row], &(&1 ++ [row]))
+    exact = Map.update(bucket.exact, point, [row], &[row | &1])
     %{bucket | exact: exact}
   end
 
   def add(%__MODULE__{} = bucket, %Row{atom: %{target: {:range, _, _}}} = row) do
-    %{bucket | ranges: bucket.ranges ++ [row]}
+    %{bucket | ranges: [row | bucket.ranges]}
   end
 
   @spec remove(t(), Row.t()) :: t()
@@ -92,7 +92,6 @@ defmodule TinyP2P.LanguageLab.Bucket do
 
   def matching(%__MODULE__{} = bucket, {:range, low, high}) do
     bucket.exact
-    |> Enum.sort_by(fn {point, _rows} -> point end)
     |> Enum.flat_map(fn
       {point, rows} when low <= point and point <= high -> rows
       _ -> []
@@ -101,10 +100,7 @@ defmodule TinyP2P.LanguageLab.Bucket do
 
   @spec all(t()) :: [Row.t()]
   def all(%__MODULE__{} = bucket) do
-    exact =
-      bucket.exact
-      |> Enum.sort_by(fn {point, _rows} -> point end)
-      |> Enum.flat_map(fn {_point, rows} -> rows end)
+    exact = Enum.flat_map(bucket.exact, fn {_point, rows} -> rows end)
 
     exact ++ bucket.ranges
   end
@@ -376,6 +372,7 @@ defmodule TinyP2P.LanguageLab.Kernel do
 
   defp encode_target({:exact, value}), do: {0, [value]}
   defp encode_target(:self), do: {1, []}
+  defp encode_target({:range, value, value}), do: {0, [value]}
   defp encode_target({:range, low, high}), do: {2, [low, high]}
 
   defp decode_target(:exact, [point]), do: {:ok, exact(point), nil}

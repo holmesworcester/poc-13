@@ -77,8 +77,12 @@ else root.project(fact, answers to Require/Watch), default Parked
 Only a Valid `Out` publishes its offers. Settlement atomically replaces all
 validated offers from that owner, wakes asserted matching needs for changed
 offers, and completely evicts Reap/Suppressed owners. A turn replaces the
-transient `now@clock` and `shipped@wire` slots and steps at most `bound` queued
-owners.
+transient `shipped@wire` slot, replaces `now@clock` when a new clock value is
+supplied, and steps at most `bound` queued owners. Presenting a slot wakes needs
+matched by its new rows; it does not emit a separate removal wake. The host
+invariants make that sufficient: clock needs are monotone deadline ranges
+`[deadline, infinity)`, and fired owners remain in the host's shipped set until
+the courier steps.
 
 ## Runtime and wire
 
@@ -87,7 +91,10 @@ owners.
 `pump` groups rows by owner, resolves its target through `route`, resolves ship
 ids through durable bytes, suppresses ids already sent on that route, calls
 `deliver` with one batch, records only the delivered prefix, and reports fired
-owners for the next turn's shipped signal.
+owners for the next turn's shipped signal. The host must re-present fired owners
+until their courier actually steps (a bounded turn may leave it queued). A short
+delivery still fires and reaps that courier; its unrecorded tail is retried when
+the protocol later re-authors the demand, exactly as the sync cadence does.
 
 The daemon wire is incrementally decoded as `u32be(length) || kind || body`.
 Incomplete tails remain buffered. The outbound link is bounded and supports
@@ -104,6 +111,7 @@ Each implementation proves, in its own test runner:
 - Suppress precedence, offer withdrawal, and whole-owner eviction;
 - Watch re-projection from the clock signal and bounded turns;
 - inline courier pump followed by shipped Reap;
-- by-reference shipment deduplication and undelivered-tail retry;
+- by-reference delivered-prefix deduplication and tail retry by a re-authored
+  courier after the first courier reaps;
+- shipped-signal re-presentation across a bounded backlog;
 - fragmented wire input and bounded partial output.
-

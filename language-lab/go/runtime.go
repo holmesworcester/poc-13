@@ -208,9 +208,9 @@ func (link *OutLink) Take(size int) []byte {
 	if size <= 0 || link.Pending() == 0 {
 		return nil
 	}
-	end := link.offset + size
-	if end > len(link.buffer) {
-		end = len(link.buffer)
+	end := len(link.buffer)
+	if size < link.Pending() {
+		end = link.offset + size
 	}
 	data := bytes.Clone(link.buffer[link.offset:end])
 	link.offset = end

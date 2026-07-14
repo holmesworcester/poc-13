@@ -18,12 +18,15 @@ func (demoRoot) Project(fact Fact, context Context) (Out, bool) {
 		return Out{Verdict: Reap}, true
 	case fact.Tag == B("clock") && len(By(context, B("now"))) == 0:
 		return ValidOut(), true
-	case fact.Tag == B("pass") || fact.Tag == B("courier") || fact.Tag == B("clock"):
+	case fact.Tag == B("pass") || fact.Tag == B("courier") || fact.Tag == B("clock") || fact.Tag == B("duplicate"):
 		offers := make([]Atom, 0)
 		for _, atom := range fact.Atoms {
 			if atom.Kind == Offer {
 				offers = append(offers, atom)
 			}
+		}
+		if fact.Tag == B("duplicate") && len(offers) != 0 {
+			offers = append(offers, offers[0])
 		}
 		return ValidOut(offers...), true
 	default:
@@ -103,6 +106,10 @@ func TestCanonicalRoundTripGoldenIDAndMalformedRejection(t *testing.T) {
 	reordered := mustFact(t, B("pass"), dependency, result)
 	if got, want := mustID(t, fact), mustID(t, reordered); got != want {
 		t.Fatalf("canonical construction changed id: %x != %x", got, want)
+	}
+	normalized := mustFact(t, B("pass"), OfferAtom(B("r"), B("s"), Span(B("x"), B("x"))))
+	if normalized.Atoms[0].Target != Exact(B("x")) {
+		t.Fatal("construction did not normalize a degenerate range to Exact")
 	}
 	blob := mustEncode(t, fact)
 	decoded, err := Decode(blob)
@@ -228,7 +235,7 @@ func TestRequireParksThenOfferWakesAndPromotes(t *testing.T) {
 	if rows := node.Watched(B("result"), B("s")); len(rows) != 0 {
 		t.Fatalf("parked offers published: %#v", rows)
 	}
-	provider := mustFact(t, B("pass"), OfferAtom(B("dep"), B("s"), Exact(B("key")), B("ready")))
+	provider := mustFact(t, B("duplicate"), OfferAtom(B("dep"), B("s"), Exact(B("key")), B("ready")))
 	node.Admit(mustEncode(t, provider))
 	requireRun(t, node)
 	if verdict, _ := node.Verdict(dependentID); verdict != Valid {
@@ -292,6 +299,13 @@ func TestClockWatchReprojectsAndTurnIsBounded(t *testing.T) {
 	if len(node.Watched(B("ready"), B("s"))) != 1 {
 		t.Fatal("clock did not reproject at deadline")
 	}
+	later := uint64(101)
+	node.Turn(&later, nil, 1)
+	nowRows := node.Watched(B("now"), B("clock"))
+	wantNow := Exact(Blob(string([]byte{0, 0, 0, 0, 0, 0, 0, 101})))
+	if len(nowRows) != 1 || nowRows[0].Atom.Target != wantNow {
+		t.Fatalf("clock slot did not replace: %#v", nowRows)
+	}
 	a := mustFact(t, B("pass"), OfferAtom(B("a"), B("s"), Self))
 	b := mustFact(t, B("pass"), OfferAtom(B("b"), B("s"), Self))
 	node.Admit(mustEncode(t, a))
@@ -329,7 +343,22 @@ func TestInlineCourierPumpThenShippedReaps(t *testing.T) {
 	if _, ok := fired[courierID]; !ok {
 		t.Fatal("courier did not fire")
 	}
-	Cycle(node, nil, 2, []ID{courierID}, Bound)
+	node.Admit(mustEncode(t, mustFact(t, B("pass"), OfferAtom(B("backlog-a"), B("s"), Self))))
+	node.Admit(mustEncode(t, mustFact(t, B("pass"), OfferAtom(B("backlog-b"), B("s"), Self))))
+	Cycle(node, nil, 2, []ID{courierID}, 1)
+	if !node.HasFact(courierID) {
+		t.Fatal("bounded backlog unexpectedly consumed the courier")
+	}
+	redelivered := 0
+	refired, err := Pump(node,
+		func(cid Blob) (Route, bool) { return Route{Address: B("a")}, cid == B("peer") },
+		func(_ Blob, _ Route, inners [][]byte) int { redelivered += len(inners); return len(inners) },
+		fired, nil)
+	if err != nil || len(refired) != 0 || redelivered != 0 {
+		t.Fatalf("retained shipped owner re-pumped: fired=%v delivered=%d err=%v", refired, redelivered, err)
+	}
+	Cycle(node, nil, 3, []ID{courierID}, 1)
+	Cycle(node, nil, 4, []ID{courierID}, 1)
 	if node.HasFact(courierID) || len(Outbox(node)) != 0 {
 		t.Fatal("shipped courier did not reap")
 	}
@@ -343,11 +372,16 @@ func TestReferenceDedupAndUndeliveredTailRetry(t *testing.T) {
 	node.Admit(mustEncode(t, first))
 	node.Admit(mustEncode(t, second))
 	requireRun(t, node)
-	shipper := mustFact(t, B("courier"),
-		OfferAtom(B("ship"), B("outbox"), Exact(B("peer")), mustFramedIDs(t, firstID, secondID)),
-		NeedAtom(B("shipped"), B("wire"), Self, Watch),
-	)
-	Cycle(node, [][]byte{mustEncode(t, shipper)}, 1, nil, Bound)
+	shipper := func(round Blob) Fact {
+		return mustFact(t, B("courier"),
+			OfferAtom(B("ship"), B("outbox"), Exact(B("peer")), mustFramedIDs(t, firstID, secondID)),
+			OfferAtom(B("round"), B("test"), Self, round),
+			NeedAtom(B("shipped"), B("wire"), Self, Watch),
+		)
+	}
+	firstShipper := shipper(B("one"))
+	firstShipperID := mustID(t, firstShipper)
+	Cycle(node, [][]byte{mustEncode(t, firstShipper)}, 1, nil, Bound)
 	sent := make(Sent)
 	var got [][]byte
 	fired, err := Pump(node,
@@ -365,6 +399,15 @@ func TestReferenceDedupAndUndeliveredTailRetry(t *testing.T) {
 	if _, ok := sent[B("peer")][firstID]; !ok || len(sent[B("peer")]) != 1 {
 		t.Fatalf("sent after prefix = %#v", sent[B("peer")])
 	}
+	if _, ok := fired[firstShipperID]; !ok {
+		t.Fatal("first shipper did not fire")
+	}
+	Cycle(node, nil, 2, []ID{firstShipperID}, Bound)
+	if node.HasFact(firstShipperID) {
+		t.Fatal("first shipper did not reap")
+	}
+	secondShipper := shipper(B("two"))
+	Cycle(node, [][]byte{mustEncode(t, secondShipper)}, 3, nil, Bound)
 	got = nil
 	_, err = Pump(node,
 		func(Blob) (Route, bool) { return Route{Address: B("a")}, true },
@@ -380,22 +423,6 @@ func TestReferenceDedupAndUndeliveredTailRetry(t *testing.T) {
 	}
 	if len(sent[B("peer")]) != 2 {
 		t.Fatalf("sent after retry = %#v", sent[B("peer")])
-	}
-	got = nil
-	_, err = Pump(node,
-		func(Blob) (Route, bool) { return Route{Address: B("a")}, true },
-		func(_ Blob, _ Route, inners [][]byte) int {
-			got = append(got, inners...)
-			return len(inners)
-		}, nil, sent)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 0 {
-		t.Fatalf("deduplicated facts reshipped: %x", got)
-	}
-	if len(fired) == 0 {
-		t.Fatal("shipper did not fire")
 	}
 }
 
@@ -434,7 +461,7 @@ func TestFragmentedWireAndBoundedPartialOutput(t *testing.T) {
 	if ok, enqueueErr := link.Enqueue(1, []byte("overflow")); enqueueErr != nil || ok {
 		t.Fatalf("overflow enqueue = %v, %v", ok, enqueueErr)
 	}
-	drained := append(link.Take(3), link.Take(10_000)...)
+	drained := append(link.Take(3), link.Take(int(^uint(0)>>1))...)
 	if !bytes.Equal(drained, wire) || link.Pending() != 0 {
 		t.Fatalf("partial drain = %x, pending=%d", drained, link.Pending())
 	}

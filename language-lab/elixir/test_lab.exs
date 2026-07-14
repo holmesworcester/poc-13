@@ -47,6 +47,13 @@ defmodule TinyP2P.LanguageLabTest do
     assert fact == reordered
     assert length(fact.atoms) == 2
 
+    normalized =
+      Kernel.make_fact("pass", [
+        %Atom{kind: :offer, role: "r", scope: "s", target: {:range, "x", "x"}}
+      ])
+
+    assert hd(normalized.atoms).target == Kernel.exact("x")
+
     blob = Kernel.encode(fact)
     assert {:ok, ^fact} = Kernel.decode(blob)
 
@@ -191,6 +198,10 @@ defmodule TinyP2P.LanguageLabTest do
     node = Kernel.turn(node, 100, [], 1)
     assert length(Kernel.watched(node, "ready", "s")) == 1
 
+    node = Kernel.turn(node, 101, [], 1)
+    assert [now_row] = Kernel.watched(node, "now", "clock")
+    assert now_row.atom.target == Kernel.exact(<<101::unsigned-big-64>>)
+
     first = Kernel.make_fact("pass", [offer("a", "s", :self)])
     second = Kernel.make_fact("pass", [offer("b", "s", :self)])
     {node, _first_id} = Kernel.admit(node, Kernel.encode(first))
@@ -226,7 +237,17 @@ defmodule TinyP2P.LanguageLabTest do
     assert fired == MapSet.new([courier_id])
     assert_receive {:delivered, "peer", "127.0.0.1:9", "secret", ["hello"]}
 
-    node = Runtime.cycle(node, [], 2, MapSet.to_list(fired))
+    backlog_a = Kernel.make_fact("pass", [offer("backlog-a", "s", :self)])
+    backlog_b = Kernel.make_fact("pass", [offer("backlog-b", "s", :self)])
+    {node, _backlog_a_id} = Kernel.admit(node, Kernel.encode(backlog_a))
+    {node, _backlog_b_id} = Kernel.admit(node, Kernel.encode(backlog_b))
+    node = Runtime.cycle(node, [], 2, MapSet.to_list(fired), 1)
+    assert Map.has_key?(node.facts, courier_id)
+    {refired, _sent} = Runtime.pump(node, route, deliver, fired)
+    assert refired == MapSet.new()
+    refute_receive {:delivered, _, _, _, _}
+    node = Runtime.cycle(node, [], 3, MapSet.to_list(fired), 1)
+    node = Runtime.cycle(node, [], 4, MapSet.to_list(fired), 1)
     refute Map.has_key?(node.facts, courier_id)
     assert Runtime.outbox(node) == []
   end
@@ -241,14 +262,17 @@ defmodule TinyP2P.LanguageLabTest do
     {node, ^second_id} = Kernel.admit(node, Kernel.encode(second))
     node = Kernel.run(node)
 
-    shipper =
+    shipper = fn round ->
       Kernel.make_fact("courier", [
         offer("ship", "outbox", Kernel.exact("peer"), Kernel.frame([first_id, second_id])),
+        offer("round", "test", :self, round),
         need("shipped", "wire", :self, :watch)
       ])
+    end
 
-    shipper_id = Kernel.fact_id(shipper)
-    node = Runtime.cycle(node, [Kernel.encode(shipper)], 1)
+    first_shipper = shipper.("one")
+    first_shipper_id = Kernel.fact_id(first_shipper)
+    node = Runtime.cycle(node, [Kernel.encode(first_shipper)], 1)
     parent = self()
 
     deliver_one = fn _cid, _address, _secret, inners ->
@@ -259,10 +283,16 @@ defmodule TinyP2P.LanguageLabTest do
     {fired, sent} =
       Runtime.pump(node, fn _cid -> {"a", nil} end, deliver_one, MapSet.new(), %{})
 
-    assert fired == MapSet.new([shipper_id])
+    assert fired == MapSet.new([first_shipper_id])
     assert_receive {:first_batch, [first_blob]}
     assert first_blob == Kernel.encode(first)
     assert sent["peer"] == MapSet.new([first_id])
+
+    node = Runtime.cycle(node, [], 2, MapSet.to_list(fired))
+    refute Map.has_key?(node.facts, first_shipper_id)
+
+    second_shipper = shipper.("two")
+    node = Runtime.cycle(node, [Kernel.encode(second_shipper)], 3)
 
     deliver_rest = fn _cid, _address, _secret, inners ->
       send(parent, {:second_batch, inners})
