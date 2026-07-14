@@ -16,8 +16,8 @@ peer connections, sync compares, timers, and queues.
 The implementation is intentionally compact and inspectable, and is not
 production software. The concrete protocol currently demonstrates workspace
 and invite authority, member-signed messages and reactions, signed deletion and
-retention policy, demand-driven SQLite hydration, sealed peer sessions, and
-dependency-aware set reconciliation.
+retention policy, self-verifying file attachments, demand-driven SQLite
+hydration, sealed peer sessions, and dependency-aware set reconciliation.
 
 The design of record is [`DESIGN.md`](DESIGN.md).
 
@@ -73,16 +73,15 @@ The prototype has a global resident sync set per node. Workspace-scoped sync
 lanes and negative multi-workspace isolation are not implemented yet. Also,
 `LocalOnly` currently controls sync egress but is not enforced on wire ingress,
 so the present threat model assumes connected peers do not send local-only
-families. Blob content and retention-policy enforcement remain outside the
-implemented surface.
+families. Retention-policy enforcement remains outside the implemented surface.
 
 ## Quick start
 
-Python 3.13 is used on the build machine. Install the three runtime/test
-dependencies:
+Python 3.13 is used on the build machine. Install the runtime and test
+dependencies; building the ABI3-compatible Bao binding requires Cargo:
 
 ```bash
-python3 -m pip install pynacl blake3 pytest
+python3 -m pip install pynacl blake3 pytest ./native/bao_py
 ```
 
 Start the daemon in one terminal:
@@ -112,6 +111,35 @@ Run the tests and performance harness with:
 pytest -q
 python3 bench/bench.py
 ```
+
+Attach, inspect, and save a file through the same daemon-owned fact store:
+
+```
+$ bin/con.py w.facts content.file.send <wid> general al "see attached" ./notes.txt text/plain
+message_id: <message-fact-id>
+file_fact_id: <descriptor-fact-id>
+file_id: <content-instance-id>
+filename: notes.txt
+mime: text/plain
+blob_bytes: 1234
+total_slices: 1
+$ bin/con.py w.facts content.message.view <wid> general
+see attached
+  file: notes.txt (1234 bytes, complete)
+$ bin/con.py w.facts content.file.list <wid>
+FILES (1 total):
+1. complete notes.txt (1234 bytes, 1/1 slices, 100%)
+$ bin/con.py w.facts content.file.save <wid> 1 ./saved-notes.txt
+```
+
+Attachments are ordinary descriptor and 256 KiB slice facts, capped at 10 GiB.
+Every slice carries its bytes in a canonical Bao range proof and verifies
+independently against the descriptor's BLAKE3 root, so only proven slices count
+toward progress or save. Descriptor metadata is first-class atom vocabulary,
+not a nested record. `content.message_deletion.delete` removes the message,
+descriptor, and every slice from memory, SQLite, and sync state. Payloads
+currently use the same confidentiality boundary as message bodies: `clear-v1`
+bytes at rest and sealed established-connection frames in transit.
 
 ## Performance
 

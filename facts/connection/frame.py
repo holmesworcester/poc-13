@@ -16,7 +16,8 @@ from crypto import aead_open, aead_seal
 
 TAG = b"connection.frame"
 SC = b"conn"
-TARGET = 48 << 10                        # pack up to ~48 KiB of inner fact bytes per frame
+TARGET = 48 << 10                        # bundle small facts to ~48 KiB; one oversized content
+                                         # fact remains legal and gets a frame of its own
 VERSION = 1
 PURPOSE = b"poc13 connection frame v1"
 

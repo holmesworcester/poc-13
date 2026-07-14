@@ -36,6 +36,16 @@ def test_corrupt_inner_fact_misses_siblings_land():
     assert landed == {fact_id(msgs[0]), fact_id(msgs[1]), fact_id(msgs[3])}   # sibling of the corrupt one land
     assert fact_id(msgs[2]) not in n.facts                    # the corrupt inner missed
 
+def test_oversized_content_fact_gets_a_solo_sealed_frame():
+    inner = os.urandom(frames.TARGET + 1)                      # Bao slices exceed the bundle target
+    packed = frames.pack_counts([inner, b"tail"])
+    assert [count for _, count in packed] == [1, 1]            # oversize is legal, but never co-bundled
+    blob, _ = packed[0]
+    secret, cid = os.urandom(32), os.urandom(32)
+    wire = frames.seal(blob, cid, secret, os.urandom(24))
+    assert unframe(frames.open_frame(wire, secret)) == [inner]
+
 if __name__ == "__main__":
-    for t in (test_tampered_frame_opens_to_nothing, test_corrupt_inner_fact_misses_siblings_land):
+    for t in (test_tampered_frame_opens_to_nothing, test_corrupt_inner_fact_misses_siblings_land,
+              test_oversized_content_fact_gets_a_solo_sealed_frame):
         t(); print(f"ok  {t.__name__}")

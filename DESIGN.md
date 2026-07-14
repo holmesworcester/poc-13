@@ -698,8 +698,59 @@ overhead during bulk catch-up while preserving per-inner admission checks.
 
 ## Content
 
-`facts/content/` is the messaging surface. Every command below authors a
-content fact plus its detached Ed25519 signature:
+`facts/content/` is the messaging surface: `message` (a text message in a
+channel), `reaction`, file attachments, `message_deletion`, and
+`retention_policy` (the retention window is an ordinary offer;
+last-write-wins is a read-side fold).
+
+**Attachments are facts, not a second blob store.** `content.file` is the
+message-attached descriptor. Content instance id, BLAKE3 root, byte and slice
+geometry, filename, MIME, and encoding are separate named atoms; there is no
+family-specific metadata record inside an atom value. `content.file_slice`
+carries one indexed canonical Bao slice encoding: the requested bytes plus the
+authentication path that proves them against the descriptor root. The
+dependency arrows point only toward metadata:
+
+```
+Bao slice -> descriptor -> message
+```
+
+The message never Requires its descriptor or slices, so its dependency closure
+does not drag attachment bytes. Each requested range is at most 256 KiB and a
+descriptor may name at most 10 GiB. A slice's intrinsic gate bounds its index
+and proof bytes. Its projector obtains root, length, slice count, width, encoding,
+and message binding from one validated descriptor owner, then uses the official
+Bao format to authenticate the range. Only promoted proof offers count toward
+download progress. Save authenticates every proof again, streams the extracted
+bytes through BLAKE3, checks root and total length, fsyncs a sibling temporary,
+and atomically replaces its output path.
+
+The descriptor is member-signed. It Requires the parent message's `posted`
+offer, its own signature key, and the workspace member keys; PROJECT rebuilds
+the canonical SHAPE and accepts only when the parent's author key signed the
+descriptor. Slices need no additional authorship claim: the canonical Bao proof
+is self-validating against that signed descriptor's root.
+
+The narrow `native/bao_py` binding uses the official Rust `bao` 0.13.1 crate for
+streaming outboard creation, range extraction, and proof decoding. Send builds
+one temporary outboard, extracts each bounded range proof in-process, verifies
+all of them, then discards the outboard before admission. Projection and save
+call the same optimized decoder, so engine validity never invokes a subprocess
+or depends on host files. The dependency is pinned because upstream describes
+Bao as beta cryptographic software that has not been formally audited.
+
+Every descriptor and slice directly Suppress-needs the parent message's `dead`
+key. A valid message deletion therefore terminally purges the whole attachment
+from residency, durable bytes, SQLite, and the sync register. The deletion fact
+is the durable replicated relationship; deleted bytes are not tombstone leaves,
+and a laggard re-shipping an old attachment fact buys one admission that
+re-derives Suppressed and dies.
+
+The active attachment encoding is `clear-v1`, matching message bodies: bytes
+are visible in the local fact store and sealed by the established-connection
+transport on the wire. A content-key family can replace the payload with
+ciphertext without changing the public descriptor/slice validation graph,
+because the Bao root and proofs commit to the carried bytes.
 
 - `message` carries workspace, channel, body, author member id, and its own
   death key. It Requires the workspace, its signature key, and the workspace's
@@ -725,12 +776,12 @@ also carries the applicable death key.
 
 ## Outside the Implemented Surface
 
-- **Blob content** — descriptor, outboard, and chunk fact families are not
-  implemented.
 - **Retention enforcement** — the signed policy fact and query exist, but no
   worker applies its horizon. Policy-based purge must preserve pins,
-  dependency closures, and suppressors whose targets remain live. Physical
-  purge uses `DELETE`, and `VACUUM` reclaims SQLite file space.
+  dependency closures, and suppressors whose targets remain live. Semantic
+  deletion is separate and immediate through Suppress; retention still needs a
+  policy-driven deletion fact. Physical purge uses `DELETE`, and `VACUUM`
+  reclaims SQLite file space.
 - **Workspace sync lanes** — one global `b"sync"` register currently feeds
   every peer. Per-workspace authorization and coverage isolation are required
   before unrelated workspace sets can safely share a node.

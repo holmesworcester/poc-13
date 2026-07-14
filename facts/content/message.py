@@ -54,9 +54,29 @@ def feed(node, workspace_id, channel):
                                           key=lambda r: (r[1], r[0]))
             if a.target == Exact(channel)]
 
+def view(node, workspace_id, channel):
+    from facts.content import file as filemod
+    hydrate.demand(node, b"msg", workspace_id)
+    attachments = {}
+    for item in filemod.files(node, workspace_id):
+        attachments.setdefault(item["message_id"], []).append(item)
+    lines = []
+    for owner, t, atom in sorted(node.watched(b"msg", workspace_id), key=lambda r: (r[1], r[0])):
+        if atom.target != Exact(channel):
+            continue
+        lines.append(atom.value.decode())
+        for item in attachments.get(owner, ()):
+            state = "complete" if item["complete"] else \
+                "%d/%d slices" % (item["slices_received"], item["total_slices"])
+            lines.append("  file: %s (%d bytes, %s)" %
+                         (item["filename"].decode(), item["blob_bytes"], state))
+    return lines
+
 # CLI — string boundary over COMMANDS/QUERIES. The author is the local signer;
 # the `who` slot is accepted and ignored for wire-compat until the CLI rework.
 CLI = {"send": lambda n, wid, ch, who, body, t=None:
            send(n, bytes.fromhex(wid), ch.encode(), body.encode(), int(t or now())).hex(),
        "feed": lambda n, wid, ch:
-           b"\n".join(feed(n, bytes.fromhex(wid), ch.encode())).decode()}
+           b"\n".join(feed(n, bytes.fromhex(wid), ch.encode())).decode(),
+       "view": lambda n, wid, ch:
+           "\n".join(view(n, bytes.fromhex(wid), ch.encode()))}
