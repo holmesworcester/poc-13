@@ -12,19 +12,19 @@ transport — the daemon is a stateless byte queue keyed by destination address;
 NO per-socket session object, NO cid<->socket binding (facts name addresses and
 inbound frames self-describe their connection_id):
 - Transport = an address-keyed outbox (poc-10 network_outgoing(queue_key,
-  target_addr, bytes)): `send`/`ship` offers name a DEST ADDRESS; the pump
+  target_addr, bytes)): `send`/`ship` Provides name a DEST ADDRESS; the pump
   connects to that address and writes (persistent-pool or connect-per-drain, an
   efficiency knob — poc-10 chose stateless connect/send/close).
 - Routing is fact-driven both ways: outbound reads the connection fact for
   (peer_addr, secret) and emits send@peer_addr of sealed bytes; inbound peeks
   frame_cid(wire) -> conn.secret(node, cid) -> open, regardless of which socket
   delivered it. `frame.py` already has frame_cid + conn.secret for this.
-- Dial: the pump connects to any dest address with staged send offers. No
+- Dial: the pump connects to any dest address with staged send Provides. No
   dial-request family, no --peer; add a `connection.request.connect wid iid
   secret endpoint addr` CLI verb (bootstrap authors invite_accepted + the
   sealed request, whose send@addr drives the dial).
-- Seams (host performs at a watched offer, reports via a fact): inbound request
-  arrival -> author fact_receipt(REQUEST, origin=addr); `respond` offer ->
+- Seams (host performs at a Gathered Provide, reports via a fact): inbound request
+  arrival -> author fact_receipt(REQUEST, origin=addr); `respond` Provide ->
   connection.respond + send@origin_addr; the connection fact carries the peer
   address so no binding step is needed.
 - Handshake facts (request/connection) travel bare (own X25519 envelopes);
@@ -51,7 +51,7 @@ distinct message counts per workspace so any cross-bleed shows as a count
 mismatch. Asserts: everyone converges W1; bob gets W2 and never W3/W4; carol
 gets W3 and never W2/W4; W4 never leaves alice.
 
-EXPECTED TO FAIL today: the pump offers every durable sync-leaf owner to every
+EXPECTED TO FAIL today: the pump Provides every durable sync-leaf owner to every
 peer and `facts/sync/compare.py` reconciles one global `b"sync"` scope — there
 is no per-workspace sync scoping. Land the negative lanes as xfail; they are
 the spec for the sync-scoping work, and xfail flipping to xpass is the signal
@@ -214,9 +214,20 @@ Known gap left deliberately: the set-moved counter (leaf_ver, now
 facts.sync.index.ver) is polled by bench/tests only; the daemon relies on
 the cadence (DESIGN.md prose softened to match).
 
+## relationship atoms (2026-07-14)
+
+The v1 Need/Offer kind plus need-effect product is retired. Atoms now carry one
+closed `relationship` field — `Provide`, `Gather`, `Require`, or `SuppressIf` —
+and one `name`; there is no separate kind, effect, role, or atom mode. All
+three consumer relationships exhaustively fault and match the same stored
+state, then settle differently: Gather passes zero or more matches, Require
+parks on zero, and SuppressIf purges on nonzero. The wire header and SQLite
+relation follow that same shape, so the identity domain is
+`tinyp2p.fact.v2`; old atom tables fail closed.
+
 # TODO — node-private wire ingress
 
-Projected `leaf@sync` offers now gate both treap membership and `sync.need`'s
+Projected `leaf@sync` Provides now gate both treap membership and `sync.need`'s
 by-id egress, but `cycle()` still admits every inbound wire byte with no
 provenance filter. A connected peer can therefore write into b"local" scope —
 including auth.local_signer_secret (identity selection: current() takes the

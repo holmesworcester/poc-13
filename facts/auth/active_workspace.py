@@ -5,7 +5,7 @@ marker-free so it never syncs and never touches the kernel's authority story. It
 Requires the workspace it names, so a selection self-heals — a workspace that is
 gone parks its selection and the reader falls back to the sole/only workspace.
 The latest selection wins by the ordinary (ts, owner) read-side fold."""
-from kernel import (Atom, Exact, NEED, OFFER, Out, REQUIRE, encode, fact, now,
+from kernel import (Atom, Exact, PROVIDE, Out, REQUIRE, encode, fact, now,
                     ts_atom, ts_of)
 from facts.store import hydrate
 
@@ -15,8 +15,8 @@ KEY = b"current"
 # SHAPE — the canonical atom set; the only place atoms are chosen.
 def active_workspace(workspace_id, t):
     return fact(TAG, ts_atom(t, b"local"),
-                Atom(NEED, b"workspace", b"auth", Exact(workspace_id), effect=REQUIRE),
-                Atom(OFFER, b"active_workspace", b"local", Exact(KEY), workspace_id))
+                Atom(REQUIRE, b"workspace", b"auth", Exact(workspace_id)),
+                Atom(PROVIDE, b"active_workspace", b"local", Exact(KEY), workspace_id))
 
 # EXTRACT — content-pure durability. The projector emits no sync marker.
 def extract(f): return True
@@ -24,11 +24,11 @@ def extract(f): return True
 # PROJECT — accept exactly SHAPE (the workspace Require gates validity upstream).
 def project(f, ctx):
     try:
-        row = next(a for a in f.atoms if a.role == b"active_workspace")
+        row = next(a for a in f.atoms if a.name == b"active_workspace")
         if f != active_workspace(row.value, ts_of(f)): return Out("Invalid")
     except Exception:
         return Out("Invalid")
-    return Out(offers=(row,))
+    return Out(provides=(row,))
 
 # COMMANDS — select a workspace as the default. Idempotent per (ts, wid).
 def use(node, workspace_id, t):
@@ -37,7 +37,7 @@ def use(node, workspace_id, t):
 # QUERIES — the current selection (latest valid wins), and the resolved default.
 def current(node):
     hydrate.demand(node, b"active_workspace", b"local")
-    row = max(node.watched(b"active_workspace", b"local"),
+    row = max(node.provided(b"active_workspace", b"local"),
               key=lambda r: (r[1], r[0]), default=None)
     return row[2].value if row else None
 

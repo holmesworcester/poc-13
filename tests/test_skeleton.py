@@ -4,7 +4,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from kernel import (Node, Out, Router, decode, encode, fact, fact_id, ts_atom,
-                    ts_of, Atom, Exact, OFFER)
+                    ts_of, Atom, Exact, PROVIDE)
 import crypto as _c
 from facts import ROOT
 from facts.store import hydrate
@@ -28,7 +28,7 @@ CH = fact_id(CHANNEL)
 AUTH_CHAIN = WS_CHAIN + list(MEMBER.facts) + [CHANNEL, CHANNEL_SIG]
 
 def test_identity_and_admission():
-    a1 = Atom(OFFER, b"msg", WID, Exact(CH), b"hi")
+    a1 = Atom(PROVIDE, b"msg", WID, Exact(CH), b"hi")
     a2 = ts_atom(1, WID)
     # Canonical form is a function of the atom multiset: order- and dup-free.
     assert fact_id(fact(b"content.message", a1, a2)) == fact_id(fact(b"content.message", a2, a1, a2))
@@ -58,7 +58,7 @@ def test_requires_suppression_and_wakes():
     assert n.memo[fact_id(m1)] == "Valid"
     assert fact_id(m2) not in n.facts                         # cross-time match held: purged whole
     assert fact_id(m2) not in n.durable
-    assert [a.value for _, _, a in n.watched(b"msg", WID)] == [b"keep"]
+    assert [a.value for _, _, a in n.provided(b"msg", WID)] == [b"keep"]
 
 def test_admission_check_hook():
     class SigLike:                       # throwaway family: a self-check at the gate
@@ -74,10 +74,10 @@ def test_admission_check_hook():
 def test_outbox_reap_and_reboot():
     n = Node(ROOT)
     fid = n.admit(encode(send(b"peer1", b"hello", 1))); n.run()
-    assert [a.value for _, _, a in n.watched(b"send", b"outbox")] == [b"hello"]
-    assert n.memo[fid] == "Valid"                             # watch never gated validity
+    assert [a.value for _, _, a in n.provided(b"send", b"outbox")] == [b"hello"]
+    assert n.memo[fid] == "Valid"                             # Gather never gated validity
     n.turn(shipped=[fid]); n.run()                            # the daemon reports the flush
-    assert n.watched(b"send", b"outbox") == []                # reaped: the offer is gone
+    assert n.provided(b"send", b"outbox") == []                # reaped: the Provide is gone
     assert fid not in n.facts and fid not in n.memo           # the body left no residue
     assert not n.durable                                      # a volatile send persists nothing
     m, s = signed_message(MEMBER, WID, CH, b"hi", 5)          # a message travels with its signature

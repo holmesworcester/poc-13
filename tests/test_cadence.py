@@ -1,13 +1,13 @@
 """Cadence as facts (M7): a sync.cadence fact opens a round once per period, driven
-by the clock the turn presents — no daemon marker. It offers a wake@clock alarm at
+by the clock the turn presents — no daemon marker. It provides a wake@clock alarm at
 its next boundary (runtime.next_wake reads it for the select timeout), fires at most
 once per period though the clock re-wakes it every turn, re-arms itself, and is torn
-down by a closed@conn Suppress. Driven in-process by advancing turn(now=...)."""
+down by `SuppressIf closed@conn`. Driven in-process by advancing turn(now=...)."""
 import os, sys
 HERE = os.path.dirname(os.path.abspath(__file__)); ROOT_DIR = os.path.dirname(HERE)
 sys.path[:0] = [ROOT_DIR, os.path.join(ROOT_DIR, "bin")]
 import crypto as _c
-from kernel import Node, Atom, Exact, OFFER, encode, fact, fact_id, ts_atom, decode
+from kernel import Node, Atom, Exact, PROVIDE, encode, fact, fact_id, ts_atom, decode
 from facts import ROOT
 from facts.sync import cadence
 from facts.sync.compare import TAG as CMP_TAG
@@ -35,8 +35,8 @@ def node():
         n.admit(encode(f))
     n.run(); return n
 
-def _compares(n):                                       # send offers carrying a compare frame, at Exact(CID)
-    return [a for _, _, a in n.watched(b"send", b"outbox")
+def _compares(n):                                       # send provides carrying a compare frame, at Exact(CID)
+    return [a for _, _, a in n.provided(b"send", b"outbox")
             if a.target[1] == CID and decode(a.value).type_tag == CMP_TAG]
 
 def test_cadence_opens_a_round_once_per_period():
@@ -44,7 +44,7 @@ def test_cadence_opens_a_round_once_per_period():
     cadence.arm(n, CID, ONE)                               # first clock sight anchors the boundary
     n.turn(now=0); n.run()
     assert not _compares(n)                              # before the boundary: no round, only an alarm
-    ds = [int.from_bytes(a.target[1], "big") for _, _, a in n.watched(b"wake", b"clock")]
+    ds = [int.from_bytes(a.target[1], "big") for _, _, a in n.provided(b"wake", b"clock")]
     assert ds == [PERIOD]                                # alarm parked at the first boundary
     n.turn(now=PERIOD); n.run()
     assert len(_compares(n)) == 1                        # boundary reached: exactly one round opened
@@ -64,10 +64,10 @@ def test_closed_conn_tears_it_down():
     n = node(); cadence.arm(n, CID, ONE); n.turn(now=0); n.turn(now=PERIOD); n.run()
     assert _compares(n)
     n.admit(encode(fact(b"connection.close", ts_atom(1, b"conn"),
-                        Atom(OFFER, b"closed", b"conn", Exact(CID)))))   # a close for this connection
+                        Atom(PROVIDE, b"closed", b"conn", Exact(CID)))))   # a close for this connection
     n.turn(now=2 * PERIOD); n.run()
     assert not _compares(n)                              # suppressed: the cadence stops opening rounds
-    assert not n.watched(b"wake", b"clock")             # and stops arming alarms
+    assert not n.provided(b"wake", b"clock")             # and stops arming alarms
 
 def test_tier_pair_registers_do_not_collide():
     """Two tiers over one (cid, floor): the tick key includes period and mode, so
@@ -77,7 +77,7 @@ def test_tier_pair_registers_do_not_collide():
     n.turn(now=0); n.run()
     W = cadence.ANCHOR_W
     for t in range(500, 3 * W + 1, 500): n.turn(now=t); n.run()
-    ticks = {a.target[0] for _, _, a in n.watched(b"tick", b"sync")}
+    ticks = {a.target[0] for _, _, a in n.provided(b"tick", b"sync")}
     assert len(ticks) == 2                               # one register per tier, distinct keys
 
 def test_anchor_fires_every_period_gated_goes_silent():
@@ -88,7 +88,7 @@ def test_anchor_fires_every_period_gated_goes_silent():
     for t in range(500, 3 * W + 1, 500):
         n.turn(now=t); n.run()
         opened += [(t, a.value) for a in _compares(n)]
-        n.turn(now=t, shipped=tuple({o for o, _, a in n.watched(b"send", b"outbox")})); n.run()
+        n.turn(now=t, shipped=tuple({o for o, _, a in n.provided(b"send", b"outbox")})); n.run()
     gated_fires = [t for t, _ in opened if t % W != 0]
     anchor_fires = [t for t, _ in opened if t % W == 0]
     assert len(anchor_fires) == 3                        # every anchor boundary, unconditionally

@@ -5,8 +5,8 @@ by one batched `need`, which ships those facts. Both are marker-free session sta
 excluded from the leaves they reconcile, and target responses at the connection's
 outbox key — so sync has no daemon reaction, only projectors on the one send path.
 `index` holds the set they reconcile: the treap in the b"sync" register, fed by
-validated `leaf@sync` offers emitted by replicating projectors and read via the
-`summary` need."""
+validated `leaf@sync` provides emitted by replicating projectors and read via the
+`summary` Gather."""
 from kernel import Router
 from . import index, compare, need, cadence
 

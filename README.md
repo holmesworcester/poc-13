@@ -6,10 +6,10 @@ identity, validation, storage, demand-driven loading, synchronization, transport
 and application behavior can share one data language instead of accumulating a
 separate mechanism for each concern.
 
-That language is made of immutable facts containing needs and offers called
-atoms. Facts are the units of identity and wire transfer; atoms are the units of
-storage and matching. A command authors a fact, the kernel matches its needs
-against validated offers, and the owning fact family decides what the fact
+That language is made of immutable facts containing relationship atoms. Facts
+are the units of identity and wire transfer; atoms are the units of storage and
+matching. A command authors a fact, the kernel resolves its relationships
+against validated state, and the owning fact family decides what the fact
 means. The same model represents workspaces, membership, messages, deletions,
 peer connections, sync compares, timers, and queues.
 
@@ -27,40 +27,47 @@ The design of record is [`DESIGN.md`](DESIGN.md).
 
 A fact has a dotted family tag and a canonical, sorted set of atoms. Its id is
 the BLAKE3 hash of the protocol domain, tag, and encoded atoms, so changing any
-atom creates a different event. An atom is the small relational statement
-`(kind, role, scope, target, value?, effect?)`:
+atom creates a different event. Every atom has one shape:
+`(relationship, name, scope, target, value?)`. The relationship is exactly one
+of:
 
-- an **offer** is a candidate claim, such as a message body at a channel id;
-- a **need** looks for offers with the same role and scope whose point or range
-  target matches; and
-- a need's effect says whether the match is required, merely watched, or
-  suppresses the owning fact.
+- **Provide** — publish a candidate value at an address;
+- **Gather** — collect zero or more matching validated Provides into projector
+  context;
+- **Require** — collect matching Provides, but park the owner when there are
+  none; or
+- **SuppressIf** — terminally suppress and purge the owner when any matching
+  Provide exists.
+
+Gather, Require, and SuppressIf all run the same exhaustive lookup over
+resident and stored state. They differ only in how the resulting match set is
+settled. That keeps matching in one place instead of encoding a separate atom
+kind and need effect.
 
 For example, a member-signed message is one fact containing seven atoms. Using
 protocol notation, `W` is the workspace id, `C` the channel fact id, `A` the
 author member id, and `t` the timestamp:
 
 ```text
-Need  (effect, role, scope, target, value?)
-Offer (        role, scope, target, value?)
+Atom(relationship, name, scope, target, value?)
 
 MessageFact(W, C, A, body, t) ::=
   Fact(
     tag   = "content.message",
     atoms = {
-      Need  (REQUIRE,  "channel", W, Exact(C))
-      Need  (REQUIRE,  "pk",      W, SELF)
-      Need  (REQUIRE,  "key",     W, Exact(W))
-      Need  (SUPPRESS, "dead",    W, SELF)
+      Require   ("channel", W, Exact(C))
+      Require   ("pk",      W, SELF)
+      Require   ("key",     W, Exact(W))
+      SuppressIf("dead",    W, SELF)
 
-      Offer (          "msg",     W, Exact(C), body)
-      Offer (          "posted",  W, SELF,     A)
-      Offer (          "ts",      W, SELF,     u64le(t))
+      Provide   ("msg",     W, Exact(C), body)
+      Provide   ("posted",  W, SELF,     A)
+      Provide   ("ts",      W, SELF,     u64le(t))
     }
   )
 
 M ::= FactId(MessageFact(W, C, A, body, t))
-    = BLAKE3(frame("tinyp2p.fact.v1", tag, canonical(atoms)))
+    = BLAKE3(frame("tinyp2p.fact.v2", tag, canonical(atoms)))
 
 materialize(SELF, owner=M) ::= Exact(M)
 ```
@@ -70,57 +77,57 @@ their encoding and removes duplicates before computing `M`.
 
 `SELF` is encoded as a symbolic target, which avoids a hash cycle while the
 fact id is being computed. In the match index and atom store it is materialized
-as `Exact(M)`. The `channel` need therefore links the message to a
-validated channel, the `pk` and `key` needs bring its detached signer and
-workspace authority into context, and a matching `dead@M` offer suppresses and
-physically purges it. The `msg` and `posted` atoms do not become trusted merely
-because they occur in the fact: they are asserted candidates until the family
-projector publishes them.
+as `Exact(M)`. The `channel` relationship therefore links the message to a
+validated channel, the `pk` and `key` relationships gather its detached signer
+and workspace authority into context, and a matching `dead@M` Provide
+suppresses and physically purges it. The `msg` and `posted` atoms do not become
+trusted merely because they occur in the fact: they are asserted candidates
+until the family projector publishes them.
 
 ### Extraction and projection
 
 Every fact follows the same admission and evaluation pipeline. The root router
 uses the type tag to select the owning family for both `extract()` and
 `project()`. The fact remains immutable throughout; evaluation adds a verdict
-and, for a valid fact, a set of projected offers:
+and, for a valid fact, a set of projected Provides:
 
 ```mermaid
 flowchart TB
     I["canonical bytes"] --> A["admit<br/>decode canonically · compute id · run optional intrinsic check"]
     A --> X["family extract(fact)<br/>pure durability: durable or volatile"]
-    X --> M["materialize SELF · index atoms<br/>match needs against validated offers"]
-    M --> D{"valid offer matches<br/>a Suppress need?"}
-    D -- yes --> Z["Suppressed · no offers · purged"]
-    D -- no --> Q{"every Require need<br/>has a valid match?"}
-    Q -- no --> K["Parked · no offers"]
-    Q -- yes --> C["validated context<br/>matching offers for Require and Watch needs"]
+    X --> M["materialize SELF · index atoms<br/>exhaustively resolve every consumer relationship"]
+    M --> D{"any SuppressIf<br/>has matches?"}
+    D -- yes --> Z["Suppressed · no Provides · purged"]
+    D -- no --> Q{"every Require<br/>has matches?"}
+    Q -- no --> K["Parked · no Provides"]
+    Q -- yes --> C["validated context<br/>matches for Gather and Require"]
     C --> P["family project(fact, context)<br/>check exact shape, semantics, and authority"]
     P --> O{"projector verdict"}
-    O -- Valid --> V["Valid · projected offers"]
+    O -- Valid --> V["Valid · projected Provides"]
     O -- Parked --> K
-    O -- Invalid --> N["Invalid · no offers"]
-    O -- Reap --> R["Reap · no offers · purged"]
+    O -- Invalid --> N["Invalid · no Provides"]
+    O -- Reap --> R["Reap · no Provides · purged"]
 ```
 
 Despite its name, `extract()` does not unpack the atoms. It is the content-pure
 durability decision made at admission: a durable canonical fact is retained in
 the atom relation, while a volatile fact vanishes on restart. It does not decide
 replication. A valid family projector opts its fact into sync by including the
-derived `leaf@sync/SELF` offer returned by `sync_leaf()` in `Out.offers`. Local
+derived `leaf@sync/SELF` Provide returned by `sync_leaf()` in `Out.provides`. Local
 secrets and connection anchors are durable but project no marker; protocol work
 such as sync compares and outbox sends is volatile and projects none.
 
-The projector is the fact family's semantic boundary. It runs only after no
-validated suppressor matches and every `Require` need is satisfied. Its
-context contains matching **validated** offers for `Require` and `Watch`
-needs, including each offer's owner and timestamp. The projector normally
+The projector is the fact family's semantic boundary. It runs only after every
+`SuppressIf` is empty and every `Require` is satisfied. Its context contains
+matching **validated** Provides for `Gather` and `Require`, including each
+Provide's owner and timestamp. The projector normally
 rebuilds the expected family shape, applies authorization or cryptographic
-policy, and returns `Out(offers=...)`. Only those returned offers enter the
-clean index read by dependents and queries; raw asserted offers never justify
-another fact on their own. The sync marker is one such projected offer, not a
+policy, and returns `Out(provides=...)`. Only those returned Provides enter the
+clean index read by dependents and queries; raw asserted Provides never justify
+another fact on their own. The sync marker is one such projected Provide, not a
 claim trusted from the fact's input atoms. `Parked`, `Invalid`, `Suppressed`,
-and family-chosen `Reap` verdicts publish no clean offers, so owner-scoped
-replacement also retracts any prior marker. The sync family's generic offer
+and family-chosen `Reap` verdicts publish no clean Provides, so owner-scoped
+replacement also retracts any prior marker. The sync family's generic Provide
 observer folds those marker deltas into its leaf set and treap in
 `node.regs[b"sync"]`.
 
@@ -129,19 +136,21 @@ two-column `facts(fid, tag)` spine plus one `atoms` row for every atom. Reads
 regroup those rows, reconstruct the canonical fact, re-encode it, and verify
 that it hashes to `fid`. Corrupt or inconsistent rows are therefore a miss,
 not a different fact. Validity, resident fact objects, match buckets, sync
-labels, family registers, and queues are derived state.
+labels, family registers, and queues are derived state. Because v2 changes both
+the atom wire header and this relation, a v1 atom database is not reinterpreted
+or migrated in place: opening one fails closed and requires a fresh database.
 
 The main pieces are:
 
 - [`kernel.py`](kernel.py) — canonical identity, admission, matching, the
   bounded turn loop, demand faults, and two generic family-index seams:
-  projected-offer `observe()` and reserved-need `answer()`.
+  projected-Provide `observe()` and reserved-Gather `answer()`.
 - [`facts/`](facts/) — one module per fact family. Each module owns SHAPE,
   EXTRACT, optional CHECK, PROJECT, COMMANDS, QUERIES, and CLI. Projectors are
   also the routing tree, so protocol policy stays out of the kernel.
 - [`facts/sync/index.py`](facts/sync/index.py) — the sync family’s own
   rebuildable register: leaf membership, a history-independent Merkle treap,
-  summary memo, and version counter, derived from validated sync-leaf offers.
+  summary memo, and version counter, derived from validated sync-leaf Provides.
   The kernel contains no sync tree.
 - [`facts/connection/`](facts/connection/) — sealed handshake, session,
   frame-bundle, close, and ephemeral-secret families. A durable answered
@@ -280,7 +289,7 @@ both facts and their validation work.
 
 Full hydration reconstructs each selected fact from atom rows and rebuilds
 derived indexes, so a total pull scales with the stored atom set. Point matching
-uses indexed buckets; a point lookup does not scan every same-role row. Sync
+uses indexed buckets; a point lookup does not scan every same-name row. Sync
 range fingerprints use the treap’s clamped Merkle labels and take expected
 `O(log n)` local work, while mismatch depth is `O(log_B n)` and a fresh replica
 still transfers `O(n)` facts. Sync covers the resident set, so a node that wants

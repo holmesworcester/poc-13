@@ -7,7 +7,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(HERE)
 sys.path[:0] = [ROOT_DIR, HERE, os.path.join(ROOT_DIR, "bin")]
 
-from kernel import Atom, Exact, NEED, OFFER, SUPPRESS, Node, Store, encode, fact
+from kernel import Atom, Exact, PROVIDE, SUPPRESS_IF, Node, Store, encode, fact
 from facts import ROOT
 from facts.auth import signature, workspace
 from facts.content import channel, file, file_slice, message, message_deletion
@@ -44,8 +44,8 @@ def _proofs(path):
 
 
 def _direct_death_key(item, workspace_id, message_id):
-    return any(a.kind == NEED and a.role == b"dead" and a.scope == workspace_id
-               and a.target == Exact(message_id) and a.effect == SUPPRESS for a in item.atoms)
+    return any(a.relationship == SUPPRESS_IF and a.name == b"dead" and a.scope == workspace_id
+               and a.target == Exact(message_id) for a in item.atoms)
 
 
 def test_send_view_save_roundtrip_atomized_descriptor_and_cold_hydration():
@@ -66,14 +66,14 @@ def test_send_view_save_roundtrip_atomized_descriptor_and_cold_hydration():
         assert file.resolve(n, wid, receipt["file_fact_id"].hex()) == row
 
         descriptor = n.facts[receipt["file_fact_id"]]
-        assert {a.role for a in descriptor.atoms if a.kind == OFFER} >= {
+        assert {a.name for a in descriptor.atoms if a.relationship == PROVIDE} >= {
             b"file", b"descriptor", b"file_size", b"file_slices",
             b"file_slice_bytes", b"file_encoding", b"file_name", b"file_mime"}
-        assert {a.role for a in descriptor.atoms if a.kind == NEED} >= {
+        assert {a.name for a in descriptor.atoms if a.relationship != PROVIDE} >= {
             b"posted", b"pk", b"key", b"dead"}
         assert len(descriptor.atoms) == 13
         assert signature.signed(n, wid, receipt["file_fact_id"])
-        size_atom = next(a for a in descriptor.atoms if a.role == b"file_size")
+        size_atom = next(a for a in descriptor.atoms if a.name == b"file_size")
         assert int.from_bytes(size_atom.value, "big") == len(payload)
 
         restored = reboot(n); [cold] = file.files(restored, wid)
@@ -99,7 +99,7 @@ def test_only_valid_bao_slices_count_and_incomplete_save_is_atomic():
         n.run()
 
         malformed = fact(file_slice.TAG, *first.atoms,
-                         Atom(OFFER, b"extra", file_id, Exact(b"extra")))
+                         Atom(PROVIDE, b"extra", file_id, Exact(b"extra")))
         malformed_id = n.admit(encode(malformed), checked=True); n.run()
         assert n.memo[malformed_id] == "Invalid"       # PROJECT rechecks canonical SHAPE
 

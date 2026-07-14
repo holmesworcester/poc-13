@@ -41,13 +41,27 @@ def test_extract_contract_has_one_result():
             returns = [node for node in ast.walk(extract) if isinstance(node, ast.Return)]
             assert returns and all(not isinstance(node.value, ast.Tuple) for node in returns), p
 
-def test_needs_carry_no_values():
-    """Needs carry no values — a need is a key, and MATCHING reads nothing
-    else (the hydration window died with the store spider: a demand is one
-    value-free Watch need). One carve-out, exactly as wide as the mechanism:
-    a RESERVED need (NUL-prefixed role) is answered by an index, never
-    matched against offers, so its value is the query argument — the summary
-    need's window floor. The role must resolve to a reserved constant."""
+def test_fact_atoms_use_the_closed_relationship_alphabet():
+    """Every authored atom names one of the four relationships directly.
+    This prevents the retired kind/effect product and accidental integer tags
+    from creeping back into fact shapes."""
+    relationships = {"PROVIDE", "GATHER", "REQUIRE", "SUPPRESS_IF"}
+    for p in FACTS.rglob("*.py"):
+        if p.name == "__init__.py":
+            continue
+        for node in ast.walk(ast.parse(p.read_text())):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == "Atom"):
+                continue
+            assert node.args and isinstance(node.args[0], ast.Name), (p, node.lineno)
+            assert node.args[0].id in relationships, (p, node.lineno)
+
+def test_consumer_relationships_carry_no_values():
+    """Ordinary Gather, Require, and SuppressIf atoms are match addresses,
+    not payloads. The one carve-out is a reserved Gather: it is answered by a
+    family index rather than matching Provides, so its value is a query
+    argument (sync summary's window floor)."""
+    consumers = {"GATHER", "REQUIRE", "SUPPRESS_IF"}
     for p in FACTS.rglob("*.py"):
         if p.name == "__init__.py":
             continue
@@ -66,12 +80,13 @@ def test_needs_carry_no_values():
         for node in ast.walk(tree):
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                     and node.func.id == "Atom" and node.args
-                    and isinstance(node.args[0], ast.Name) and node.args[0].id == "NEED"
+                    and isinstance(node.args[0], ast.Name) and node.args[0].id in consumers
                     and not (len(node.args) > 1 and reserved(node.args[1]))):
                 assert len(node.args) <= 4, (p, node.lineno)      # no positional value
                 assert all(k.arg != "value" for k in node.keywords), (p, node.lineno)
 
 if __name__ == "__main__":
     for t in (test_fact_contract, test_extract_contract_has_one_result,
-              test_needs_carry_no_values):
+              test_fact_atoms_use_the_closed_relationship_alphabet,
+              test_consumer_relationships_carry_no_values):
         t(); print(f"ok  {t.__name__}")

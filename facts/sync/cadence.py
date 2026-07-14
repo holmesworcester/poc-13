@@ -12,10 +12,10 @@ connection (docs/anchor-sync.md):
     byte/latency optimizations the anchor is allowed to outlive: a starved or wrong
     fast tier costs milliseconds, never convergence.
 
-Each tier Watches the clock and offers a `wake@clock` alarm at its next boundary so
+Each tier Gathers the clock and Provides a `wake@clock` alarm at its next boundary so
 the daemon sleeps exactly until then (runtime.next_wake). Its memory — last boundary,
 last opener hash (`sent`), last observed hash (`seen`), and the confirmed opener hash
-(`conf`) — is its own tick offer, self-Watched and re-emitted by EVERY branch that
+(`conf`) — is its own tick Provide, self-Gathered and re-emitted by EVERY branch that
 saw a clock, or the memory is lost; the tick key includes period and mode, so two
 tiers over one (cid, floor) never collide. Arming stays idempotent (no arm-time in
 the bytes): the daemon needs no armed-marker.
@@ -24,36 +24,35 @@ The CERTIFICATE: a peer whose reply matched every claim of my opener answers all
 `done`, which pulses `confirmed@cid` when that reply is admitted here. The fold
 attests my last opener (`conf = sent`) only while my current split still hashes to
 it — `synced` is then a locally provable predicate: someone matched fingerprints
-over exactly the split I hold now. SUPPRESS on `closed@conn` tears both tiers down;
+over exactly the split I hold now. SUPPRESS_IF on `closed@conn` tears both tiers down;
 being volatile, a reconnect re-arms them."""
-from kernel import (Atom, Exact, H, NEED, OFFER, Out, SELF, SUPPRESS, WATCH,
-                    by, encode, fact, frame, now_need, now_of, ts_atom, unframe)
-from facts.sync.index import SUM_ROLE, summary, summary_need
+from kernel import (Atom, Exact, H, PROVIDE, Out, SELF, SUPPRESS_IF, GATHER,
+                    by, encode, fact, frame, now_gather, now_of, ts_atom, unframe)
+from facts.sync.index import SUM_NAME, summary, summary_gather
 from facts.sync.compare import compare, sorted_claims, HI
 
 TAG = b"sync.cadence"
 SC = b"sync"
-WAKE = (b"wake", b"clock")               # the alarm role/scope the daemon reads for next_wake
+WAKE = (b"wake", b"clock")               # the alarm name/scope the daemon reads for next_wake
 ANCHOR, GATED = b"anchor", b"gated"      # tier modes: unconditional loop / changed+settled
 ANCHOR_W = 4000                          # the anchor period; runtime.SENT_TTL must stay below it
 _T8 = lambda ms: ms.to_bytes(8, "big")
-_tgt = lambda f, r: next((a.target[1] for a in f.atoms if a.role == r), b"")
-_val = lambda f, r: next((a.value for a in f.atoms if a.role == r), b"")
+_tgt = lambda f, r: next((a.target[1] for a in f.atoms if a.name == r), b"")
+_val = lambda f, r: next((a.value for a in f.atoms if a.name == r), b"")
 
-# SHAPE — cid in a target; floor/period/mode as values; an unbounded clock Watch, my
+# SHAPE — cid in a target; floor/period/mode as values; an unbounded clock Gather, my
 # domain summary, my per-tier tick register, the confirm pulse, and teardown.
 def cadence(cid, floor, period_ms, mode=ANCHOR):
     return fact(TAG, ts_atom(0, SC),
-                Atom(OFFER, b"cid",    SC, Exact(cid)),
-                Atom(OFFER, b"floor",  SC, SELF, floor),
-                Atom(OFFER, b"period", SC, SELF, _T8(period_ms)),
-                Atom(OFFER, b"mode",   SC, SELF, mode),
-                now_need(0),                                     # woken by every clock the turn presents
-                summary_need(floor or b"", HI, floor),           # my claims for the (windowed) domain
-                Atom(NEED, b"tick", SC, Exact(cid + floor + _T8(period_ms) + mode),
-                     effect=WATCH),                              # my own memory (self-offer)
-                Atom(NEED, b"confirmed", SC, Exact(cid), effect=WATCH),
-                Atom(NEED, b"closed", b"conn", Exact(cid), effect=SUPPRESS))
+                Atom(PROVIDE, b"cid",    SC, Exact(cid)),
+                Atom(PROVIDE, b"floor",  SC, SELF, floor),
+                Atom(PROVIDE, b"period", SC, SELF, _T8(period_ms)),
+                Atom(PROVIDE, b"mode",   SC, SELF, mode),
+                now_gather(0),                                     # woken by every clock the turn presents
+                summary_gather(floor or b"", HI, floor),           # my claims for the (windowed) domain
+                Atom(GATHER, b"tick", SC, Exact(cid + floor + _T8(period_ms) + mode)),                              # my own memory (self-Provide)
+                Atom(GATHER, b"confirmed", SC, Exact(cid)),
+                Atom(SUPPRESS_IF, b"closed", b"conn", Exact(cid)))
 
 # EXTRACT — volatile session state.
 def extract(f): return False
@@ -69,7 +68,7 @@ def project(f, ctx):
     now = now_of(ctx)
     if now is None: return Out()                             # no clock yet: nothing to hold
     key = cid + floor + _T8(period) + mode
-    tick = lambda t, sent, seen, conf: Atom(OFFER, b"tick", SC, Exact(key),
+    tick = lambda t, sent, seen, conf: Atom(PROVIDE, b"tick", SC, Exact(key),
                                             frame(_T8(t), sent, seen, conf))
     rv = next((r[2].value for r in by(ctx, b"tick")), None)
     last, sent, seen, conf = None, b"", b"", b""
@@ -78,24 +77,24 @@ def project(f, ctx):
     body = [None]                                            # my current opener, computed at most once
     def cur():
         if body[0] is None:
-            claims = [(role, lo, hi, v) for lo, hi, role, v in sorted_claims(by(ctx, SUM_ROLE))]
+            claims = [(name, lo, hi, v) for lo, hi, name, v in sorted_claims(by(ctx, SUM_NAME))]
             body[0] = encode(compare(cid, claims, floor)) if claims else b""
         return body[0]
     if by(ctx, b"confirmed") and sent:                       # the certificate: attests my last
         if cur() and H(cur()) == sent: conf = sent           # opener iff my split has not moved
     if last is None:                                         # first clock sight anchors the boundary
-        return Out(offers=(Atom(OFFER, *WAKE, Exact(_T8(now + period))), tick(now, b"", b"", b"")))
+        return Out(provides=(Atom(PROVIDE, *WAKE, Exact(_T8(now + period))), tick(now, b"", b"", b"")))
     if now < last + period:                                  # not due: hold the alarm, CARRY the tick
-        return Out(offers=(Atom(OFFER, *WAKE, Exact(_T8(last + period))), tick(last, sent, seen, conf)))
-    offers = []
+        return Out(provides=(Atom(PROVIDE, *WAKE, Exact(_T8(last + period))), tick(last, sent, seen, conf)))
+    provides = []
     if cur():                                                # due: open a round toward the peer
         h = H(cur())
         if mode != GATED or (seen in (b"", h) and h != sent):
-            offers.append(Atom(OFFER, b"send", b"outbox", Exact(cid), cur()))
+            provides.append(Atom(PROVIDE, b"send", b"outbox", Exact(cid), cur()))
             if h != sent: sent, conf = h, b""                # a new opener: the old certificate dies
         seen = h
-    offers += [Atom(OFFER, *WAKE, Exact(_T8(now + period))), tick(now, sent, seen, conf)]
-    return Out(offers=tuple(offers))
+    provides += [Atom(PROVIDE, *WAKE, Exact(_T8(now + period))), tick(now, sent, seen, conf)]
+    return Out(provides=tuple(provides))
 
 # COMMANDS — arm the tier pair; idempotent (content-addressed, no arm-time field).
 TIERS = ((b"", 500, GATED), (b"", ANCHOR_W, ANCHOR))         # (floor, period_ms, mode)
@@ -106,11 +105,11 @@ def arm(node, cid, tiers=TIERS):
 # QUERIES — the certificate, read back: synced iff some tier's confirmed opener hash
 # still matches the opener my CURRENT split would produce.
 def synced(node, cid, floor=b""):
-    rows = summary(node, summary_need(floor or b"", HI, floor))
-    claims = [(role, lo, hi, v) for lo, hi, role, v in sorted_claims(rows)]
+    rows = summary(node, summary_gather(floor or b"", HI, floor))
+    claims = [(name, lo, hi, v) for lo, hi, name, v in sorted_claims(rows)]
     if not claims: return False
     h = H(encode(compare(cid, claims, floor)))
-    for _, _, a in node.watched(b"tick", SC):
+    for _, _, a in node.provided(b"tick", SC):
         if a.target[0].startswith(cid + floor):
             parts = unframe(a.value)
             if len(parts) == 4 and parts[3] and parts[3] == h: return True

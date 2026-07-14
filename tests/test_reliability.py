@@ -100,7 +100,7 @@ class World:
                         self.delivered[self._kind(blob)] += 1
             return k
         # pump after EVERY turn, as tinyd does: a cadence due-fire is a transient
-        # offer the next clock presentation erases, so a drain-then-pump harness
+        # Provide the next clock presentation erases, so a drain-then-pump harness
         # silently drops any opener fired before the drain's last turn.
         cycle(n, inbox, self.t, tuple(self.fired[me]), 4096)
         while True:

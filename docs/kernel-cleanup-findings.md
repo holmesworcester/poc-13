@@ -1,5 +1,20 @@
 # Kernel cleanup findings
 
+> **Historical dialect:** the findings and snippets below describe the v1
+> Need/Offer model as it existed during this audit. The subsequent v2 atom
+> simplification replaced `(kind, effect, role, ...)` with the closed
+> `(relationship, name, ...)` sum `Provide | Gather | Require | SuppressIf`.
+> See [`../DESIGN.md`](../DESIGN.md) for the current design.
+
+## Relationship follow-up (2026-07-14)
+
+The four relationships now share one `Atom` shape. Gather, Require, and
+SuppressIf use the same exhaustive resident-and-store match acquisition;
+settlement alone differs. The wire header is now `(relationship, target-tag)`,
+the SQLite relation stores `relationship` and `name`, and the fact identity
+domain is `tinyp2p.fact.v2`. V1 atom databases fail closed rather than being
+silently reinterpreted.
+
 ## Applied (2026-07-05)
 
 Landed as four commits after this survey (kernel.py 525 → 506 lines; two whole

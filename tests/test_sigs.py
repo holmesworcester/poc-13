@@ -72,39 +72,39 @@ def _member(node, name, t):                          # drain the rooting chain; 
 
 def test_tampered_signature_is_inert_at_gate():
     n = Node(ROOT); _, uid, s = _member(n, b"al", 4)
-    atoms = [a if a.role != b"sig" else                   # corrupt the signature value itself,
-             Atom(a.kind, a.role, a.scope, a.target,       # not a byte at some position in the encoding
-                  a.value[:-1] + bytes([a.value[-1] ^ 1]), a.effect)
+    atoms = [a if a.name != b"sig" else                   # corrupt the signature value itself,
+             Atom(a.relationship, a.name, a.scope, a.target,       # not a byte at some position in the encoding
+                  a.value[:-1] + bytes([a.value[-1] ^ 1]))
              for a in s.atoms]
     assert Node(ROOT).admit(encode(fact(s.type_tag, *atoms))) is None   # bad signature -> inert miss
     assert n.admit(encode(s)) is not None             # the honest one admits
 
 def test_malformed_signature_never_crashes_the_gate():
-    from kernel import Atom, OFFER, SELF
+    from kernel import Atom, PROVIDE, SELF
     # A signature fact whose sig atom targets SELF (no concrete id): the check
     # must return falsy, not raise reading a target it cannot use.
     junk = fact(b"auth.signature", ts_atom(3, WID),
-                Atom(OFFER, b"pk", WID, SELF, PK),
-                Atom(OFFER, b"sig", WID, SELF, e.ed25519_sign(SK, b"whatever")))
+                Atom(PROVIDE, b"pk", WID, SELF, PK),
+                Atom(PROVIDE, b"sig", WID, SELF, e.ed25519_sign(SK, b"whatever")))
     assert Node(ROOT).admit(encode(junk)) is None
 
 def test_signature_fact_cannot_smuggle_pk_for_another_target():
-    from kernel import Exact, OFFER
-    # A pk offer is an authority claim. One fact, one verified claim: a second
+    from kernel import Exact, PROVIDE
+    # A pk Provide is an authority claim. One fact, one verified claim: a second
     # pk atom at a foreign id must not ride the honest pair past the one check.
     ask, apk = e.ed25519_keygen(b"a" * 32)
     _, vpk = e.ed25519_keygen(b"v" * 32)
     x, y = b"x" * 32, b"y" * 32
     smuggled = fact(b"auth.signature", ts_atom(3, WID),
-                    Atom(OFFER, b"pk", WID, Exact(x), vpk),      # the victim's key at a foreign id
-                    Atom(OFFER, b"pk", WID, Exact(y), apk),
-                    Atom(OFFER, b"sig", WID, Exact(y), e.ed25519_sign(ask, y)))
+                    Atom(PROVIDE, b"pk", WID, Exact(x), vpk),      # the victim's key at a foreign id
+                    Atom(PROVIDE, b"pk", WID, Exact(y), apk),
+                    Atom(PROVIDE, b"sig", WID, Exact(y), e.ed25519_sign(ask, y)))
     assert Node(ROOT).admit(encode(smuggled)) is None            # gate: inert miss
 
     n = Node(ROOT)                                     # checked replay skips the gate:
     sid = n.admit(encode(smuggled), checked=True); n.run()       # the projector must also hold
     assert n.memo[sid] == "Invalid"
-    assert not n.watched(b"pk", WID)
+    assert not n.provided(b"pk", WID)
 
 def test_tag_alias_is_not_a_signature():
     # Canonical form includes the type tag: the same honest atoms under a longer

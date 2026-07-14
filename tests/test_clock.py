@@ -1,22 +1,22 @@
 """Clock tests: time is not a fact family — the host hands `now` to the turn
-(`turn(now)`), which presents it as one transient offer at the NOW key. A
-time-waiting fact carries a Watch need over [deadline, ∞); it wakes exactly when
+(`turn(now)`), which presents it as one transient Provide at the NOW key. A
+time-waiting fact carries a Gather over [deadline, ∞); it wakes exactly when
 now reaches its deadline, nothing accumulates, and durable state never depends
 on now (replay with any now rebuilds it identically)."""
 import os, sys, types
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from kernel import (Atom, NEED, Node, OFFER, Out, Router, SELF, WATCH, encode,
-                    fact, now_need, now_of)
+from kernel import (Atom, Node, PROVIDE, Out, Router, SELF, GATHER, encode,
+                    fact, now_gather, now_of)
 
-# A toy family: Watches now over [deadline, ∞), offers `fired` = the now it saw
+# A toy family: Gathers now over [deadline, ∞), Provides `fired` = the now it saw
 # once the deadline passes. The observable is whether/when it fired.
 def _toy_family():
     def project(f, ctx):
         n = now_of(ctx)
-        deadline = int.from_bytes(next(a.value for a in f.atoms if a.role == b"d"), "big")
-        if n is None or n < deadline: return Out(offers=())      # not due yet
-        return Out(offers=(Atom(OFFER, b"fired", b"toy", SELF, n.to_bytes(8, "big")),))
+        deadline = int.from_bytes(next(a.value for a in f.atoms if a.name == b"d"), "big")
+        if n is None or n < deadline: return Out(provides=())      # not due yet
+        return Out(provides=(Atom(PROVIDE, b"fired", b"toy", SELF, n.to_bytes(8, "big")),))
     return types.SimpleNamespace(extract=lambda f: False, project=project)
 
 def _node():
@@ -24,11 +24,11 @@ def _node():
 
 def _toy(deadline_ms):                    # a fact waiting until deadline_ms
     from kernel import Exact
-    return fact(b"toy.t", Atom(OFFER, b"d", b"toy", SELF, deadline_ms.to_bytes(8, "big")),
-                now_need(deadline_ms))
+    return fact(b"toy.t", Atom(PROVIDE, b"d", b"toy", SELF, deadline_ms.to_bytes(8, "big")),
+                now_gather(deadline_ms))
 
 def _fired(n, tid):
-    return next((int.from_bytes(a.value, "big") for o, _, a in n.watched(b"fired", b"toy")
+    return next((int.from_bytes(a.value, "big") for o, _, a in n.provided(b"fired", b"toy")
                  if o == tid), None)
 
 def test_wakes_when_now_reaches_deadline():
@@ -45,7 +45,7 @@ def test_now_does_not_accumulate():
     for t in range(100, 100000, 100): n.turn(now=t)       # many turns, advancing now
     # one clean-twin slot for NOW, no facts admitted for time
     assert len(n.facts) == 1                               # only the toy fact
-    assert len(n.clean.get((b"now", b"clock"), [])) == 1  # exactly one now-offer
+    assert len(n.clean.get((b"now", b"clock"), [])) == 1  # exactly one now-Provide
 
 def test_replay_is_now_independent():
     # A durable fact must not depend on now: a time-waiting toy is volatile, so

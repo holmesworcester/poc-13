@@ -6,7 +6,7 @@ sealed connection response is sealed back to, so it must never leave the node.
 keygen admits one and refuses a second: the endpoint is single and stable.
 The Ed25519 signing pair stays in auth.local_signer_secret; auth.endpoint_shared
 binds the two publicly for the workspace."""
-from kernel import Atom, Exact, OFFER, Out, encode, fact, now, ts_atom
+from kernel import Atom, Exact, PROVIDE, Out, encode, fact, now, ts_atom
 from crypto import x25519_keygen, x25519_pk
 from facts.store import hydrate
 
@@ -15,21 +15,21 @@ TAG = b"auth.endpoint"
 # SHAPE — the canonical atom set; the only place atoms are chosen.
 def endpoint(esk, epk, t):
     return fact(TAG, ts_atom(t, b"local"),
-                Atom(OFFER, b"esk", b"local", Exact(epk), esk),   # keyed by its own pub
-                Atom(OFFER, b"endpoint", b"local", Exact(epk)))   # presence: "epk is me"
+                Atom(PROVIDE, b"esk", b"local", Exact(epk), esk),   # keyed by its own pub
+                Atom(PROVIDE, b"endpoint", b"local", Exact(epk)))   # presence: "epk is me"
 
 # EXTRACT — content-pure durability. The projector emits no sync marker.
 def extract(f): return True
 
 # CHECK — self-verification at the gate: the secret must derive the pub it names.
 def check(f):
-    v = {a.role: (a.target, a.value) for a in f.atoms}
+    v = {a.name: (a.target, a.value) for a in f.atoms}
     (tgt, esk) = v.get(b"esk", (None, None))
     return bool(esk) and tgt == Exact(x25519_pk(esk))
 
 # PROJECT — the only place this family's meaning lives.
 def project(f, ctx):
-    return Out(offers=tuple(a for a in f.atoms if a.role in (b"esk", b"endpoint")))
+    return Out(provides=tuple(a for a in f.atoms if a.name in (b"esk", b"endpoint")))
 
 # COMMANDS — build a fact, admit it, stop.
 def keygen(node, t):
@@ -40,10 +40,10 @@ def keygen(node, t):
 # QUERIES — observations over validated state only.
 def current(node):                           # (esk, epk) | None
     hydrate.demand(node, b"endpoint", b"local")
-    epk = next((a.target[1] for _, _, a in node.watched(b"endpoint", b"local")), None)
+    epk = next((a.target[1] for _, _, a in node.provided(b"endpoint", b"local")), None)
     if not epk: return None
     hydrate.demand(node, b"esk", b"local")
-    esk = next((a.value for _, _, a in node.watched(b"esk", b"local") if a.target[1] == epk), None)
+    esk = next((a.value for _, _, a in node.provided(b"esk", b"local") if a.target[1] == epk), None)
     return (esk, epk) if esk else None
 
 # CLI — string boundary over COMMANDS/QUERIES.

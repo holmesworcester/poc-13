@@ -2,7 +2,7 @@
 tiny volatile families — compare (one-range fingerprint descent), have (advertise
 a held id), need (pull one id) — reconciled over a manual daemon loop that mirrors
 bin/tinyd.py's cycle (admit inbox + present shipped) and pump (deliver send/ship
-offers, fire owners). No round state: convergence is fingerprint agreement,
+provides, fire owners). No round state: convergence is fingerprint agreement,
 re-checked on leaf change. Mirrors the poc-12 quantifiers — shuffled admission
 orders converge to bit-identical derived state; a one-fact diff ships exactly that
 fact's closure; a below-window dependency rides in as a closure id, pulled by id.
@@ -15,7 +15,7 @@ import crypto as _c
 from kernel import Node, decode, encode, fact_id, unframe
 from facts import ROOT
 from facts.sync import compare as cmp, index as sidx, need as _need
-from facts.sync.index import summary_need
+from facts.sync.index import summary_gather
 from facts.sync.compare import HI
 from facts.auth.workspace import workspace
 from facts.auth.invite_accepted import invite_accepted
@@ -46,7 +46,7 @@ def node(*facts):
 def reconcile(a, b, maxr=6000, lo=0):
     """Drive two nodes to convergence over the decomposed wire. Each side opens a
     bare-root compare when its leaf set changes (the daemon's leaf_ver guard),
-    every send/ship offer is delivered to the peer and its owner fired, and fired
+    every send/ship Provide is delivered to the peer and its owner fired, and fired
     owners are presented as `shipped` next cycle so the volatile couriers reap.
     Returns the count of wire frames (compares + haves + needs) that crossed."""
     floor = b"" if lo <= 0 else lo.to_bytes(8, "big") + b"\x00" * 32
@@ -60,10 +60,10 @@ def reconcile(a, b, maxr=6000, lo=0):
         me.run()
         if sidx.ver(me) != ver[me]:                             # leaf set moved: open a fresh round
             cmp.open_round(me, CID, floor); ver[me] = sidx.ver(me); me.run()
-        did = False                                             # pump: deliver offers, fire owners
-        for role in (b"send", b"ship"):
-            for o, _, at in me.watched(role, b"outbox"):
-                if role == b"send": inbox[other].append(at.value); frames[0] += 1
+        did = False                                             # pump: deliver provides, fire owners
+        for name in (b"send", b"ship"):
+            for o, _, at in me.provided(name, b"outbox"):
+                if name == b"send": inbox[other].append(at.value); frames[0] += 1
                 else: inbox[other] += [me.durable[x] for x in unframe(at.value) if x in me.durable]
                 if o not in fired[me]: fired[me].append(o)
                 did = True
@@ -79,8 +79,8 @@ def msg(body, t): return signed_message(MEMBER, WID, CH_ID, body, t)  # a (messa
 
 def cidsunframe(n, lo, hi, floor):      # the fact ids a summary advertises as cids over [lo,hi) at this floor
     out = set()
-    for _, _, a in sidx.summary(n, summary_need(lo, hi, floor)):
-        if a.role != b"cids": continue
+    for _, _, a in sidx.summary(n, summary_gather(lo, hi, floor)):
+        if a.name != b"cids": continue
         out.update(unframe(a.value))
     return out
 

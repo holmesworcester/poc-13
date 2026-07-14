@@ -6,7 +6,7 @@ repository. Ground truth is the running code in `kernel.py`, `facts/`, and
 
 TinyP2P is a compact protocol runtime for local-first collaboration. Facts are
 the units of identity and wire transfer, atoms are the units of durable storage
-and matching, and the needs/offers language is the fact language. Commands,
+and matching, and the four atom relationships are the fact language. Commands,
 queries, authority, content, connections, hydration, and synchronization all
 use that same model.
 
@@ -28,7 +28,7 @@ design.
 - A fact is a canonical atom set plus a type tag. `FactId` names that
   complete canonical object; an atom alone has no identity.
 - Atoms are asserted until their owner fact validates. Asserted atoms are
-  dirty discovery data; only validated offers justify projection state,
+  dirty discovery data; only validated Provides justify projection state,
   effects, or another fact's validity.
 - The runtime has one durable authority: the persisted atom relation (one
   row per atom of every durable fact; canonical bytes are derived, never
@@ -36,25 +36,27 @@ design.
   clean twin, the frontier, and family-owned indexes — is derived and rebuilt
   on demand.
 - Matching looks to the persisted relation: when a resident fact steps,
-  each of its need keys is checked once against the store and the cold
-  owners fault in through ordinary admission — needs fault, offers never
-  wake cold facts. Boot is the degenerate demand: one total hydrate fact.
-- The store answers existence, never standing: it can say who offers at a
+  each Gather, Require, and SuppressIf key is checked once against the store
+  and cold providers fault in through ordinary admission. Provides never wake
+  cold facts. Boot is the degenerate demand: one total hydrate fact.
+- The store answers existence, never standing: it can say who Provides at a
   key and hand back reconstructed bytes; verdicts are computed only in the
   engine over the resident set. A family CHECK result, notably Ed25519
   verification, is certified by first admission and stored existence. A local
   fault still strict-decodes and re-hashes reconstructed rows before skipping
   that already-completed CHECK.
-- Needs have three effects: `require` gates validity, `watch` only
-  wakes/reprojects, and `suppress` terminally evicts the owner when a valid
-  suppressor exists. Precedence: Suppress > Require(Park) > Resolve.
+- Atoms have exactly four relationships. `Provide` publishes candidates;
+  `Gather` collects zero or more matches; `Require` parks on zero matches; and
+  `SuppressIf` terminally evicts on any match. All three consumer
+  relationships acquire matches identically. Precedence: SuppressIf >
+  Require(Park) > Project.
 - Admission is idempotent and content-addressed; wrong bytes are a miss,
   never a wrong fact.
 - Queues, effects, sync, connections, content, and retention policy are fact
   families, not engine primitives. Time and wire-flush reports are transient
   host inputs to the turn. The kernel owns identity, admission, matching, and
   the turn loop.
-- Generic projected-offer `observe()` and reserved-role `answer()` registries
+- Generic projected-Provide `observe()` and reserved-name `answer()` registries
   let a family maintain and query a rebuildable index without teaching the
   kernel its semantics. Sync uses them to own its treap in its own register.
 - Projectors ARE the routers: the kernel runs one root projector, and a
@@ -63,7 +65,7 @@ design.
   EXTRACT, PROJECT, COMMANDS, QUERIES, CLI.
 - Replicated application content is signed: a message, reaction, deletion, or
   retention policy is authorized by a separate canonical signature fact and
-  by the authority offers its projector requires.
+  by the authority Provides its projector requires.
 
 # Part I — The Kernel
 
@@ -72,15 +74,17 @@ design.
 ### Atom
 
 ```text
-Atom { kind: Need|Offer, effect: None|Require|Watch|Suppress,
-       role, scope, target: Exact(bytes)|SELF|Range{lo,hi}, value? }
+Atom { relationship: Provide|Gather|Require|SuppressIf,
+       name, scope, target: Exact(bytes)|SELF|Range{lo,hi}, value? }
        # wire grammar; in memory a target is a span (lo, hi) — a point is
        # lo == hi — and SELF until materialization rewrites it to the owner
 ```
 
-`effect` is meaningful only on needs and must be `None` on offers. `role`,
+`relationship` is one closed sum, not a kind combined with an effect. `name`,
 `scope`, and `target` form the match address; `value` is not read by core
-matching. Values are small; large payloads are content facts.
+matching. Ordinary consumer relationships are value-free; reserved Gathers
+may carry query parameters for an engine or family answerer. Values are small;
+large payloads are content facts.
 
 `SELF` means "this fact's eventual `FactId`" and is legal only in the canonical
 fact form, whose encoding retains `SELF` so identity never contains its own
@@ -105,7 +109,7 @@ atoms, ordered byte-lexicographically on the canonical atom encoding.
 LE length). Each atom contributes its own framed canonical byte form.
 
 ```text
-FactId = H("tinyp2p.fact.v1" ‖ type_tag ‖ atoms)
+FactId = H("tinyp2p.fact.v2" ‖ type_tag ‖ atoms)
 ```
 
 `H` is BLAKE3-256 (32 bytes, via the `blake3` package). The encoding is one fixed
@@ -119,7 +123,7 @@ must name already-existing facts, so the hash-reference graph is acyclic by
 construction.
 
 Every durable fact whose projector can emit a sync-leaf marker carries one canonical timestamp atom
-`Offer(role="ts", scope=family_scope, target=SELF, value=u64le)` — the
+`Provide(name="ts", scope=family_scope, target=SELF, value=u64le)` — the
 reconciliation sort key and a retention input, never an authority proof.
 A fact without one promotes rows at `ts = 0`.
 
@@ -129,11 +133,11 @@ Extraction is the content-pure durability decision from the fact's own bytes,
 made at admission before validation and routed through the same router tree as
 projection. Durable facts flush before they can be forgotten; volatile facts
 vanish on restart. Unknown tags default to Durable + Parked and project no
-offers.
+Provides.
 
 Replication is not extraction policy. A Valid projector includes the derived
-`leaf@sync/SELF` offer returned by `sync_leaf()` when its owner may enter sync
-egress. The sync family observes only that validated clean offer. The daemon
+`leaf@sync/SELF` Provide returned by `sync_leaf()` when its owner may enter sync
+egress. The sync family observes only that validated clean Provide. The daemon
 does not yet apply a separate family-level permission to peer ingress, so
 connected peers are currently trusted not to send node-private families.
 Enforcing that provenance rule at the wire inbox remains trust-boundary work.
@@ -142,7 +146,7 @@ Enforcing that provenance rule at the wire inbox remains trust-boundary work.
 
 Durable: the persisted atom relation — SQLite `atoms`, one row per atom of
 every durable fact, beside a two-column `facts(fid, tag)` spine. Each atom row
-stores kind, effect, role, scope, value, and the materialized target as
+stores relationship, name, scope, value, and the materialized target as
 `(exact, lo, hi)` with `SELF` rewritten to the owner id. There is no bytes
 column: a read regroups a fid's rows, restores canonical `SELF`, rebuilds,
 re-encodes, and re-hashes. Rows that do not add up to their fid are a miss,
@@ -151,23 +155,28 @@ existence the persisted certificate: intrinsic checks ran once at first
 admission, and the re-hash transfers them, so a faulted fact re-enters checked
 and a boot re-verifies no signatures.
 
+The relationship grammar is protocol v2. Its two-byte atom header and
+`(relationship, name, ...)` store relation are intentionally incompatible with
+v1; opening a v1 atom table fails closed and requires a fresh database rather
+than guessing at an identity-changing migration.
+
 Ephemeral, all rebuilt from demand and promotion:
 
 - resident `Fact` objects and canonical bytes for resident durable facts;
 - the asserted match buckets, populated immediately with every resident
   fact's materialized atoms;
 - the validity memo (`Unknown|Parked|Valid|Invalid|Suppressed`) and the
-  validated offer set (the clean twin, stamped `(owner, ts, atom)` with
+  validated Provide set (the clean twin, stamped `(owner, ts, atom)` with
   engine-owned provenance);
 - owner-to-clean-row bookkeeping, checked store keys, and the bounded FIFO
   frontier with its membership set; and
 - `Node.regs`, one rebuildable register per family group. A registered
-  `observe()` function folds validated offer deltas into a register, and a
-  registered `answer()` function can expose its index through a reserved Watch
-  need. Sync's `b"sync"` register holds its treap, leaf membership, summary
+  `observe()` function folds validated Provide deltas into a register, and a
+  registered `answer()` function can expose its index through a reserved
+  Gather. Sync's `b"sync"` register holds its treap, leaf membership, summary
   memo, and monotonic version counter.
 
-Validated offers are the application read model. Registers are derived family
+Validated Provides are the application read model. Registers are derived family
 indexes, not a second authority surface, and are never persisted.
 
 The crash story is one fact: derived state is a pure, order-independent
@@ -191,11 +200,11 @@ the three-phase host turn in a single-threaded select loop — client verbs
 over a unix socket at `<db>.sock`, peers over TCP. Its reusable core is
 `bin/runtime.py`, a socket-free seam: `cycle` admits an inbox of fact bytes
 and drains one bounded turn presenting the wire's flush reports; `pump`
-groups the validated `send`/`ship` offers by owner, resolves each route and
+groups the validated `send`/`ship` Provides by owner, resolves each route and
 its ship-ids, and hands the frames to a `deliver` callback. The wire's only
 payload is length-framed canonical fact bytes under a one-byte discriminator:
 a bare handshake fact before a session key exists, a sealed `connection.frame`
-after. There is **one out door** — the daemon reads validated outbox offers and
+after. There is **one out door** — the daemon reads validated outbox Provides and
 `deliver` seals iff the route yields a session secret, else sends bare — so
 handshake responses and sync frames leave through the same mechanism. The
 outbound path tolerates loss until the receiver admits: a frame is handed
@@ -220,85 +229,89 @@ new durable facts as one SQLite transaction containing the `facts` spine row
 and all atom rows. Failed gates are inert.
 
 **Engine drain.** Drain the frontier to a bound (overflow parks, never
-drops). For each owner: first, if a store is attached, the fault leg checks each
-of its need keys once against the persisted relation and admits the cold
-owners (checked admission — the bytes passed the gate once); then check
-suppressors, then requires, against the clean twin; build `Context<Validated>` from matching validated offers; call the
-routed projector `project(fact, ctx) -> Out(verdict, offers)`. Promotion records
-the verdict and replaces the owner's clean output atomically, so old and new
-offers are never both visible. The kernel restamps promoted offers with engine
-provenance, notifies registered observers of changed offer addresses, and wakes
-every resident owner whose asserted needs match a changed offer. `Reap` and
+drops). For each owner, the fault leg first checks every Gather, Require, and
+SuppressIf key once against the persisted relation and admits all cold
+providers (checked admission — the bytes passed the gate once). The engine then
+answers all three consumer relationships through that same match path. Any
+nonempty SuppressIf suppresses; otherwise any empty Require parks; otherwise
+the engine builds `Context<Validated>` from Gather and Require matches and calls
+the routed projector `project(fact, ctx) -> Out(verdict, provides)`. Promotion
+records the verdict and replaces the owner's clean output atomically, so old
+and new Provides are never both visible. The kernel restamps projected
+Provides with engine provenance, notifies registered observers of changed
+Provide addresses, and wakes every resident owner whose asserted consumer
+relationships match a changed Provide. `Reap` and
 `Suppressed` are terminal: after clean replacement and observer notification,
 the engine removes the resident body, asserted rows, memo, durable bytes, and
 SQLite rows.
 
-**Host out.** The host drains validated offers at keys it watches, performs
+**Host out.** The host drains validated Provides at keys it Gathers, performs
 external work, and admits facts reporting what happened. Host code never
 mutates validated state.
 
-## Need Effects
+## Relationships
 
-**Require** — positive dependency. No valid matching offer: the owner is
-Parked (keeps asserted atoms, wakes later, promotes nothing). **Watch** —
-non-blocking subscription: never gates validity, only reprojects when
-matching valid offers appear or change; queues and recurring work live
-here. **Suppress** — negative dependency: a valid matching offer flips the
-owner to Suppressed, its output is removed by owner-scoped replacement, and
-the verdict is terminal: the kernel purges the fact whole — resident body,
-asserted rows, durable bytes on disk. Deletion is immediate and real. What
-suppression keeps is the RELATIONSHIP, never the husk: the suppressor and
-the death key it matches are durable facts, so a purged fact that re-arrives
-(a laggard peer re-ships it) re-derives Suppressed and dies on arrival.
+**Provide** publishes a candidate at `(name, scope, target)`. It becomes part
+of validated state only when its owner projects it. **Gather** is a
+non-blocking subscription: its complete match set, including the empty set, is
+passed to the projector and changes wake it. **Require** uses the same match
+set, but an empty set Parks the owner before projection. **SuppressIf** also
+uses the same match set, but a nonempty set flips the owner to Suppressed before
+projection. Suppression withdraws the owner's output and terminally purges its
+resident body, asserted rows, and durable bytes. Deletion is immediate and
+real. What suppression keeps is the relationship, never the husk: the
+suppressor and death key it matches are durable facts, so a purged fact that
+re-arrives re-derives Suppressed and dies on arrival.
 
-Precedence: Suppress > Require(Park) > Resolve.
+Precedence: SuppressIf > Require(Park) > Project. Gather never gates.
 
 Stratification is a family obligation: `Require` edges are positive,
-`Suppress` edges negative, `Watch` edges don't participate; a fact may not
+`SuppressIf` edges negative, and `Gather` edges don't participate; a fact may not
 depend on its own validity through any path containing a negative edge. A
 family that could create such a cycle must reject the shape or define a
 local total-order break.
 
 Suppression closure is family discipline too: every fact that must die with
-a target carries the target's death keys directly (as `Suppress` needs).
+a target carries the target's death keys directly (as `SuppressIf`
+relationships).
 There is no implicit cluster deletion or consumer demotion cascade. A related
 fact without that death key — including a detached signature — remains unless
-its own needs park, suppress, or reap it. Connection teardown copies the close
+its own relationships park, suppress, or reap it. Connection teardown copies the close
 keys into every secret/session fact that must be physically removed; content
 families copy a message death key into dependents that must die with it.
 
 ## Matching
 
 ```text
-need.role == offer.role  ∧  need.scope == offer.scope
-∧  target_covers(offer.target, need.target)
+consumer.name == provide.name  ∧  consumer.scope == provide.scope
+∧  target_covers(provide.target, consumer.target)
 ```
 
-`target_covers` is exact equality, a range offer covering an exact need
-key byte-lexicographically (inclusive), or symmetrically a range need
-covering an exact offer key — bulk demand is ordinary matching. Range never
+`target_covers` is exact equality, a range Provide covering an exact consumer
+key byte-lexicographically (inclusive), or symmetrically a range consumer
+covering an exact Provide key — bulk demand is ordinary matching. Range never
 matches range, and `SELF` never matches. Admission materializes every resident
 atom before it can be matched. The asserted index is bidirectional
-(need→offer for dependencies, offer→need for wakes), while the clean twin is
+(consumer→Provide for dependencies, Provide→consumer for wakes), while the clean twin is
 the only validity justifier. Both use the same bucket shape: exact targets are
 indexed by point and spans are kept separately, so an exact lookup reaches its
-point bucket plus covering spans without counting or scanning every same-role
+point bucket plus covering spans without counting or scanning every same-name
 point.
 
 ## Hydration
 
-One rule: **when a resident fact steps, each of its need keys is checked
-once against the persisted relation, and every cold owner offering at that
-key is admitted** (the fault leg). Faulted facts land on the frontier; when
-they step, their needs fault in turn — the step loop is the spider, and
-residency grows to the demand fixpoint. All three effects fault alike:
-`Require` finds its dependency, `Suppress` finds its tombstone (absence is
-only ever trusted after the key is checked — a cold suppressor bites on its
-target's own step, never waiting for the right demand), `Watch` finds its
-subjects. Verdicts are exact at quiescence; a fact may transiently judge
+One rule: **when a resident fact steps, each of its Gather, Require, and
+SuppressIf keys is checked once against the persisted relation, and every cold
+owner Providing at that key is admitted** (the fault leg). Faulted facts land
+on the frontier; when they step, their consumer relationships fault in turn —
+the step loop is the spider, and residency grows to the demand fixpoint. All
+three relationships fault alike: `Require` finds its dependency, `SuppressIf`
+finds its tombstone (absence is only trusted after the key is checked — a cold
+suppressor bites on its target's own step), and `Gather` finds its subjects.
+Verdicts are exact at quiescence; a fact may transiently judge
 before its faults land and is re-woken by normal fanout, exactly as a
-late-arriving wire fact re-judges it. Demand flows backward through needs
-only: offers never wake cold facts (a fact that wants waking while cold is
+late-arriving wire fact re-judges it. Demand flows backward through consumer
+relationships only: Provides never wake cold facts (a fact that wants waking while cold is
 standing demand — a pin, a later wave).
 
 The per-key check is memoized (`Node.checked`), and the memo never goes
@@ -313,7 +326,7 @@ is `Node.refault()` — forget the memos, re-step every resident fact.
 The store is outside the trust boundary — every faulted fact re-enters
 through admission, its bytes re-derived from rows and re-hashed against the
 fid it claims, so a wrong or corrupt row is a miss, never a wrong fact.
-Matching-side it is two indexed SELECTs: `owners(need)` (whose WHERE clause
+Matching-side it is two indexed SELECTs: `providers(consumer)` (whose WHERE clause
 is the atom coverage relation, property-pinned to kernel `covers`) and
 `fact_bytes(fid)`. A demand is one key and drains all stored owners matching
 that key; bounded working sets come from choosing bounded keys rather than from
@@ -328,34 +341,34 @@ routes through the same tree, and so does the dotted api/CLI namespace
 `content.message` tag).
 Routers narrow inputs and cannot widen a delegate's context; delegation
 must equal the delegate run alone. Unknown tags fall out as Durable + Parked
-with no projected offers and no special casing.
+with no projected Provides and no special casing.
 
 ## The Clock and the Flush Report
 
 Time is not a fact family: it is the one input the host reads from the OS and
 hands to the turn. `kernel.turn(now)` presents `now` as a single transient
-offer at the NOW key; a time-waiting fact carries a Watch need over
-[deadline, ∞) (`now_need`), and when now reaches its deadline the offer falls
+Provide at the NOW key; a time-waiting fact carries a Gather over
+[deadline, ∞) (`now_gather`), and when now reaches its deadline the Provide falls
 in range and wakes it. There are no tick facts, so nothing accumulates;
-matching stays ordinary (a plain Range need over a plain offer); and durable
+matching stays ordinary (a plain Range Gather over a plain Provide); and durable
 derived state never depends on `now`, so a reboot at any `now` rebuilds it
 identically. The daemon reads the clock each loop and passes it to the turn;
 a `wake@clock` alarm — a cadence fact's next boundary — sets its `select`
 timeout via `runtime.next_wake`, so it sleeps exactly until the earliest
-deadline and services a due time-need on that wake.
+deadline and services a due time relationship on that wake.
 
 The flush report is the clock's sibling — the other host signal handed to the
 turn. Just as the host hands in `now`, it hands back the ids of the
-host-watched offers it flushed to the socket: `kernel.turn(now, shipped)`
-presents each as a transient offer at the SHIPPED key, waking any sender that
-Watches `shipped@SELF`. A one-shot sender (an `outbox.send`, a `sync.need`)
+host-Gathered Provides it flushed to the socket: `kernel.turn(now, shipped)`
+presents each as a transient Provide at the SHIPPED key, waking any sender that
+Gathers `shipped@SELF`. A one-shot sender (an `outbox.send`, a `sync.need`)
 answers by returning the terminal **Reap** verdict, on which the engine evicts
-the fact whole — offers, memo, and match rows — so a busy session leaves no
+the fact whole — Provides, memo, and match rows — so a busy session leaves no
 drained-send residue. Reap and Suppressed are both terminal evictions; they
 differ in cause and guard. Reap is family-chosen with no durable cause, so it
-is safe only leafward — nothing may gate on the reaped offers, an invariant
+is safe only leafward — nothing may gate on the reaped Provides, an invariant
 the engine asserts before evicting. Suppression is kernel-derived from a
-durable edge, so it is deliberately unguarded: withdrawing offers others gate
+durable edge, so it is deliberately unguarded: withdrawing Provides others gate
 on is the point (dependents park, or die by their own death key), and the
 verdict re-derives on any re-arrival because its cause outlives the fact. The daemon re-presents an
 unacked `shipped` until its sender acts (a bounded drain never drops the
@@ -407,14 +420,14 @@ order, enforced by a source-contract test:
 - **CHECK** — optional, self-verification at the admission gate; pure
   function of the fact's own bytes; runs once, never on replay.
 - **PROJECT** — the only place the family's meaning lives: validity and
-  promoted offers, including any derived sync marker. Pure function of
+  projected Provides, including any derived sync marker. Pure function of
   `(fact, ctx)`; never touches the node.
 - **COMMANDS** — local authoring: `(node, params) -> fact id`. Build a
   fact, admit it, stop. Commands may call queries to choose parameters and
   write only through admission. Anything multi-step or retryable is more
   facts (the outbox pattern), not a fancier command.
 - **QUERIES** — observations: `(node, params) -> data`, read only from
-  validated state (the clean twin, watched keys) — never asserted
+  validated state (the clean twin, Gathered keys) — never asserted
   rows, never authority for anything.
 - **CLI** — the string boundary: a `CLI = {verb: fn}` dict mapping names to
   thin wrappers over COMMANDS/QUERIES that coerce strings in and out.
@@ -425,7 +438,7 @@ and scope `__init__.py` files are router-only tables of contents.
 
 ## Signatures
 
-Signatures are detached facts (`auth.signature`): an ordinary fact offering
+Signatures are detached facts (`auth.signature`): an ordinary fact Providing
 `b"pk"` (the signer's public key) and `b"sig"` at a target fact's id, carrying a
 real Ed25519 signature. It self-checks at the admission gate over exactly the
 32-byte target id — the id IS the whole canonical fact, so signing the id
@@ -437,7 +450,7 @@ verified public-key claim. Extra atoms, foreign scopes, alternate tags, and
 additional public-key claims are therefore inert rather than riding beside an
 honest signature.
 
-A signed fact Requires the `b"pk"` offer at its own id, so it validates only
+A signed fact Requires the `b"pk"` Provide at its own id, so it validates only
 after its signature lands and the signer key is present in the projector's
 context. The signature proves that some key signed; the target projector binds
 that key to workspace authority by value comparison (see Authority).
@@ -456,7 +469,7 @@ value-compare, to one root — closing the gap where any key could mint a member
 The root public key is embedded in the workspace fact itself. Two things
 gate `auth.workspace`'s validity, so it is never self-trusting: a `pk`
 self-signature by that root key (you only found a workspace with the key you
-hold), and a LOCAL `workspace_accepted` offer from `auth.invite_accepted` — a
+hold), and a LOCAL `workspace_accepted` Provide from `auth.invite_accepted` — a
 workspace fact received over sync is inert until THIS node accepted an invite
 to it, or created it. That local acceptance is the trust anchor: a rival
 workspace fact can arrive over sync, but it validates on no node that wasn't
@@ -467,16 +480,16 @@ invite like any other member; there is no founder special-case in the DAG.
 
 The chain is one binding, applied per family: **the pk that signed a fact must
 equal a pk the authority chain blessed.** Each fact Requires its own `b"pk"`
-(who signed me) and Requires or Watches the offers that carry the blessed pk;
+(who signed me) and Requires or Gathers the Provides that carry the blessed pk;
 PROJECT intersects the two value sets and returns `Out("Invalid")` on no match —
 a real refusal, distinct from parking on a not-yet-arrived signature.
 
 - `auth.user_invite` blesses a fresh invite pk (`b"invite"` at its own id);
-  valid iff signed by the workspace root (`b"root"`, the workspace's own offer)
-  or an existing member key (`b"key"`, the rendezvous where every member offers
+  valid iff signed by the workspace root (`b"root"`, the workspace's own Provide)
+  or an existing member key (`b"key"`, the rendezvous where every member Provides
   its own key). The invite secret is the link, carried out-of-band; the inviter
   retains the bootstrap context as its own `invite_accepted`.
-- `auth.user` is membership: it offers the member's name and own pk, and is
+- `auth.user` is membership: it Provides the member's name and own pk, and is
   valid iff its signer equals the pk blessed by the one invite it names by id —
   a joiner signs the membership with the invite key from the link, and the
   invite vouches for the member key the fact carries. From then on the member
@@ -501,9 +514,9 @@ in the range's id list and pulled by id (see Sync).
 ## Demand: store.hydrate
 
 Hydration is just a fact. A demand is the `store.hydrate` family: a
-volatile fact with one value-free Watch need, authored by queries before
-they read — and the engine answers it exactly the way it answers every
-need, through the fault leg (Hydration, Part I): the family adds no
+volatile fact with one value-free Gather, authored by queries before they read
+— and the engine answers it exactly the way it answers every consumer
+relationship, through the fault leg (Hydration, Part I): the family adds no
 machinery, it only names a key. The total demand (the reserved `\x00all`
 key) is the whole boot story — and the daemon itself doesn't even author
 it: it boots cold, and `tiny <db> store.hydrate.pull` (one verb, one fact)
@@ -516,14 +529,14 @@ implemented family.
 Sync reconciles complete facts, never individual atoms, and its set and
 protocol live in `facts/sync/`. The kernel contributes two generic seams:
 
-- `observe(role, scope, fn)` passes `fn(node, before_rows, after_rows)` the
-  validated clean-offer delta at one address so a family can fold it into its
+- `observe(name, scope, fn)` passes `fn(node, before_rows, after_rows)` the
+  validated clean-Provide delta at one address so a family can fold it into its
   group register.
-- `answer(role, fn)` registers a handler for a reserved Watch role and injects
-  the handler's rows into projector context like ordinary validated offers.
+- `answer(name, fn)` registers a handler for a reserved Gather name and injects
+  the handler's rows into projector context like ordinary validated Provides.
 
 A replicating projector includes `facts.sync.index.sync_leaf()` in its Valid
-`Out.offers`. This creates the validated `leaf@sync/SELF` row whose engine-owned
+`Out.provides`. This creates the validated `leaf@sync/SELF` row whose engine-owned
 provenance names the fact and timestamp. The index observer folds marker deltas
 into the `b"sync"` register's treap, leaf-membership set, summary memo, and
 monotonic `ver` counter. A fact is a leaf exactly while it is durable and its
@@ -533,7 +546,7 @@ the same family code derive the same set.
 
 Suppression's clean replacement retracts the target marker before terminal
 eviction. Deletion travels because the deletion fact itself is durable, Valid,
-and projects a marker; wherever it validates, its `dead` offer purges matching
+and projects a marker; wherever it validates, its `dead` Provide purges matching
 targets. A laggard may re-send a purged target, but the durable suppressor makes
 that admission settle `Suppressed` and disappear again. Hydration rebuilds the
 register by stepping durable facts through the ordinary projection path, with
@@ -565,7 +578,7 @@ walks do not overflow the Python stack.
 **Bundled compare facts.** A `sync.compare` fact carries multiple claims:
 `fp` for a range fingerprint, `ids` for a small range's complete id list, or
 `done` for an agreed range. Each live claim carries a reserved
-`summary@range` Watch need. The sync index answers with its own fingerprint and
+`summary@range` Gather. The sync index answers with its own fingerprint and
 either its equal-count split or its id list. The projector prunes a matching
 fingerprint, descends a mismatch, re-advertises local extras, and accumulates
 all missing peer ids into one batched `sync.need`. Each compare is one fact, so
@@ -579,18 +592,18 @@ implemented.
 
 Dependency-awareness rides in id lists. For a windowed small range, the summary
 answerer expands its in-range leaves through `Node.closure()`, which computes
-Require and Suppress ancestry directly from resident asserted matches. It adds
+Require and SuppressIf ancestry directly from resident asserted matches. It adds
 marker-owning dependencies below the floor to the listed ids, deduplicated and
 capped at 4096. A peer requests only ids that the other side advertised. The
-resulting `sync.need` Watches `leaf@sync` at every requested id and its projector
-offers only matching marker owners to the outbox, so a forged by-id request
+resulting `sync.need` Gathers `leaf@sync` at every requested id and its projector
+Provides only matching marker owners to the outbox, so a forged by-id request
 cannot turn a durable marker-free fact into sync egress. Every received fact enters
 normal unchecked peer admission; the `checked=True` path is reserved for
 reconstruction from the node's own store.
 
 `compare` and `need` are volatile and project no marker, so they are absent
-from the set they reconcile and leave no reboot state. A `need` offers its
-marker-authorized requested ids by reference at the host-watched outbox key;
+from the set they reconcile and leave no reboot state. A `need` Provides its
+marker-authorized requested ids by reference at the host-Gathered outbox key;
 the pump resolves them against resident durable bytes at send time, and the
 need reaps after its wire-flush report. `resident@id` is answered by the kernel's durable map, while
 `summary@range` is answered by the sync family. Both appear in projector
@@ -606,10 +619,10 @@ an idempotent pair of volatile `sync.cadence` facts over the full domain:
   under loss, duplication, reordering, restart, or starvation of the gated
   optimization.
 
-Each tier Watches the clock, publishes its next `wake@clock` alarm, and stores
-`last boundary`, `sent`, `seen`, and `confirmed` hashes in a self-Watched tick
-offer keyed by `(connection, floor, period, mode)`. Every clock-handling branch
-re-emits that offer, so the register survives reprojection. `closed@conn`
+Each tier Gathers the clock, publishes its next `wake@clock` alarm, and stores
+`last boundary`, `sent`, `seen`, and `confirmed` hashes in a self-Gathered tick
+Provide keyed by `(connection, floor, period, mode)`. Every clock-handling branch
+re-emits that Provide, so the register survives reprojection. `closed@conn`
 suppresses and purges both tiers; reconnecting arms fresh volatile facts.
 
 When every claim in a compare matches, the responder sends an all-`done`
@@ -658,8 +671,8 @@ unless it re-derives them from the transcript. Key agreement is `ee = DH(init_ep
 resp_eph)`, `es = DH(init_eph, resp_static)` → HKDF-SHA256 → the session key that
 seals every established frame with XChaCha20-Poly1305.
 
-The durable request remains after its first answer and continues to offer its
-bare handshake as a dial anchor. The connection's `answered` offer moves it
+The durable request remains after its first answer and continues to Provide its
+bare handshake as a dial anchor. The connection's `answered` Provide moves it
 from the 500 ms unanswered cadence to the 2 s known-peer cadence; a live socket
 suppresses actual dialing. Read EOF and write failure both reset the
 address-keyed outbound link and clear that connection's sent-memory, so the
@@ -686,8 +699,8 @@ so an unrecognized endpoint still connects and simply shows `anon`, matching
 Authority's stance.
 
 **Close is a death key, and forward secrecy is its verdict.** `connection.close`
-(durable, no sync marker) offers `closed` at an id; the request, connection, and
-ephemeral secrets each Suppress-need `closed@SELF`, so admitting a close flips
+(durable, no sync marker) Provides `closed` at an id; the request, connection,
+and ephemeral secrets each carry `SuppressIf closed@SELF`, so admitting a close flips
 the cluster to Suppressed — and suppression purges, so the ephemeral private
 keys leave disk and memory at the close itself, no sweep to schedule. The
 daemon drops the socket and stops dialing; the close fact is what a restart
@@ -711,7 +724,7 @@ overhead during bulk catch-up while preserving per-inner admission checks.
 `facts/content/` is the messaging surface: member-signed `channel` facts,
 `message` (text routed by channel fact id), `reaction`, file attachments,
 `message_deletion`, and
-`retention_policy` (the retention window is an ordinary offer;
+`retention_policy` (the retention window is an ordinary Provide;
 last-write-wins is a read-side fold).
 
 **Attachments are facts, not a second blob store.** `content.file` is the
@@ -731,13 +744,13 @@ does not drag attachment bytes. Each requested range is at most 256 KiB and a
 descriptor may name at most 10 GiB. A slice's intrinsic gate bounds its index
 and proof bytes. Its projector obtains root, length, slice count, width, encoding,
 and message binding from one validated descriptor owner, then uses the official
-Bao format to authenticate the range. Only promoted proof offers count toward
+Bao format to authenticate the range. Only projected proof Provides count toward
 download progress. Save authenticates every proof again, streams the extracted
 bytes through BLAKE3, checks root and total length, fsyncs a sibling temporary,
 and atomically replaces its output path.
 
 The descriptor is member-signed. It Requires the parent message's `posted`
-offer, its own signature key, and the workspace member keys; PROJECT rebuilds
+Provide, its own signature key, and the workspace member keys; PROJECT rebuilds
 the canonical SHAPE and accepts only when the parent's author key signed the
 descriptor. Slices need no additional authorship claim: the canonical Bao proof
 is self-validating against that signed descriptor's root.
@@ -750,8 +763,8 @@ call the same optimized decoder, so engine validity never invokes a subprocess
 or depends on host files. The dependency is pinned because upstream describes
 Bao as beta cryptographic software that has not been formally audited.
 
-Every descriptor and slice directly Suppress-needs the parent message's `dead`
-key. A valid message deletion therefore terminally purges the whole attachment
+Every descriptor and slice directly carries `SuppressIf` for the parent
+message's `dead` key. A valid message deletion therefore terminally purges the whole attachment
 from residency, durable bytes, SQLite, and the sync register. The deletion fact
 is the durable replicated relationship; deleted bytes are not tombstone leaves,
 and a laggard re-shipping an old attachment fact buys one admission that
@@ -770,18 +783,18 @@ because the Bao root and proofs commit to the carried bytes.
   command path.
 - `message` carries workspace, channel, body, author member id, and its own
   death key. It Requires the exact channel fact id, its signature key, and the
-  workspace's member-key offers. PROJECT rebuilds the canonical SHAPE and
+  workspace's member-key Provides. PROJECT rebuilds the canonical SHAPE and
   accepts only when the key blessed for the claimed author is one of the actual
   signers. The channel edge brings the workspace and channel signature into the
   message's transitive closure.
-- `reaction` Requires the target message's valid `posted` offer, carries the
+- `reaction` Requires the target message's valid `posted` Provide, carries the
   target's death key, and binds its claimed reactor member id to the signer.
   It parks without the message and is physically suppressed when the message
   is deleted.
 - `message_deletion` is target-independent so the thing it must kill cannot
   race its validity. Any enrolled member may currently sign a deletion; a
   per-author policy is outside this implementation.
-- `retention_policy` records a window as an ordinary offer and binds its signer
+- `retention_policy` records a window as an ordinary Provide and binds its signer
   to both an enrolled member and an admin grant. The query chooses the latest
   `(timestamp, owner)` row, so last-write-wins is a read-side fold rather than
   kernel state.
@@ -797,7 +810,7 @@ also carries the applicable death key.
 - **Retention enforcement** — the signed policy fact and query exist, but no
   worker applies its horizon. Policy-based purge must preserve pins,
   dependency closures, and suppressors whose targets remain live. Semantic
-  deletion is separate and immediate through Suppress; retention still needs a
+  deletion is separate and immediate through SuppressIf; retention still needs a
   policy-driven deletion fact. Physical purge uses `DELETE`, and `VACUUM`
   reclaims SQLite file space.
 - **Workspace sync lanes** — one global `b"sync"` register currently feeds

@@ -117,15 +117,15 @@ def bench_engine():
 def bench_chain(depth=100):
     section("1b. deep Require chain (depth %d)" % depth)
     from types import SimpleNamespace
-    from kernel import Atom, Exact, SELF, NEED, OFFER, REQUIRE, Out, Router, fact, ts_atom
+    from kernel import Atom, Exact, SELF, PROVIDE, REQUIRE, Out, Router, fact, ts_atom
     from facts.store import hydrate
     fam = SimpleNamespace(extract=lambda f: True,
-                          project=lambda f, ctx: Out(offers=tuple(a for a in f.atoms if a.kind == OFFER)))
+                          project=lambda f, ctx: Out(provides=tuple(a for a in f.atoms if a.relationship == PROVIDE)))
     root = Router({b"chain": fam, b"store": hydrate})
     fbs, prev = [], None
     for i in range(depth):                # each fact Requires its predecessor: one 100-deep spine
-        atoms = [ts_atom(1000 + i, b"w"), Atom(OFFER, b"doc", b"w", SELF)]
-        if prev is not None: atoms.append(Atom(NEED, b"doc", b"w", Exact(prev), effect=REQUIRE))
+        atoms = [ts_atom(1000 + i, b"w"), Atom(PROVIDE, b"doc", b"w", SELF)]
+        if prev is not None: atoms.append(Atom(REQUIRE, b"doc", b"w", Exact(prev)))
         f = fact(b"chain.doc", *atoms); fbs.append(encode(f)); prev = fact_id(f)
     t = time.time()
     n = Node(root)
@@ -161,12 +161,12 @@ def bench_query(n):
     R = 50
     t = time.time()
     for _ in range(R): rows = feed(n, WID, CHANS[0])
-    report("feed() / watched() scan", (time.time() - t) / R * 1e3, "ms", 5.0)  # MEASURED 1.0ms
-    need = next(a for a in message(WID, CHANS[0], MEMBER.uid, b"x", 1).atoms
-                if a.role == b"channel")                              # the channel REQUIRE
+    report("feed() / provided() scan", (time.time() - t) / R * 1e3, "ms", 5.0)  # MEASURED 1.0ms
+    consumer = next(a for a in message(WID, CHANS[0], MEMBER.uid, b"x", 1).atoms
+                if a.name == b"channel")                              # the channel REQUIRE
     t = time.time()
-    for _ in range(R): n.valid_offers(need)
-    report("valid_offers() bucket lookup", (time.time() - t) / R * 1e6, "us", None)
+    for _ in range(R): n.matches(consumer)
+    report("matches() bucket lookup", (time.time() - t) / R * 1e6, "us", None)
     assert len(rows) == N // 5
 
 # --- 4. sync: dependency-aware negentropy over a big set ----------------------
@@ -190,10 +190,10 @@ def _reconcile(a, b, maxr=100_000):      # the daemon's exact wire discipline, i
         me.run()
         if _sidx.ver(me) != ver[me]:                            # leaf set moved: open a fresh compare round
             sync.open_round(me, _CID, b""); ver[me] = _sidx.ver(me); me.run()
-        did = False                                             # pump: deliver every send/ship offer to the peer
-        for role in (b"send", b"ship"):
-            for o, _, at in me.watched(role, b"outbox"):
-                blobs = ([at.value] if role == b"send"
+        did = False                                             # pump: deliver every send/ship Provide to the peer
+        for name in (b"send", b"ship"):
+            for o, _, at in me.provided(name, b"outbox"):
+                blobs = ([at.value] if name == b"send"
                          else [me.durable[x] for x in unframe(at.value) if x in me.durable])
                 inbox[other] += blobs; frames[0] += 1; wire[0] += sum(len(x) for x in blobs)
                 if o not in fired[me]: fired[me].append(o)

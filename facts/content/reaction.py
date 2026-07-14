@@ -1,11 +1,11 @@
 """facts/content/reaction.py — an emoji on a message, member-signed. Requires
-the target's `posted` offer: Require gates on VALID offers, so a missing message
+the target's `posted` Provide: Require gates on VALID provides, so a missing message
 parks the reaction and a deleted one un-validates it naturally. It also carries
-the target's death key (suppression closure, DESIGN.md Need Effects), so it dies
+the target's death key (suppression closure, DESIGN.md Relationships), so it dies
 with the message — Suppressed, purged with it — rather than merely parking. The
 value frames (reactor member id, emoji): who reacted is content, and the signer
 gate proves that member's blessed key signed this fact."""
-from kernel import (Atom, Exact, NEED, OFFER, Out, REQUIRE, SELF, SUPPRESS,
+from kernel import (Atom, Exact, PROVIDE, Out, REQUIRE, SELF, SUPPRESS_IF,
                     encode, fact, frame, now, ts_atom, ts_of, unframe)
 from facts.auth import signature
 from facts.store import hydrate
@@ -16,11 +16,11 @@ TAG = b"content.reaction"
 # SHAPE — the canonical atom set; the only place atoms are chosen.
 def reaction(workspace_id, message_id, reactor_id, emoji, t):
     return fact(TAG, ts_atom(t, workspace_id),
-                Atom(NEED, b"posted", workspace_id, Exact(message_id), effect=REQUIRE),
-                Atom(NEED, b"dead", workspace_id, Exact(message_id), effect=SUPPRESS),
-                Atom(NEED, b"pk", workspace_id, SELF, effect=REQUIRE),
-                Atom(NEED, b"key", workspace_id, Exact(workspace_id), effect=REQUIRE),
-                Atom(OFFER, b"reaction", workspace_id, Exact(message_id),
+                Atom(REQUIRE, b"posted", workspace_id, Exact(message_id)),
+                Atom(SUPPRESS_IF, b"dead", workspace_id, Exact(message_id)),
+                Atom(REQUIRE, b"pk", workspace_id, SELF),
+                Atom(REQUIRE, b"key", workspace_id, Exact(workspace_id)),
+                Atom(PROVIDE, b"reaction", workspace_id, Exact(message_id),
                      frame(reactor_id, emoji)))
 
 # EXTRACT — content-pure durability.
@@ -30,14 +30,14 @@ from facts.sync.index import sync_leaf
 # PROJECT — the only place this family's meaning lives.
 def project(f, ctx):
     try:
-        r = next(a for a in f.atoms if a.role == b"reaction")
+        r = next(a for a in f.atoms if a.name == b"reaction")
         reactor_id, emoji = unframe(r.value)
         if f != reaction(r.scope, r.target[0], reactor_id, emoji, ts_of(f)): return Out("Invalid")
     except Exception:
         return Out("Invalid")
     signer, members = signature.blessed(ctx)
     if members.get(reactor_id) not in signer: return Out("Invalid")   # the reactor signed it
-    return Out(offers=(r, sync_leaf()))
+    return Out(provides=(r, sync_leaf()))
 
 # COMMANDS — build a fact, admit it, stop.
 def react(node, workspace_id, message_id, emoji, t):
@@ -48,9 +48,9 @@ def react(node, workspace_id, message_id, emoji, t):
 def on(node, workspace_id, message_id):
     hydrate.demand(node, b"reaction", workspace_id)
     hydrate.demand(node, b"member", workspace_id)
-    names = {o: a.value for o, _, a in node.watched(b"member", workspace_id)}
+    names = {o: a.value for o, _, a in node.provided(b"member", workspace_id)}
     out = []
-    for o, t, a in sorted(node.watched(b"reaction", workspace_id), key=lambda r: (r[1], r[0])):
+    for o, t, a in sorted(node.provided(b"reaction", workspace_id), key=lambda r: (r[1], r[0])):
         if a.target != Exact(message_id): continue
         reactor_id, emoji = unframe(a.value)
         out.append(emoji + b" " + names.get(reactor_id, reactor_id.hex().encode()[:8]))

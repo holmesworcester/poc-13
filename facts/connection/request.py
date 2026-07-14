@@ -8,17 +8,17 @@ the branch signature, and the initiator ephemeral id/key).
 
 Decryption happens in PROJECT, not at the gate: CHECK is pure of context and can
 only see the envelope, so it validates structure; the opening key and the
-authority proof arrive as validated offers the fact Watches (the responder opens
+authority proof arrive as validated Provides the fact Gathers (the responder opens
 with its static endpoint secret, the initiator with its own ephemeral — the
 X25519 box is symmetric). A failed open or a bad branch signature is Invalid; a
 missing key or absent proof is Parked until it lands. On success the projector
 publishes the decrypted plaintext as `req_open` (the connection fact's transcript
-input), re-offers the wire bytes as a durable `dial` anchor on the initiator
+input), re-provides the wire bytes as a durable `dial` anchor on the initiator
 (fast until answered, slow after — the request IS the known-peer record, so a
 responder restart heals by the next slow redial), and — on the addressee, once a
-receipt proves the request arrived — a host-watched `respond` naming the reply
+receipt proves the request arrived — a host-read `respond` naming the reply
 route."""
-from kernel import (Atom, Exact, FULL, NEED, OFFER, Out, SELF, SUPPRESS, WATCH,
+from kernel import (Atom, Exact, FULL, PROVIDE, Out, SELF, SUPPRESS_IF, GATHER,
                     by, encode, fact, frame, now, ts_atom, unframe)
 from crypto import open_x25519
 from crypto import ed25519_keygen as keygen, ed25519_sign as sign, ed25519_verify as verify
@@ -56,21 +56,21 @@ _header = lambda eph, to, nc: frame(bytes([SEAL_VERSION]), eph, to, nc)
 # SHAPE — the canonical atom set; the only place atoms are chosen.
 def request(env, to_ep, init_eph_pk, t):
     return fact(TAG, ts_atom(t, SC),
-                Atom(OFFER, b"sreq", SC, SELF, env),
-                Atom(NEED, b"esk", b"local", Exact(to_ep), effect=WATCH),        # responder opens
-                Atom(NEED, b"ephsk", SC, Exact(init_eph_pk), effect=WATCH),      # initiator opens
-                Atom(NEED, b"invite_secret", b"local", FULL, effect=WATCH),
-                Atom(NEED, b"endpoint_shared", b"auth", FULL, effect=WATCH),
-                Atom(NEED, b"endpoint", b"local", FULL, effect=WATCH),     # am I addressee?
-                Atom(NEED, b"answered", SC, SELF, effect=WATCH),                 # slow the redial once answered
-                Atom(NEED, b"closed", SC, SELF, effect=SUPPRESS))
+                Atom(PROVIDE, b"sreq", SC, SELF, env),
+                Atom(GATHER, b"esk", b"local", Exact(to_ep)),        # responder opens
+                Atom(GATHER, b"ephsk", SC, Exact(init_eph_pk)),      # initiator opens
+                Atom(GATHER, b"invite_secret", b"local", FULL),
+                Atom(GATHER, b"endpoint_shared", b"auth", FULL),
+                Atom(GATHER, b"endpoint", b"local", FULL),     # am I addressee?
+                Atom(GATHER, b"answered", SC, SELF),                 # slow the redial once answered
+                Atom(SUPPRESS_IF, b"closed", SC, SELF))
 
 # EXTRACT — content-pure durability. First contact projects no sync marker.
 def extract(f): return True
 
 # CHECK — structural only: the envelope parses to the right widths (no context).
 def check(f):
-    env = next((a.value for a in f.atoms if a.role == b"sreq"), None)
+    env = next((a.value for a in f.atoms if a.name == b"sreq"), None)
     if env is None: return False
     try: ver, eph, to, nc, ct = _unenv(env)
     except Exception: return False
@@ -78,7 +78,7 @@ def check(f):
 
 # PROJECT — decrypt, verify authority, then publish. Pure given ctx; replay-safe.
 def project(f, ctx):
-    env = next(a.value for a in f.atoms if a.role == b"sreq")
+    env = next(a.value for a in f.atoms if a.name == b"sreq")
     ver, init_eph_pk, to_ep, nonce, ct = _unenv(env)
     hdr = _header(init_eph_pk, to_ep, nonce)
     pt = None
@@ -102,13 +102,13 @@ def project(f, ctx):
         ep, spk, _wid = unframe(share)   # device's endpoint_shared: frame(endpoint, signing_pk, wid)
         if ep != F["from_ep"] or not verify(spk, sig_bytes(F), F["sig"]): return Out("Invalid")
     else: return Out("Invalid")
-    offers = [Atom(OFFER, b"req_open", SC, SELF, pt)]
+    provides = [Atom(PROVIDE, b"req_open", SC, SELF, pt)]
     mine = {r[2].target[1] for r in by(ctx, b"endpoint")}
     if to_ep in mine:                    # responder (only the addressee can open it): reply
-        offers.append(Atom(OFFER, b"respond", SC, SELF, F["init_addr"]))   # to the initiator's listen addr
+        provides.append(Atom(PROVIDE, b"respond", SC, SELF, F["init_addr"]))   # to the initiator's listen addr
     elif F["dialed_addr"]:               # initiator: a known-peer dial anchor, answered or not
-        offers.append(Atom(OFFER, b"dial", SC, Exact(F["dialed_addr"]), encode(f)))
-    return Out(offers=tuple(offers))
+        provides.append(Atom(PROVIDE, b"dial", SC, Exact(F["dialed_addr"]), encode(f)))
+    return Out(provides=tuple(provides))
 
 # COMMANDS — author the sealed first-contact fact (+ its ephemeral). Bootstrap and
 # membership differ only in which proof/signature fills the branch fields.
@@ -149,8 +149,8 @@ def membership(node, workspace_id, to_ep, dialed_addr, init_addr, t):
 # answered?). Answered anchors redial slowly; unanswered ones fast.
 def dials(node):
     node.run()
-    answered = {a.target[0] for _, _, a in node.watched(b"answered", SC)}
-    return [(o, a.target[0], a.value, o in answered) for o, _, a in node.watched(b"dial", SC)]
+    answered = {a.target[0] for _, _, a in node.provided(b"answered", SC)}
+    return [(o, a.target[0], a.value, o in answered) for o, _, a in node.provided(b"dial", SC)]
 
 # CLI — the joiner's bootstrap: `connect wid iid secret to_ep addr [init_addr]`.
 # The invite link carries the workspace, invite id, secret, inviter endpoint,

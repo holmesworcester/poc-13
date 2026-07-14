@@ -5,7 +5,7 @@ import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import crypto as _c
-from kernel import Atom, Exact, OFFER, Node, encode, fact, fact_id
+from kernel import Atom, Exact, PROVIDE, Node, encode, fact, fact_id
 from facts import ROOT
 from facts.auth.invite_accepted import invite_accepted
 from facts.auth.signature import signature
@@ -63,7 +63,7 @@ def test_messages_cannot_cross_channel_or_workspace_boundaries():
     assert feed(n, WID, rid) == [b"in random"]
 
     # A channel fact in another workspace has the right id but the wrong scope,
-    # so it cannot satisfy this workspace's message need.
+    # so it cannot satisfy this workspace's message Require.
     ork, orpk = _c.ed25519_keygen(b"\x01" * 32)
     ows = workspace_mod.workspace(b"other", orpk, T0); owid = fact_id(ows)
     osig = signature(b"auth", orpk, owid, _c.ed25519_sign(ork, owid), T0)
@@ -85,11 +85,11 @@ def test_channel_projector_rejects_noncanonical_or_useless_channels():
     blank = signed(channel.channel(WID, b"", T0 + 4), T0 + 4)
     non_utf8 = signed(channel.channel(WID, b"\xff", T0 + 4), T0 + 4)
     extra = fact(channel.TAG, *GENERAL.atoms,
-                 Atom(OFFER, b"alias", WID, Exact(b"general"), b"smuggled"))
+                 Atom(PROVIDE, b"alias", WID, Exact(b"general"), b"smuggled"))
     extra = signed(extra, T0 + 4)
     canonical_message = message(WID, GENERAL_ID, MEMBER.uid, b"hello", T0 + 5)
     forged_message = fact(b"content.message", *canonical_message.atoms,
-                          Atom(OFFER, b"alias", WID, Exact(GENERAL_ID), b"smuggled"))
+                          Atom(PROVIDE, b"alias", WID, Exact(GENERAL_ID), b"smuggled"))
     forged_message = signed(forged_message, T0 + 5)
     n = node(WS, WS_SIG, *MEMBER.facts, GENERAL, GENERAL_SIG,
              *blank, *non_utf8, *extra, *forged_message)

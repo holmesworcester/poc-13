@@ -5,10 +5,11 @@ or mis-addressed variant must be refused. Mirrors poc-10
 poc10_connection_handler_test.rs — secret agreement, responder determinism,
 mis-addressed and bad-signature refusals — in TinyP2P's atom model."""
 import os, sys
+from dataclasses import replace
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from kernel import Node, decode, encode, fact_id
+from kernel import Node, decode, encode, fact, fact_id
 from harness import reboot
 from facts import ROOT
 from facts.auth import endpoint, invite_accepted, local_signer_secret, workspace as wsmod
@@ -99,9 +100,16 @@ def test_tampered_request_ciphertext_is_inert():
     wid, secret, iid, host_ep = _invited_workspace(host)
     rid = req.bootstrap(joiner, wid, secret, iid, host_ep, b"127.0.0.1:9", b"127.0.0.1:7", 3)
     joiner.run()
-    bad = bytearray(joiner.durable[rid]); bad[-1] ^= 1     # flip a ciphertext byte
+    original = decode(joiner.durable[rid])
+    atoms = []
+    for atom in original.atoms:
+        if atom.name == b"sreq":
+            value = bytearray(atom.value); value[-1] ^= 1  # flip the envelope's final ciphertext byte
+            atom = replace(atom, value=bytes(value))
+        atoms.append(atom)
+    bad = encode(fact(original.type_tag, *atoms))
     # structural CHECK still passes (widths intact); the host opens -> fails -> Parked, never responds
-    fid = host.admit(bytes(bad))
+    fid = host.admit(bad)
     if fid: host.run(); assert host.memo.get(fid) in ("Parked", "Invalid")
 
 if __name__ == "__main__":

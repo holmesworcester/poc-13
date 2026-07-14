@@ -3,7 +3,7 @@ range. Its value is a canonical Bao slice encoding: payload bytes plus the
 authentication path needed to prove them against the descriptor's BLAKE3 root.
 The slice Requires that descriptor and carries the message death key directly,
 so deletion physically purges every proof and payload byte."""
-from kernel import (Atom, Exact, NEED, OFFER, Out, REQUIRE, SELF, SUPPRESS,
+from kernel import (Atom, Exact, PROVIDE, Out, REQUIRE, SELF, SUPPRESS_IF,
                     by, fact, ts_atom, ts_of)
 import tinyp2p_bao
 
@@ -19,14 +19,14 @@ MAX_PROOF_BYTES = ((SLICE_BYTES + BAO_CHUNK_BYTES - 1) // BAO_CHUNK_BYTES + 1) *
 # SHAPE — one bounded Bao proof behind the descriptor root it authenticates.
 def file_slice(workspace_id, message_id, file_id, root, index, proof, t):
     return fact(TAG, ts_atom(t, workspace_id),
-                Atom(NEED, b"descriptor", file_id, Exact(root), effect=REQUIRE),
-                Atom(NEED, b"file", workspace_id, Exact(message_id), effect=REQUIRE),
-                Atom(NEED, b"file_size", file_id, Exact(root), effect=REQUIRE),
-                Atom(NEED, b"file_slices", file_id, Exact(root), effect=REQUIRE),
-                Atom(NEED, b"file_slice_bytes", file_id, Exact(root), effect=REQUIRE),
-                Atom(NEED, b"file_encoding", file_id, Exact(root), effect=REQUIRE),
-                Atom(NEED, b"dead", workspace_id, Exact(message_id), effect=SUPPRESS),
-                Atom(OFFER, b"slice", file_id, Exact(index.to_bytes(4, "big")), proof))
+                Atom(REQUIRE, b"descriptor", file_id, Exact(root)),
+                Atom(REQUIRE, b"file", workspace_id, Exact(message_id)),
+                Atom(REQUIRE, b"file_size", file_id, Exact(root)),
+                Atom(REQUIRE, b"file_slices", file_id, Exact(root)),
+                Atom(REQUIRE, b"file_slice_bytes", file_id, Exact(root)),
+                Atom(REQUIRE, b"file_encoding", file_id, Exact(root)),
+                Atom(SUPPRESS_IF, b"dead", workspace_id, Exact(message_id)),
+                Atom(PROVIDE, b"slice", file_id, Exact(index.to_bytes(4, "big")), proof))
 
 
 # EXTRACT — content-pure durability.
@@ -37,9 +37,9 @@ from facts.sync.index import sync_leaf
 # CHECK — exact intrinsic SHAPE and bounded canonical Bao header geometry.
 def _canonical(f):
     try:
-        descriptor = next(a for a in f.atoms if a.kind == NEED and a.role == b"descriptor")
-        parent = next(a for a in f.atoms if a.kind == NEED and a.role == b"file")
-        atom = next(a for a in f.atoms if a.kind == OFFER and a.role == b"slice")
+        descriptor = next(a for a in f.atoms if a.relationship == REQUIRE and a.name == b"descriptor")
+        parent = next(a for a in f.atoms if a.relationship == REQUIRE and a.name == b"file")
+        atom = next(a for a in f.atoms if a.relationship == PROVIDE and a.name == b"slice")
         file_id, root, workspace_id = descriptor.scope, descriptor.target[1], parent.scope
         message_id = parent.target[1]
         if not (len(file_id) == len(root) == len(workspace_id) == len(message_id) == 32
@@ -64,8 +64,8 @@ def project(f, ctx):
     atom, descriptor = canonical
     index = int.from_bytes(atom.target[1], "big")
     for owner, _, _ in by(ctx, b"descriptor"):
-        rows = {role: next((row for row in by(ctx, role) if row[0] == owner), None)
-                for role in (b"file", b"file_size", b"file_slices",
+        rows = {name: next((row for row in by(ctx, name) if row[0] == owner), None)
+                for name in (b"file", b"file_size", b"file_slices",
                              b"file_slice_bytes", b"file_encoding")}
         if any(row is None for row in rows.values()) or rows[b"file"][2].value != atom.scope:
             continue
@@ -78,7 +78,7 @@ def project(f, ctx):
             if total != (0 if blob_bytes == 0 else (blob_bytes + width - 1) // width):
                 continue
             verified_bytes(atom.value, descriptor.target[1], index, blob_bytes, width)
-            return Out(offers=(atom, sync_leaf()))
+            return Out(provides=(atom, sync_leaf()))
         except Exception:
             continue
     return Out("Invalid")

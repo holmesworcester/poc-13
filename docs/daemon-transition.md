@@ -1,13 +1,17 @@
-# Daemon / sync / connection transition — implementation plan
+# Daemon / sync / connection transition — historical implementation plan
 
-> **Superseded in part (branch fault-in):** the store hook, hydration windows,
-> `missing_needs`, `Store.pull/all`, `Node.replay`, and `runtime.load` no longer
-> exist. Matching faults from the persisted atom relation at step time, and boot
-> is one total `store.hydrate` fact. References below describe main as it was.
+> **Superseded:** this records the pre-relationship, v1 implementation plan and
+> intentionally preserves its old Need/Offer/Watch code examples as history.
+> Current code and terminology use the v2 `Provide | Gather | Require |
+> SuppressIf` relationships described in [`../DESIGN.md`](../DESIGN.md).
+> The store hook, hydration windows, `missing_needs`, `Store.pull/all`,
+> `Node.replay`, and `runtime.load` also no longer exist. Matching faults from
+> the persisted atom relation at step time, and boot is one total
+> `store.hydrate` fact.
 
 Executable plan for reshaping the daemon, sync, and connection model into the declarative
-form we settled on. Optimising for **readability, simplicity, low LOC**. This doc is the
-source of truth: current-state inventory, concrete code for every change, per-milestone
+form considered at the time. Optimising for **readability, simplicity, low LOC**. This doc is a
+historical inventory: concrete code for every change, per-milestone
 file edits and tests, then the design rationale ("why") at the end.
 
 Legend: `[C]` = worked out and concrete, safe to type; `[V]` = verify against the code

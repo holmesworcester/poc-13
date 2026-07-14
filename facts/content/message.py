@@ -3,8 +3,8 @@ The channel id is the id of a validated `content.channel` fact, not a
 caller-chosen label; this fact Requires that channel and therefore inherits
 its workspace dependency. Its own signature and workspace member keys bind
 the posted author id to the member whose blessed key signed the fact. It also
-carries its own death key (Suppress on SELF)."""
-from kernel import (Atom, Exact, NEED, OFFER, Out, REQUIRE, SELF, SUPPRESS,
+carries its own death key (`SuppressIf dead@SELF`)."""
+from kernel import (Atom, Exact, PROVIDE, Out, REQUIRE, SELF, SUPPRESS_IF,
                     encode, fact, now, ts_atom, ts_of)
 from facts.auth import signature
 from facts.content import channel as channels
@@ -16,12 +16,12 @@ TAG = b"content.message"
 # SHAPE — the canonical atom set; the only place atoms are chosen.
 def message(workspace_id, channel_id, author_id, body, t):
     return fact(TAG, ts_atom(t, workspace_id),
-                Atom(NEED, b"channel", workspace_id, Exact(channel_id), effect=REQUIRE),
-                Atom(NEED, b"pk", workspace_id, SELF, effect=REQUIRE),
-                Atom(NEED, b"key", workspace_id, Exact(workspace_id), effect=REQUIRE),
-                Atom(OFFER, b"msg", workspace_id, Exact(channel_id), body),
-                Atom(OFFER, b"posted", workspace_id, SELF, author_id),
-                Atom(NEED, b"dead", workspace_id, SELF, effect=SUPPRESS))
+                Atom(REQUIRE, b"channel", workspace_id, Exact(channel_id)),
+                Atom(REQUIRE, b"pk", workspace_id, SELF),
+                Atom(REQUIRE, b"key", workspace_id, Exact(workspace_id)),
+                Atom(PROVIDE, b"msg", workspace_id, Exact(channel_id), body),
+                Atom(PROVIDE, b"posted", workspace_id, SELF, author_id),
+                Atom(SUPPRESS_IF, b"dead", workspace_id, SELF))
 
 # EXTRACT — content-pure durability.
 def extract(f): return True
@@ -30,15 +30,15 @@ from facts.sync.index import sync_leaf
 # PROJECT — the only place this family's meaning lives.
 def project(f, ctx):
     try:
-        m = next(a for a in f.atoms if a.role == b"msg")
-        p = next(a for a in f.atoms if a.role == b"posted")
+        m = next(a for a in f.atoms if a.name == b"msg")
+        p = next(a for a in f.atoms if a.name == b"posted")
         if len(m.target[0]) != 32: return Out("Invalid")
         if f != message(m.scope, m.target[0], p.value, m.value, ts_of(f)): return Out("Invalid")
     except Exception:
         return Out("Invalid")
     signer, members = signature.blessed(ctx)
     if members.get(p.value) not in signer: return Out("Invalid")   # the author signed it
-    return Out(offers=(m, p, sync_leaf()))
+    return Out(provides=(m, p, sync_leaf()))
 
 # COMMANDS — build a fact, admit it, stop. Authorship is the local signer's
 # membership; the signature travels with the message.
@@ -50,7 +50,7 @@ def send(node, workspace_id, channel_id, body, t):
 # Queries author volatile demand (never durable facts) and drain before reading.
 def feed(node, workspace_id, channel_id):
     hydrate.demand(node, b"msg", workspace_id)
-    return [a.value for o, t, a in sorted(node.watched(b"msg", workspace_id),
+    return [a.value for o, t, a in sorted(node.provided(b"msg", workspace_id),
                                           key=lambda r: (r[1], r[0]))
             if a.target == Exact(channel_id)]
 
@@ -61,7 +61,7 @@ def view(node, workspace_id, channel):
     for item in filemod.files(node, workspace_id):
         attachments.setdefault(item["message_id"], []).append(item)
     lines = []
-    for owner, t, atom in sorted(node.watched(b"msg", workspace_id), key=lambda r: (r[1], r[0])):
+    for owner, t, atom in sorted(node.provided(b"msg", workspace_id), key=lambda r: (r[1], r[0])):
         if atom.target != Exact(channel):
             continue
         lines.append(atom.value.decode())
@@ -75,7 +75,7 @@ def view(node, workspace_id, channel):
 # CLI — string boundary over COMMANDS/QUERIES. Grammar: `[wid=] <channel>
 # <body> [t=]`; the author is always the local signer, the body is one token
 # (quote it if it has spaces). A read whose workspace or channel is not yet
-# resident is an empty feed, so polling can watch either arrive.
+# resident is an empty feed, so polling can observe either arrival.
 def _read(node, kv, ref, run):
     wid = cliargs.wid_of(node, kv, missing_ok=True)
     if wid is None: return ""             # no workspace resolvable yet: nothing to show

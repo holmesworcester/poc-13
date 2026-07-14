@@ -9,9 +9,9 @@ resident set, so pull before expecting full coverage). It serves verbs over
 a unix socket at <db>.sock (tiny.py proxies to it) and reconciles facts with
 peers over TCP. One single-threaded select loop over the runtime seam (bin/runtime.py):
 each iteration collects an inbox, `cycle`s it (HOST IN admit + ENGINE DRAIN one
-turn), then `pump`s the validated outbox offers (HOST OUT). The daemon decides no
+turn), then `pump`s the validated outbox provides (HOST OUT). The daemon decides no
 authority and authors nothing outbound — every inbound fact enters through the
-admission gate, and there is ONE out door: `pump` reads the `send`/`ship` offers
+admission gate, and there is ONE out door: `pump` reads the `send`/`ship` provides
 and `deliver` seals iff the route yields a session secret, else sends bare, so the
 handshake response and a sync frame leave the same way.
 
@@ -183,15 +183,15 @@ def main(db, *argv):
                     if n >= BOUND: break
                 if n >= BOUND: break
             # ENGINE DRAIN — admit the inbox and drain one bounded turn, presenting the wire's
-            # flush reports: a flushed sender that Watches shipped reaps this turn; keep
+            # flush reports: a flushed sender that Gathers shipped reaps this turn; keep
             # re-presenting until it does, then prune the acted-on. Leftover frontier is next turn.
             cycle(node, inbox, now_ms(), to_ship, BOUND); work |= bool(node.frontier)
-            to_ship &= {o for o, _, _ in outbox(node)}     # keep only owners still offering send/ship
+            to_ship &= {o for o, _, _ in outbox(node)}     # keep only owners still Providing send/ship
             # respond seam: the onus is on the requester — its durable request re-dials on
             # a cadence; the responder just answers each ARRIVAL (no cadence of its own), so
             # a peer that lost its volatile session simply re-asks until it re-handshakes.
             for rid in arrived:
-                reply = next((a.value for o, _, a in node.watched(b"respond", conn.SC)
+                reply = next((a.value for o, _, a in node.provided(b"respond", conn.SC)
                               if o == rid and a.value), None)
                 if reply: conn.respond(node, rid, reply, now_s()); work = True   # response ships via the pump
             # HOST OUT — flush, redial, pump data, open sync rounds (one per peer), drain writes.

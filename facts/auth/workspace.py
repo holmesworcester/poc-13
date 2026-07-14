@@ -5,13 +5,13 @@ so it is never self-trusting: a `pk` signature by the root key over the
 workspace id (you only found a workspace with the key you hold), and a LOCAL
 `workspace_accepted` from an auth.invite_accepted — a workspace fact received
 over sync is inert until THIS node accepted an invite to it (or created it). Its
-validated `root` offer is the trust anchor the whole chain climbs to; user,
+validated `root` Provide is the trust anchor the whole chain climbs to; user,
 user_invite, and admin value-compare a signer against it.
 
 The root private key is temporary to create(): it signs the workspace, the
 first invite, and the bootstrap admin, then is dropped — never a durable fact.
 After that grant, authority flows only through existing member/admin facts."""
-from kernel import (Atom, Exact, NEED, OFFER, Out, REQUIRE, SELF, by, encode,
+from kernel import (Atom, Exact, PROVIDE, Out, REQUIRE, SELF, by, encode,
                     fact, now, ts_atom)
 from facts.store import hydrate
 
@@ -20,10 +20,10 @@ TAG = b"auth.workspace"
 # SHAPE — the canonical atom set; the only place atoms are chosen.
 def workspace(name, root_pk, t):
     return fact(TAG, ts_atom(t, b"auth"),
-                Atom(NEED, b"pk", b"auth", SELF, effect=REQUIRE),               # root self-signature
-                Atom(NEED, b"workspace_accepted", b"auth", SELF, effect=REQUIRE),  # local acceptance
-                Atom(OFFER, b"workspace", b"auth", SELF, name),
-                Atom(OFFER, b"root", b"auth", SELF, root_pk))
+                Atom(REQUIRE, b"pk", b"auth", SELF),               # root self-signature
+                Atom(REQUIRE, b"workspace_accepted", b"auth", SELF),  # local acceptance
+                Atom(PROVIDE, b"workspace", b"auth", SELF, name),
+                Atom(PROVIDE, b"root", b"auth", SELF, root_pk))
 
 # EXTRACT — content-pure durability.
 def extract(f): return True
@@ -31,9 +31,9 @@ from facts.sync.index import sync_leaf
 
 # PROJECT — valid only if the embedded root key signed it (and it is accepted).
 def project(f, ctx):
-    root_pk = {a.value for a in f.atoms if a.role == b"root"}
+    root_pk = {a.value for a in f.atoms if a.name == b"root"}
     if not root_pk & {r[2].value for r in by(ctx, b"pk")}: return Out("Invalid")
-    return Out(offers=tuple(a for a in f.atoms if a.role in (b"workspace", b"root"))
+    return Out(provides=tuple(a for a in f.atoms if a.name in (b"workspace", b"root"))
                        + (sync_leaf(),))
 
 # COMMANDS — the full bootstrap DAG, all signed by an ephemeral root then dropped.
@@ -65,12 +65,12 @@ def create(node, name, t):
 # QUERIES — observations over validated state only, ordered by (ts, owner).
 def index(node):
     hydrate.demand(node, b"workspace", b"auth")
-    return [(o, a.value) for o, t, a in sorted(node.watched(b"workspace", b"auth"),
+    return [(o, a.value) for o, t, a in sorted(node.provided(b"workspace", b"auth"),
                                                key=lambda r: (r[1], r[0]))]
 
 def root(node, workspace_id):
     hydrate.demand(node, b"root", b"auth")
-    return next((a.value for _, _, a in node.watched(b"root", b"auth")
+    return next((a.value for _, _, a in node.provided(b"root", b"auth")
                  if a.target == Exact(workspace_id)), None)
 
 # CLI — string boundary over COMMANDS/QUERIES.

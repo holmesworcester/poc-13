@@ -1,5 +1,5 @@
 """facts/auth/signature.py — a detached Ed25519 signature over another fact's
-id. Offers b"pk" (the signer's public key) and b"sig" at the target's id in the
+id. Provides b"pk" (the signer's public key) and b"sig" at the target's id in the
 workspace scope. A signed fact Requires b"pk" at its own id, so the signer key
 lands in the projector's context and the authority chain can value-compare it
 against the pk it blessed (either order — out-of-order safe). The gate proves
@@ -11,12 +11,12 @@ inert miss, never a bad fact, and replay never re-verifies. Durable and
 marker-emitting: a signature must travel with what it signs, and being a Require
 dep it ships automatically under dep-aware sync.
 
-A pk offer IS an authority claim ("this key signed that id"), so the fact must
+A pk Provide IS an authority claim ("this key signed that id"), so the fact must
 carry nothing beyond the one claim the gate verified: extra atoms could smuggle
 an unverified pk at a foreign id past the one check. Canonical form is enforced
 by rebuilding through SHAPE and comparing — the builder is the only shape
 authority, so the gate can never drift from it."""
-from kernel import Atom, Exact, OFFER, Out, by, encode, fact, now, ts_atom, ts_of
+from kernel import Atom, Exact, PROVIDE, Out, by, encode, fact, now, ts_atom, ts_of
 from crypto import ed25519_sign as sign, ed25519_verify as verify
 from facts.store import hydrate
 
@@ -25,8 +25,8 @@ TAG = b"auth.signature"
 # SHAPE — the canonical atom set; the only place atoms are chosen.
 def signature(workspace_id, pk, target_id, sig, t):
     return fact(TAG, ts_atom(t, workspace_id),
-                Atom(OFFER, b"pk", workspace_id, Exact(target_id), pk),
-                Atom(OFFER, b"sig", workspace_id, Exact(target_id), sig))
+                Atom(PROVIDE, b"pk", workspace_id, Exact(target_id), pk),
+                Atom(PROVIDE, b"sig", workspace_id, Exact(target_id), sig))
 
 # EXTRACT — content-pure durability.
 def extract(f): return True
@@ -36,8 +36,8 @@ from facts.sync.index import sync_leaf
 # of the fact's own bytes, run once and never on replay.
 def _canonical(f):                       # the free parameters, or None if f is not
     try:                                 # exactly SHAPE over them (tag included)
-        pk = next(a for a in f.atoms if a.role == b"pk")
-        sig = next(a for a in f.atoms if a.role == b"sig")
+        pk = next(a for a in f.atoms if a.name == b"pk")
+        sig = next(a for a in f.atoms if a.name == b"sig")
         tgt = pk.target[0]               # SELF is (): the miss lands in the except
         if f != signature(pk.scope, pk.value, tgt, sig.value, ts_of(f)): return None
         ok = len(pk.value) == 32 and len(sig.value) == 64 and len(tgt) == 32
@@ -52,7 +52,7 @@ def check(f):                            # verify over the exact target a Requir
 # PROJECT — the only place this family's meaning lives.
 def project(f, ctx):                     # publish only the canonical signer pk and sig
     parts = _canonical(f)
-    return Out(offers=parts[:2] + (sync_leaf(),)) if parts else Out("Invalid")
+    return Out(provides=parts[:2] + (sync_leaf(),)) if parts else Out("Invalid")
 # a fact Requires b"pk" at its own id to pull WHO signed it into ctx, then a
 # projector value-compares that pk against the pk its authority chain blessed.
 
@@ -74,7 +74,7 @@ def signed_admit(node, workspace_id, build, t):
     if not local: raise RuntimeError("no local signer key: run auth.local_signer_secret.keygen first")
     sk, pk = local
     hydrate.demand(node, b"key", workspace_id)
-    member_id = next((o for o, _, a in node.watched(b"key", workspace_id)
+    member_id = next((o for o, _, a in node.provided(b"key", workspace_id)
                       if a.target == Exact(workspace_id) and a.value == pk), None)
     if member_id is None: raise RuntimeError("local signer is not a workspace member")
     fid = node.admit(encode(build(member_id)))
@@ -84,7 +84,7 @@ def signed_admit(node, workspace_id, build, t):
 # QUERIES — observations over validated state only.
 def signed(node, workspace_id, target_id):
     hydrate.demand(node, b"sig", workspace_id)
-    return [a.value for _, _, a in node.watched(b"sig", workspace_id)
+    return [a.value for _, _, a in node.provided(b"sig", workspace_id)
             if a.target == Exact(target_id)]
 
 # CLI — string boundary over COMMANDS/QUERIES.

@@ -1,11 +1,11 @@
 """facts/content/channel.py — a named, member-signed workspace channel.
 The fact id is the channel id: names are display data, never routing keys.
-Messages Require the validated `channel` offer at this id, so an arbitrary
+Messages Require the validated `channel` Provide at this id, so an arbitrary
 label cannot create a feed and a message arriving before its channel parks
 until the channel's workspace-backed identity arrives. Channels are durable,
 sync-leaf structural state and are pulled whole by channel queries. Any
 workspace member may create one; its signature travels with the channel."""
-from kernel import (Atom, Exact, NEED, OFFER, Out, REQUIRE, SELF, encode,
+from kernel import (Atom, Exact, PROVIDE, Out, REQUIRE, SELF, encode,
                     fact, now, ts_atom, ts_of)
 from facts.auth import signature
 from facts.store import hydrate
@@ -23,10 +23,10 @@ def _valid_name(name):
 # SHAPE — the canonical atom set; the only place atoms are chosen.
 def channel(workspace_id, name, t):
     return fact(TAG, ts_atom(t, workspace_id),
-                Atom(NEED, b"workspace", b"auth", Exact(workspace_id), effect=REQUIRE),
-                Atom(NEED, b"pk", workspace_id, SELF, effect=REQUIRE),
-                Atom(NEED, b"key", workspace_id, Exact(workspace_id), effect=REQUIRE),
-                Atom(OFFER, b"channel", workspace_id, SELF, name))
+                Atom(REQUIRE, b"workspace", b"auth", Exact(workspace_id)),
+                Atom(REQUIRE, b"pk", workspace_id, SELF),
+                Atom(REQUIRE, b"key", workspace_id, Exact(workspace_id)),
+                Atom(PROVIDE, b"channel", workspace_id, SELF, name))
 
 # EXTRACT — content-pure durability.
 def extract(f): return True
@@ -35,14 +35,14 @@ from facts.sync.index import sync_leaf
 # PROJECT — accept exactly SHAPE and a useful bounded name.
 def project(f, ctx):
     try:
-        row = next(a for a in f.atoms if a.role == b"channel")
+        row = next(a for a in f.atoms if a.name == b"channel")
         if not _valid_name(row.value): return Out("Invalid")
         if f != channel(row.scope, row.value, ts_of(f)): return Out("Invalid")
     except Exception:
         return Out("Invalid")
     signer, members = signature.blessed(ctx)
     if not signer & set(members.values()): return Out("Invalid")
-    return Out(offers=(row, sync_leaf()))
+    return Out(provides=(row, sync_leaf()))
 
 # COMMANDS — names are unique at the local authoring boundary. Concurrent
 # same-name channels remain distinct facts and resolve as ambiguous by id/name.
@@ -58,7 +58,7 @@ def create(node, workspace_id, name, t):
 # faults the complete validated channel set for the workspace resident.
 def index(node, workspace_id):
     hydrate.demand(node, b"channel", workspace_id)
-    return [(o, a.value) for o, t, a in sorted(node.watched(b"channel", workspace_id),
+    return [(o, a.value) for o, t, a in sorted(node.provided(b"channel", workspace_id),
                                                key=lambda r: (r[1], r[0]))]
 
 def resolve(node, workspace_id, ref):

@@ -2,7 +2,7 @@
 
 The daemon is I/O around three pure steps: `cycle` admits an inbox of fact bytes
 and drains one bounded turn, presenting the wire's flush reports (so a courier that
-Watches shipped reaps); `outbox` is the validated send/ship rows a pump ships;
+Gathers shipped reaps); `outbox` is the validated send/ship rows a pump ships;
 `pump` groups those rows by owner, resolves each owner's route and its ship-ids to
 durable bytes, hands the inners to a `deliver` callback, and returns the owners that
 fired — the next cycle's `shipped`. No sockets and no sync/handshake logic live
@@ -60,10 +60,10 @@ def cycle(node, inbox, now_ms, shipped, bound=BOUND):
     return node
 
 def outbox(node):                        # the one out door: validated send/ship rows at the outbox keys
-    return node.watched(b"send", b"outbox") + node.watched(b"ship", b"outbox")
+    return node.provided(b"send", b"outbox") + node.provided(b"ship", b"outbox")
 
 def next_wake(node, now_ms, cap):        # seconds until the earliest wake@clock alarm, capped at `cap`
-    ds = [int.from_bytes(a.target[1], "big") for _, _, a in node.watched(b"wake", b"clock")]
+    ds = [int.from_bytes(a.target[1], "big") for _, _, a in node.provided(b"wake", b"clock")]
     return max(0.0, min(cap, min((d - now_ms for d in ds), default=cap * 1000) / 1000.0))
 
 def pump(node, route, deliver, shipped, sent=None, now=0):
@@ -93,14 +93,14 @@ def pump(node, route, deliver, shipped, sent=None, now=0):
     fired = set()
     for o, atoms in sorted(rows.items()):
         cid = atoms[0].target[1]; r = route(cid)
-        if not r: continue                                        # no route yet: the offer stands (park)
+        if not r: continue                                        # no route yet: the Provide stands (park)
         addr, secret = r
         seen = sent.setdefault(cid, TTLSet()) if sent is not None else None
         if seen is not None: seen.now = now
         of = node.facts.get(o); sync_owner = of is not None and of.type_tag.startswith(b"sync.")
         inners, keys = [], []                                     # keys parallel to inners: fid | content-hash | None
-        for a in sorted(atoms, key=lambda a: (a.role, a.value)):
-            if a.role == b"send":                                 # inline control frame: dedup sync compares by content
+        for a in sorted(atoms, key=lambda a: (a.name, a.value)):
+            if a.name == b"send":                                 # inline control frame: dedup sync compares by content
                 h = H(a.value) if (seen is not None and sync_owner) else None   # handshake frames must always resend
                 if h is not None and h in seen: continue          # this exact compare already went to this peer
                 inners.append(a.value); keys.append(h)
@@ -108,12 +108,12 @@ def pump(node, route, deliver, shipped, sent=None, now=0):
                 for x in unframe(a.value):                        # by-reference bulk: skip already-shipped
                     if x not in node.durable or (seen is not None and x in seen): continue
                     inners.append(node.durable[x]); keys.append(x)
-        if not inners: fired.add(o); continue                     # nothing new (need/compare already sent): reap
+        if not inners: fired.add(o); continue                     # nothing new (request/compare already sent): reap
         count = deliver(cid, addr, secret, inners)
         if seen is not None:
             for k in keys[:count]:                                # record only the prefix that went out
                 if k is not None: seen.add(k)
-        fired.add(o)                                              # always reap the owner — a standing need bloats
+        fired.add(o)                                              # always reap the owner — a standing request bloats
                                                                   # the source outbox (its scan is O(len)); the
                                                                   # unmarked overflow tail is re-asked by the next
                                                                   # re-descend and ships then (not re-decoded twice)

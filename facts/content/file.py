@@ -6,7 +6,7 @@ message death key, so semantic deletion physically purges the attachment."""
 import mimetypes, os, tempfile
 from blake3 import blake3
 import tinyp2p_bao
-from kernel import (Atom, Exact, H, NEED, OFFER, Out, REQUIRE, SELF, SUPPRESS,
+from kernel import (Atom, Exact, H, PROVIDE, Out, REQUIRE, SELF, SUPPRESS_IF,
                     by, encode, fact, fact_id, frame, now, ts_atom, ts_of)
 from facts.auth import signature
 from facts.store import hydrate
@@ -18,9 +18,9 @@ SLICE_BYTES = 256 * 1024
 MAX_FILE_BYTES = 10 * 1024 * 1024 * 1024
 MAX_FILENAME_BYTES = 255
 MAX_MIME_BYTES = 128
-FIELD_ROLES = (b"descriptor", b"file_size", b"file_slices", b"file_slice_bytes",
+FIELD_NAMES = (b"descriptor", b"file_size", b"file_slices", b"file_slice_bytes",
                b"file_encoding", b"file_name", b"file_mime")
-PROJECTED_ROLES = (b"file", *FIELD_ROLES)
+PROJECTED_NAMES = (b"file", *FIELD_NAMES)
 
 
 def _u32(value): return value.to_bytes(4, "big")
@@ -31,22 +31,22 @@ def file_id_for(workspace_id, message_id, root, filename, mime_type):
     return H(frame(FILE_ID_DOMAIN, workspace_id, message_id, root, filename, mime_type))
 
 
-# SHAPE — each metadata field is a named scalar offer at (file id, root).
+# SHAPE — each metadata field is a named scalar Provide at (file id, root).
 def file(workspace_id, message_id, file_id, root, blob_bytes, total_slices,
          filename, mime_type, t, encoding=ENCODING_CLEAR):
     return fact(TAG, ts_atom(t, workspace_id),
-                Atom(NEED, b"posted", workspace_id, Exact(message_id), effect=REQUIRE),
-                Atom(NEED, b"pk", workspace_id, SELF, effect=REQUIRE),
-                Atom(NEED, b"key", workspace_id, Exact(workspace_id), effect=REQUIRE),
-                Atom(NEED, b"dead", workspace_id, Exact(message_id), effect=SUPPRESS),
-                Atom(OFFER, b"file", workspace_id, Exact(message_id), file_id),
-                Atom(OFFER, b"descriptor", file_id, Exact(root)),
-                Atom(OFFER, b"file_size", file_id, Exact(root), _u64(blob_bytes)),
-                Atom(OFFER, b"file_slices", file_id, Exact(root), _u32(total_slices)),
-                Atom(OFFER, b"file_slice_bytes", file_id, Exact(root), _u32(SLICE_BYTES)),
-                Atom(OFFER, b"file_encoding", file_id, Exact(root), encoding),
-                Atom(OFFER, b"file_name", file_id, Exact(root), filename),
-                Atom(OFFER, b"file_mime", file_id, Exact(root), mime_type))
+                Atom(REQUIRE, b"posted", workspace_id, Exact(message_id)),
+                Atom(REQUIRE, b"pk", workspace_id, SELF),
+                Atom(REQUIRE, b"key", workspace_id, Exact(workspace_id)),
+                Atom(SUPPRESS_IF, b"dead", workspace_id, Exact(message_id)),
+                Atom(PROVIDE, b"file", workspace_id, Exact(message_id), file_id),
+                Atom(PROVIDE, b"descriptor", file_id, Exact(root)),
+                Atom(PROVIDE, b"file_size", file_id, Exact(root), _u64(blob_bytes)),
+                Atom(PROVIDE, b"file_slices", file_id, Exact(root), _u32(total_slices)),
+                Atom(PROVIDE, b"file_slice_bytes", file_id, Exact(root), _u32(SLICE_BYTES)),
+                Atom(PROVIDE, b"file_encoding", file_id, Exact(root), encoding),
+                Atom(PROVIDE, b"file_name", file_id, Exact(root), filename),
+                Atom(PROVIDE, b"file_mime", file_id, Exact(root), mime_type))
 
 
 # EXTRACT — content-pure durability.
@@ -57,14 +57,14 @@ from facts.sync.index import sync_leaf
 # CHECK — exact SHAPE, scalar widths, geometry, text, and content-instance id.
 def _canonical(f):
     try:
-        listing = next(a for a in f.atoms if a.kind == OFFER and a.role == b"file")
-        posted = next(a for a in f.atoms if a.kind == NEED and a.role == b"posted")
-        fields = {role: next(a for a in f.atoms if a.kind == OFFER and a.role == role)
-                  for role in FIELD_ROLES}
+        listing = next(a for a in f.atoms if a.relationship == PROVIDE and a.name == b"file")
+        posted = next(a for a in f.atoms if a.relationship == REQUIRE and a.name == b"posted")
+        fields = {name: next(a for a in f.atoms if a.relationship == PROVIDE and a.name == name)
+                  for name in FIELD_NAMES}
         descriptor = fields[b"descriptor"]
         workspace_id, message_id, file_id, root = (listing.scope, listing.target[1],
                                                     listing.value, descriptor.target[1])
-        values = {role: fields[role].value for role in FIELD_ROLES[1:]}
+        values = {name: fields[name].value for name in FIELD_NAMES[1:]}
         if len(values[b"file_size"]) != 8 or len(values[b"file_slices"]) != 4 or \
                 len(values[b"file_slice_bytes"]) != 4:
             return None
@@ -100,8 +100,8 @@ def project(f, ctx):
     signer, members = signature.blessed(ctx)
     authors = {row[2].value for row in by(ctx, b"posted")}
     if not signer & {members[a] for a in authors if a in members}: return Out("Invalid")
-    return Out(offers=tuple(a for a in f.atoms
-                            if a.kind == OFFER and a.role in PROJECTED_ROLES)
+    return Out(provides=tuple(a for a in f.atoms
+                            if a.relationship == PROVIDE and a.name in PROJECTED_NAMES)
                        + (sync_leaf(),))
 
 
@@ -127,7 +127,7 @@ def send(node, workspace_id, channel_id, author, body, path, mime_type=None, t=N
     local = local_signer_secret.current(node)
     if not local: raise RuntimeError("no local signer key: run auth.local_signer_secret.keygen first")
     hydrate.demand(node, b"key", workspace_id)
-    author_id = next((owner for owner, _, atom in node.watched(b"key", workspace_id)
+    author_id = next((owner for owner, _, atom in node.provided(b"key", workspace_id)
                       if atom.target == Exact(workspace_id) and atom.value == local[1]), None)
     if author_id is None: raise RuntimeError("local signer is not a workspace member")
     message_fact = message.message(workspace_id, channel_id, author_id, body, t)
@@ -209,7 +209,7 @@ def save(node, workspace_id, selector, output_path):
 def _slices(node, file_id):
     hydrate.demand(node, b"slice", file_id)
     out = {}
-    for owner, t, atom in sorted(node.watched(b"slice", file_id), key=lambda row: (row[1], row[0])):
+    for owner, t, atom in sorted(node.provided(b"slice", file_id), key=lambda row: (row[1], row[0])):
         out.setdefault(int.from_bytes(atom.target[1], "big"), atom.value)
     return out
 
@@ -217,10 +217,10 @@ def _slices(node, file_id):
 def _descriptor(node, owner, workspace_id, message_id, file_id):
     hydrate.demand(node, b"descriptor", file_id)
     rows = {}
-    for role in FIELD_ROLES:
-        row = next((item for item in node.watched(role, file_id) if item[0] == owner), None)
+    for name in FIELD_NAMES:
+        row = next((item for item in node.provided(name, file_id) if item[0] == owner), None)
         if row is None: return None
-        rows[role] = row[2]
+        rows[name] = row[2]
     root = rows[b"descriptor"].target[1]
     return {"workspace_id": workspace_id, "message_id": message_id, "file_id": file_id,
             "root": root, "blob_bytes": int.from_bytes(rows[b"file_size"].value, "big"),
@@ -233,7 +233,7 @@ def _descriptor(node, owner, workspace_id, message_id, file_id):
 def files(node, workspace_id, limit=0):
     hydrate.demand(node, b"file", workspace_id)
     records = []
-    for owner, t, atom in sorted(node.watched(b"file", workspace_id), key=lambda row: (row[1], row[0])):
+    for owner, t, atom in sorted(node.provided(b"file", workspace_id), key=lambda row: (row[1], row[0])):
         item = _descriptor(node, owner, workspace_id, atom.target[1], atom.value)
         if item is None: continue
         proofs = _slices(node, item["file_id"])

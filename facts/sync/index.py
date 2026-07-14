@@ -2,9 +2,9 @@
 leaf-membership rule, and the `summary` answerer, evicted whole from the kernel.
 
 The kernel's contribution is two generic seams. observe() lets this family
-subscribe to one validated offer address and fold its deltas into a register;
-answer() lets it serve a reserved need from that register. A replicating
-projector emits sync_leaf(), an ordinary projected offer at leaf@sync/SELF.
+subscribe to one validated Provide address and fold its deltas into a register;
+answer() lets it serve a reserved Gather from that register. A replicating
+projector emits sync_leaf(), an ordinary projected Provide at leaf@sync/SELF.
 Only Valid output reaches the clean twin, whose owner and timestamp are the
 treap entry. Invalid, Parked, Suppressed, and Reap output no marker, so clean
 replacement retracts the leaf through the same observer. What replicates is
@@ -31,7 +31,7 @@ fanout is B and depth is log_B(n) regardless of key distribution. A range of
 <= T leaves is listed by id instead, ending the recursion. (A maliciously
 degenerate set costs O(n) local compute; the paper shows communication,
 roundtrips, and censorship-resistance stay immune.)"""
-from kernel import (Atom, Exact, H, NEED, OFFER, Range, Row, SELF, WATCH,
+from kernel import (Atom, Exact, H, PROVIDE, Range, Row, SELF, GATHER,
                     answer, frame, observe, ts_of)
 
 TAG = b"sync.index"                      # the namespace claim; no wire fact carries it yet
@@ -157,16 +157,16 @@ class Treap:
         return out
 
 # SHAPE — the validated marker projected by every replicating family, the
-# matching Watch used by sync.need, the reserved summary need this module
+# matching Gather used by sync.need, the reserved summary Gather this module
 # answers, and the 40-byte reconciliation key it answers over.
-LEAF_ROLE, LEAF_SCOPE = b"leaf", b"sync"
-sync_leaf = lambda: Atom(OFFER, LEAF_ROLE, LEAF_SCOPE, SELF)
-sync_leaf_need = lambda fid: Atom(NEED, LEAF_ROLE, LEAF_SCOPE, Exact(fid), effect=WATCH)
-is_sync_leaf_row = lambda row: row.atom == Atom(OFFER, LEAF_ROLE, LEAF_SCOPE, Exact(row.owner))
-SUM_ROLE, _SUM = b"\x00summary", b"\x00sum"
+LEAF_NAME, LEAF_SCOPE = b"leaf", b"sync"
+sync_leaf = lambda: Atom(PROVIDE, LEAF_NAME, LEAF_SCOPE, SELF)
+sync_leaf_gather = lambda fid: Atom(GATHER, LEAF_NAME, LEAF_SCOPE, Exact(fid))
+is_sync_leaf_row = lambda row: row.atom == Atom(PROVIDE, LEAF_NAME, LEAF_SCOPE, Exact(row.owner))
+SUM_NAME, _SUM = b"\x00summary", b"\x00sum"
 CLOSURE_CAP = 4096                       # generous safety valve on unique closure ids per summary answer
 _kb = lambda ts, fid: ts.to_bytes(8, "big") + fid            # (ts, fid) -> the 40-byte reconciliation key
-summary_need = lambda lo, hi, floor=b"": Atom(NEED, SUM_ROLE, b"sync", Range(lo, hi), floor, effect=WATCH)
+summary_gather = lambda lo, hi, floor=b"": Atom(GATHER, SUM_NAME, b"sync", Range(lo, hi), floor)
 
 # EXTRACT — nothing to extract: the index is pure register state, never a fact.
 
@@ -206,15 +206,15 @@ def _observe_leaf(node, old, new):
     reg["ver"] += 1
     reg["memo"].clear()                                 # the set moved: the memoised summaries are stale
 
-observe(LEAF_ROLE, LEAF_SCOPE, _observe_leaf)
+observe(LEAF_NAME, LEAF_SCOPE, _observe_leaf)
 
 # QUERIES — the `summary` answerer: my fingerprint for the range + my
 # reconciliation claims for it (a B-way equal-count split, or the range's id
 # list and its deduped dependency closure ids when the range is small), served
 # straight to the engine — the closure ids are how a below-window dependency
 # travels. Plus the register read back (tests, bench, daemon change-detection).
-def summary(node, n):
-    reg = _reg(node); lo, hi = n.target; floor = n.value or b""
+def summary(node, gather):
+    reg = _reg(node); lo, hi = gather.target; floor = gather.value or b""
     if floor > lo: lo = floor            # clip the range to the window floor
     # A summary is a pure function of the leaf set: closure ids are themselves
     # marker-owning leaves below the floor. The memo therefore lives exactly
@@ -223,7 +223,7 @@ def summary(node, n):
     if cached is not None: return cached
     t = reg["tree"]
     def row(a): return Row(_SUM, 0, a)
-    rows = [row(Atom(OFFER, b"fp", b"sync", Range(lo, hi), t.fp(lo, hi)))]   # the prune-check fingerprint
+    rows = [row(Atom(PROVIDE, b"fp", b"sync", Range(lo, hi), t.fp(lo, hi)))]   # the prune-check fingerprint
     def claim(a, b):                     # my claim for [a,b): the leaves (+ windowed: their below-floor deps), else a fp
         if t.small(a, b):
             ids = list(t.fids(a, b))                            # my leaves in range: always advertised (enumerate)
@@ -233,13 +233,13 @@ def summary(node, n):
                 ids += [d for d in seen if d in reg["leaves"]
                         and _kb(ts_of(node.facts[d]), d) < floor]
             blob = frame(*ids[:CLOSURE_CAP])                    # full round (floor==b""): leaves only — none below b""
-            return row(Atom(OFFER, b"cids", b"sync", Range(a, b), blob))
-        return row(Atom(OFFER, b"cfp", b"sync", Range(a, b), t.fp(a, b)))
+            return row(Atom(PROVIDE, b"cids", b"sync", Range(a, b), blob))
+        return row(Atom(PROVIDE, b"cfp", b"sync", Range(a, b), t.fp(a, b)))
     rows += [claim(lo, hi)] if t.small(lo, hi) else [claim(a, b) for a, b in t.parts(lo, hi)]
     reg["memo"][(lo, hi, floor)] = rows
     return rows
 
-answer(SUM_ROLE, summary)                # claim the reserved role: the engine now asks this module
+answer(SUM_NAME, summary)                # claim the reserved name: the engine now asks this module
 
 def tree(node): return _reg(node)["tree"]
 def ver(node): return _reg(node)["ver"]
