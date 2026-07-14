@@ -1,87 +1,146 @@
-# poc-13
+# poc-13 — the atom model
 
-The atom model played for conciseness: a single-file kernel, a `facts/` tree
-where every fact family is one file with one fixed contract, and a CLI whose
-db is sqlite holding one dumb table of canonical fact bytes (plus a derived
-match index the kernel's Store owns). The design of record
-is [`DESIGN.md`](DESIGN.md); protocol semantics descend from poc-12, where they
-were proven.
+poc-13 is an executable proof of concept for a small local-first, peer-to-peer
+backend for collaboration applications such as team chat. It explores whether
+identity, validation, storage, demand-driven loading, synchronization, transport,
+and application behavior can share one data language instead of accumulating a
+separate mechanism for each concern.
 
-- `kernel.py` — identity, admission, matching, the turn loop. Nothing else:
-  sync, queues, effects, clocks, content, and retention are fact families.
-- `facts/<scope>/<fact>.py` — one file per family, six parts, always in
-  order: SHAPE, EXTRACT, PROJECT, COMMANDS, QUERIES, CLI. Projectors are
-  the routers: `facts.ROOT` dispatches type tags, api paths, and CLI verbs
-  through one tree. The module is the Python API.
-- `bin/con.py` — `con <db> <scope.fact.verb> [args...]`. Proxies to a
-  running daemon at `<db>.sock`; with no daemon reachable it refuses and
-  names the daemon to start.
-- `bin/cond.py` — `cond <db> [--listen HOST:PORT]`. The daemon: owns the db,
-  boots cold — residency is demanded, and `con <db> store.hydrate.pull`
-  (one verb, one fact) makes a full replica; there is no load or replay
-  path. Serves con over the unix socket, reconciles facts (the wire's
-  only message) with TCP peers via the sync family. A peer is dialed by a durable
-  sealed `connection.request` fact (the `connect` verb authors one); shipments ride
-  `connection.frame` bundles. Backpressure everywhere is the frontier's rule: park,
-  never drop.
-- `facts/sync/compare.py` — dependency-aware reconciliation over the kernel's
-  radix Merkle skeleton: prefix-fingerprint descent over `(ts, FactId)` leaves,
-  splitting by count. A round carries a floor — a full round advertises leaves
-  only, a windowed one also rides each leaf's below-floor dependency closure, so a
-  recent fact validates without a dependency round-trip. Compare frames are
-  volatile, unshareable, content-addressed facts; the daemon dedups them (and the
-  fact ships) per connection, so a re-descend is fresh discovery, never re-work,
-  and a converged pair falls silent.
-- `facts/connection/` — peer sessions as facts: a durable sealed `request` to
-  dial a peer and a `close` to retire it, a volatile `connection` record
-  binding the session to a key, per-handshake `ephemeral_secret`s purged for
-  forward secrecy, and a `frame` bundle that packs many facts into one wire
-  frame for bulk-catch-up throughput.
-- `tests/` — skeleton tests (kernel claims), a source-contract test (fact
-  file shape), and black-box tests (one process per command, plus real
-  daemon subprocesses on real sockets).
+That language is made of immutable facts containing needs and offers called
+atoms. Facts are the units of identity and wire transfer; atoms are the units of
+storage and matching. A command authors a fact, the kernel matches its needs
+against validated offers, and the owning fact family decides what the fact
+means. The same model represents workspaces, membership, messages, deletions,
+peer connections, sync compares, timers, and queues.
 
-Run: `pytest` or `python3 tests/test_<name>.py`. Two dependencies: PyNaCl and
-blake3 (`pip install pynacl blake3`).
+The implementation is intentionally compact and inspectable, and is not
+production software. The concrete protocol currently demonstrates workspace
+and invite authority, member-signed messages and reactions, signed deletion and
+retention policy, demand-driven SQLite hydration, sealed peer sessions, and
+dependency-aware set reconciliation.
 
+The design of record is [`DESIGN.md`](DESIGN.md).
+
+## How it works
+
+```text
+command
+  -> canonical fact + detached signature
+  -> admission and need/offer matching
+  -> one SQLite row per atom
+  -> validated offers and family-owned derived indexes
+  -> treap range reconciliation
+  -> sealed fact bundles to peers
+  -> the same admission path on receipt
+  -> queries over validated offers
 ```
-$ bin/con.py w.facts auth.workspace.create acme        # prints <wid>
-$ bin/con.py w.facts content.message.send <wid> general al "hello"
-$ bin/con.py w.facts content.message.feed <wid> general
+
+SQLite does not store canonical fact blobs. Its durable relation is a
+two-column `facts(fid, tag)` spine plus one `atoms` row for every atom. Reads
+regroup those rows, reconstruct the canonical fact, re-encode it, and verify
+that it hashes to `fid`. Corrupt or inconsistent rows are therefore a miss,
+not a different fact. Validity, resident fact objects, match buckets, sync
+labels, family registers, and queues are derived state.
+
+The main pieces are:
+
+- [`kernel.py`](kernel.py) — canonical identity, admission, matching, the
+  bounded turn loop, demand faults, and two generic family-index seams:
+  `settle()` and `answer()`.
+- [`facts/`](facts/) — one module per fact family. Each module owns SHAPE,
+  EXTRACT, optional CHECK, PROJECT, COMMANDS, QUERIES, and CLI. Projectors are
+  also the routing tree, so protocol policy stays out of the kernel.
+- [`facts/sync/index.py`](facts/sync/index.py) — the sync family’s own
+  rebuildable register: leaf membership, a history-independent Merkle treap,
+  summary memo, and version counter. The kernel contains no sync tree.
+- [`facts/connection/`](facts/connection/) — sealed handshake, session,
+  frame-bundle, close, and ephemeral-secret families. A durable answered
+  request remains the known-peer anchor and redials only when its session is
+  down.
+- [`bin/cond.py`](bin/cond.py) and [`bin/runtime.py`](bin/runtime.py) — the
+  single-writer daemon and its socket-free host-turn seam. The daemon performs
+  no database-wide boot load; it demands local identity plus whatever later
+  queries and hydrate facts request from the atom store.
+- [`bin/con.py`](bin/con.py) — a thin client for
+  `con <db> <scope.fact.verb> [args...]` over `<db>.sock`.
+- [`tests/`](tests/) — kernel contracts, randomized order and adversarial
+  storage cases, hydration, sync and reliability properties, and real
+  multi-daemon stories over sockets.
+
+## Current scope
+
+The prototype has a global resident sync set per node. Workspace-scoped sync
+lanes and negative multi-workspace isolation are not implemented yet. Also,
+`LocalOnly` currently controls sync egress but is not enforced on wire ingress,
+so the present threat model assumes connected peers do not send local-only
+families. Blob content and retention-policy enforcement remain outside the
+implemented surface.
+
+## Quick start
+
+Python 3.13 is used on the build machine. Install the three runtime/test
+dependencies:
+
+```bash
+python3 -m pip install pynacl blake3 pytest
+```
+
+Start the daemon in one terminal:
+
+```bash
+bin/cond.py w.facts --listen 127.0.0.1:41000
+```
+
+Then use the CLI from another terminal:
+
+```text
+$ bin/con.py w.facts auth.workspace.create acme
+<workspace-id>
+$ bin/con.py w.facts content.message.send <workspace-id> general al "hello"
+<message-id>
+$ bin/con.py w.facts content.message.feed <workspace-id> general
 hello
+```
+
+The daemon starts cold. A normal query faults only the keys it needs;
+`bin/con.py w.facts store.hydrate.pull` explicitly makes the complete durable
+set resident, which is also required before claiming full sync coverage.
+
+Run the tests and performance harness with:
+
+```bash
+pytest -q
+python3 bench/bench.py
 ```
 
 ## Performance
 
-`python3 bench/bench.py` — one file, stdlib only, ~20s. It prints a table and
-exits nonzero if any budget is violated, so it gates CI. Budgets sit at ~2x the
-value measured on the build machine: headroom for a slower box, a tripwire for a
-real regression. Headline numbers over a 10,000-fact workspace (one laptop core):
+These numbers were measured on the build machine with Python 3.13.7. The
+standard corpus is 10,000 signed messages: each message and its detached
+signature is a separate durable fact, so the load contains about 20,000 facts
+plus the small authority spine. Rates described as messages per second include
+both facts and their validation work.
 
-| path | cost |
-|---|---|
-| admit + run 10k facts | ~0.47s (0.047 ms/fact) |
-| boot 10k facts from rows (one total demand) | ~1.0s |
-| daemon cold boot (loads nothing) | ~0.03s |
-| hydrate a 10k-fact db (one verb) | ~1.2s |
-| one verb via the daemon (hydrated) | ~0.02s |
-| fault a 100-deep Require spine (one keyed demand) | ~6ms (~58 us/hop) |
-| `feed()` query over 10k messages | ~1 ms |
-| sync a 1-fact diff into a 10k set | 28 rounds, ~9 KiB, ~0.35s |
-| two daemons over TCP, sustained | ~395 authored facts/s converged, query stays low-ms |
-| bulk sync catch-up (5000 facts, fresh peer) | ~1900 facts/s, ~0.58 MB/s (frame bundles) |
-| signed-fact admission (Ed25519 verify) | ~15k/s gated; boot re-verifies **0** |
+| path | measured cost |
+|---|---:|
+| admit + settle 10k signed messages / 20k facts | 2.22 s (0.111 ms/fact) |
+| rebuild the same set from atom rows with one total demand | 2.96 s |
+| daemon cold boot (no database-wide hydration) | 0.040 s |
+| hydrate the full signed-message database through one verb | 3.16 s |
+| one CLI verb through a hydrated daemon | 0.024 s |
+| fault a 100-deep `Require` spine from one keyed demand | 5.60 ms (56.0 µs/hop) |
+| `feed()` over 10k messages | 1.67 ms |
+| reconcile a one-fact diff in the ~20k-leaf set | 0.018 s, 14 frames, 51.3 KiB |
+| two daemons, sustained author / convergence rate | 901 / 721 signed messages/s; 2.00 MB/s |
+| query latency during sustained sync | 1.69 ms |
+| fresh-peer catch-up of 5k signed messages | 1,364 messages/s (~2,728 facts/s), 3.87 MB/s |
+| newest message visible on a caught-up peer | 0.55 s |
+| Ed25519-gated signature admission | 10,534 facts/s; replay verifies 0 signatures |
 
-**Where the linearity lives now.** The db is the kernel `Store`: sqlite holding
-the persisted atom relation (one row per atom; canonical bytes derived on
-read — reconstruct, re-encode, re-hash), WAL-journaled. A session with a
-store is demand-driven — a stepped fact's needs fault only what they ask
-about resident, so a bounded working set costs its own size, not the db's.
-Hydration and every sync `leaves()` remain linear over the resident set —
-sync reconciles what is resident, so the operator's total pull is what makes
-fingerprints cover the whole durable set (coverage-clipped partial sync is a
-later wave). If a single db
-ever outgrows the daemon's resident set, the next step is teaching the sync
-family to ship from the Store rather than from residency — a family change,
-not a kernel one. Linear is accepted and measured, not hidden.
-
+Full hydration reconstructs each selected fact from atom rows and rebuilds
+derived indexes, so a total pull scales with the stored atom set. Point matching
+uses indexed buckets; a point lookup does not scan every same-role row. Sync
+range fingerprints use the treap’s clamped Merkle labels and take expected
+`O(log n)` local work, while mismatch depth is `O(log_B n)` and a fresh replica
+still transfers `O(n)` facts. Sync covers the resident set, so a node that wants
+whole-database reconciliation first issues the total hydrate demand.

@@ -1,16 +1,20 @@
 # The Atom Model — poc-13 Design
 
-This document describes the protocol. It descends from poc-12's design of
-record (`~/poc-12/docs/DESIGN.md`), where the semantics were proven in
-Rust/Verus. poc-13 changes the goal, not the protocol: conciseness over
-proofs, tests over theorems, and a fact contract that closes the gap between
-the kernel and real commands, queries, and a CLI. Where a protocol question
-isn't answered here, the poc-12 document is the reference; where the two
-disagree on poc-13 structure, this document wins.
+This document is the design of record for the protocol implemented in this
+repository. Ground truth is the running code in `kernel.py`, `facts/`, and
+`bin/`, with executable claims pinned by `tests/` and `bench/bench.py`.
 
-The central idea is unchanged: facts are the unit of identity and sync,
-atoms are the unit of matching, and the needs/offers language IS the fact
-language.
+poc-13 is a compact protocol runtime for local-first collaboration. Facts are
+the units of identity and wire transfer, atoms are the units of durable storage
+and matching, and the needs/offers language is the fact language. Commands,
+queries, authority, content, connections, hydration, and synchronization all
+use that same model.
+
+The architecture follows the event-sourcing pattern; this protocol calls its
+immutable events **facts**. Validated state is projected from those facts, and
+the event model also describes the system machinery: transit connections,
+sealed frame delivery, and range-based set reconciliation are fact families
+rather than separate sidecar protocols.
 
 The document is in two parts. **Part I is the kernel** — identity, admission,
 matching, the turn loop, and the host surfaces around them. **Part II is
@@ -28,29 +32,38 @@ design.
   effects, or another fact's validity.
 - The runtime has one durable authority: the persisted atom relation (one
   row per atom of every durable fact; canonical bytes are derived, never
-  stored). Everything else — validity, the clean twin, the frontier —
-  is derived and rebuilt on demand.
+  stored) plus a `FactId`/type-tag spine. Everything else — validity, the
+  clean twin, the frontier, and family-owned indexes — is derived and rebuilt
+  on demand.
 - Matching looks to the persisted relation: when a resident fact steps,
   each of its need keys is checked once against the store and the cold
   owners fault in through ordinary admission — needs fault, offers never
   wake cold facts. Boot is the degenerate demand: one total hydrate fact.
 - The store answers existence, never standing: it can say who offers at a
   key and hand back reconstructed bytes; verdicts are computed only in the
-  engine, over the resident set. Standing is never persisted; intrinsic
-  validity (signatures, canonical form) is persisted exactly once — as
-  existence in the store, transferred on read by the re-hash.
+  engine over the resident set. A family CHECK result, notably Ed25519
+  verification, is certified by first admission and stored existence. A local
+  fault still strict-decodes and re-hashes reconstructed rows before skipping
+  that already-completed CHECK.
 - Needs have three effects: `require` gates validity, `watch` only
-  wakes/reprojects, `suppress` flips the owner to Suppressed. Precedence:
-  Suppress > Require(Park) > Resolve.
+  wakes/reprojects, and `suppress` terminally evicts the owner when a valid
+  suppressor exists. Precedence: Suppress > Require(Park) > Resolve.
 - Admission is idempotent and content-addressed; wrong bytes are a miss,
   never a wrong fact.
-- Queues, effects, sync, clocks, content, and retention are fact families,
-  not engine primitives. The kernel owns identity, admission, matching, and
-  the turn loop — nothing else.
+- Queues, effects, sync, connections, content, and retention policy are fact
+  families, not engine primitives. Time and wire-flush reports are transient
+  host inputs to the turn. The kernel owns identity, admission, matching, and
+  the turn loop.
+- A generic `settle()` hook and reserved-role `answer()` registry let a family
+  maintain a rebuildable index without teaching the kernel its semantics.
+  Sync uses this to own its treap and reconciliation state in its own register.
 - Projectors ARE the routers: the kernel runs one root projector, and a
   router is just a projector that dispatches on type-tag segments.
 - Every fact family is one file with one fixed six-part contract: SHAPE,
   EXTRACT, PROJECT, COMMANDS, QUERIES, CLI.
+- Replicated application content is signed: a message, reaction, deletion, or
+  retention policy is authorized by a separate canonical signature fact and
+  by the authority offers its projector requires.
 
 # Part I — The Kernel
 
@@ -69,16 +82,19 @@ Atom { kind: Need|Offer, effect: None|Require|Watch|Suppress,
 `scope`, and `target` form the match address; `value` is not read by core
 matching. Values are small; large payloads are content facts.
 
-`SELF` means "this fact's eventual `FactId`" and is legal only in canonical
-fact atoms — the stored fact keeps `SELF` so identity never contains its own
-hash. Every derived row materializes: `SELF` is rewritten to the owner id
-wherever core derives rows from canonical atoms. `SELF` never participates
-in matching directly.
+`SELF` means "this fact's eventual `FactId`" and is legal only in the canonical
+fact form, whose encoding retains `SELF` so identity never contains its own
+hash. Every resident match row and persisted atom row materializes it to the
+owner id. Store reconstruction recognizes an owner-targeted row as canonical
+`SELF`, rebuilds the fact, and accepts that interpretation only when the
+resulting hash is the row owner's `FactId`. `SELF` never participates in
+matching directly.
 
-Atoms are embedded in their fact — there is no shared atom table, because an
-atom alone has no identity and a table would mint one. Structural sharing in
-memory (derived rows referencing the fact's frozen atoms) is an
-implementation detail, as would be any future interning cache.
+Atoms belong to one owner fact and have no independent identity. SQLite's
+`atoms` table is therefore an owner-keyed relation, not an intern pool: the
+same atom in two facts occupies two rows with different `fid` values. In
+memory, derived match rows may reference the fact's frozen atom objects as an
+implementation detail.
 
 ### Fact and Identity
 
@@ -115,25 +131,41 @@ the same router tree as projection. Durable facts flush before they can be
 forgotten; volatile facts vanish on restart. Unknown tags default to
 Durable + LocalOnly + Parked.
 
+`shareable` controls membership in sync's egress set. The daemon does not yet
+apply the symmetric check to peer ingress, so connected peers are currently
+trusted not to send LocalOnly families. Enforcing that provenance rule at the
+wire inbox is part of the remaining trust-boundary work.
+
 ## Runtime State
 
-Durable: the persisted atom relation — sqlite `atoms`, one row per atom of
-every durable fact (both kinds, canonical columns plus match columns
-materialized with SELF rewritten to the owner id), beside a two-column
-`facts(fid, tag)` spine. There is no bytes column: a read regroups a fid's
-rows, rebuilds, re-encodes, and re-hashes, so rows that no longer add up to
-their fid are a miss, never a wrong fact. One write door (`add`, downstream
-of admission) makes existence the persisted certificate: intrinsic checks
-ran once at first admission, and the re-hash transfers them, so a faulted
-fact re-enters checked and a boot re-verifies nothing.
+Durable: the persisted atom relation — SQLite `atoms`, one row per atom of
+every durable fact, beside a two-column `facts(fid, tag)` spine. Each atom row
+stores kind, effect, role, scope, value, and the materialized target as
+`(exact, lo, hi)` with `SELF` rewritten to the owner id. There is no bytes
+column: a read regroups a fid's rows, restores canonical `SELF`, rebuilds,
+re-encodes, and re-hashes. Rows that do not add up to their fid are a miss,
+never a wrong fact. One write door (`add`, downstream of admission) makes
+existence the persisted certificate: intrinsic checks ran once at first
+admission, and the re-hash transfers them, so a faulted fact re-enters checked
+and a boot re-verifies no signatures.
 
-Ephemeral, all rebuilt by replay: resident facts, the asserted match index
-and intake overlay, the validity memo (`Unknown|Parked|Valid|Invalid|
-Suppressed`), the validated offer set (the clean twin, rows stamped
-`(owner, ts, atom)` with engine-stamped provenance), the frontier, and the
-sync leaf set with its skeleton (see Sync). A family that needs a register
-(last-write-wins, a timer's memory) reads it off its own validated offers —
-there is no second read-model.
+Ephemeral, all rebuilt from demand and promotion:
+
+- resident `Fact` objects and canonical bytes for resident durable facts;
+- the asserted match buckets, populated immediately with every resident
+  fact's materialized atoms;
+- the validity memo (`Unknown|Parked|Valid|Invalid|Suppressed`) and the
+  validated offer set (the clean twin, stamped `(owner, ts, atom)` with
+  engine-owned provenance);
+- owner-to-clean-row bookkeeping, checked store keys, and the bounded FIFO
+  frontier with its membership set; and
+- `Node.regs`, one rebuildable register per family group. A `settle()` hook
+  writes a register, and a registered `answer()` function can expose its index
+  through a reserved Watch need. Sync's `b"sync"` register holds its treap,
+  leaf membership, summary memo, and monotonic version counter.
+
+Validated offers are the application read model. Registers are derived family
+indexes, not a second authority surface, and are never persisted.
 
 The crash story is one fact: derived state is a pure, order-independent
 function of the durable set, and a fresh node over the same store rebuilds
@@ -146,12 +178,12 @@ With a `Store` attached, a session admits nothing at boot and pays only for
 what its facts and queries ask about (see Hydration); the total demand is
 the degenerate case that faults everything.
 
-When one process at a time stops being enough, `bin/cond.py` is a daemon
-that owns the db exclusively and boots COLD: it loads nothing and decides
-no residency policy. Residency is demanded — a verb's queries fault their
-keys, and hydration at any scale is a client verb (`store.hydrate.pull`
-with no key faults everything: the operator's first verb on a full
-replica). It runs
+`bin/cond.py` owns the database exclusively and constructs a cold node: it
+performs no database-wide load and decides no application residency policy.
+Startup demands only its local signer and endpoint identity. Other residency is
+demanded — a verb's queries
+fault their keys, and hydration at any scale is a client verb
+(`store.hydrate.pull` with no key faults everything). It runs
 the three-phase host turn in a single-threaded select loop — client verbs
 over a unix socket at `<db>.sock`, peers over TCP. Its reusable core is
 `bin/runtime.py`, a socket-free seam: `cycle` admits an inbox of fact bytes
@@ -160,39 +192,43 @@ groups the validated `send`/`ship` offers by owner, resolves each route and
 its ship-ids, and hands the frames to a `deliver` callback. The wire's only
 payload is length-framed canonical fact bytes under a one-byte discriminator:
 a bare handshake fact before a session key exists, a sealed `connection.frame`
-after. There is **one out door** — the daemon reads the outbox offers and
+after. There is **one out door** — the daemon reads validated outbox offers and
 `deliver` seals iff the route yields a session secret, else sends bare — so
-the handshake response and a sync frame leave the same way. It authors nothing
-outbound. The outbound path tolerates loss up until the receiver admits: a
-frame is fired best-effort when handed to the socket buffer (bounded admits
-per turn, select-gated non-blocking writes), and a dropped or truncated frame
-is healed by the next cadence re-descend, never mis-admitted (it fails
-`aead_open`). Sync reconciles the RESIDENT set, and the daemon never decides coverage:
-the operator's total pull makes RBSR fingerprints cover the whole durable
-set; a partially-hydrated node reconciles only what it holds resident
-(coverage-clipped claims over partial replicas are a later wave). Still deferrable:
-compaction (purge is `DELETE`; `VACUUM` reclaims the bytes).
+handshake responses and sync frames leave through the same mechanism. The
+outbound path tolerates loss until the receiver admits: a frame is handed
+best-effort to the bounded socket buffer, and a dropped or truncated frame is
+re-derived by cadence and either fails authenticated opening or re-enters normal
+admission. Sync reconciles the resident set. An explicit total hydrate demand
+makes reconciliation cover the complete durable set; a partially hydrated node
+advertises only its resident coverage. Purge uses `DELETE`; SQLite space
+reclamation requires `VACUUM`.
 
 ## Turn Semantics
 
 A host turn has three phases.
 
-**Host in.** Admission: strict-decode candidate bytes; recompute `FactId`
-(reject on mismatch if requested by id); early-return if already admitted;
-otherwise run the CHECK gate and extraction, store the fact, stamp its
-materialized atoms into the intake overlay, put its id on the frontier, and
-flush if durable. Failed gates are inert.
+**Host in.** Admission strict-decodes candidate bytes, recomputes `FactId`
+(rejecting a mismatch when an id was requested), returns early for an already
+resident id, then runs the family CHECK gate and extraction. A successful
+admission stores the resident fact, retains canonical bytes in the resident
+durable map when applicable, adds every materialized atom directly to the
+asserted match buckets, and enqueues the owner. After the turn, the host flushes
+new durable facts as one SQLite transaction containing the `facts` spine row
+and all atom rows. Failed gates are inert.
 
 **Engine drain.** Drain the frontier to a bound (overflow parks, never
 drops). For each owner: first, if a store is attached, the fault leg checks each
 of its need keys once against the persisted relation and admits the cold
 owners (checked admission — the bytes passed the gate once); then check
 suppressors, then requires, against the clean twin; build `Context<Validated>` from matching validated offers; call the
-routed projector `project(fact, ctx) -> Out(verdict, offers)`; replace
-the owner's prior output atomically (owner-scoped:
-never both old and new visible); restamp promoted offers with engine
-provenance regardless of projector claims; wake every owner whose needs
-match a changed offer, over index ∪ intake.
+routed projector `project(fact, ctx) -> Out(verdict, offers)`. Promotion records
+the verdict, calls the family's optional `settle()` hook, and replaces the
+owner's clean output atomically, so old and new offers are never both visible.
+The kernel restamps promoted offers with engine provenance and wakes every
+resident owner whose asserted needs match a changed offer. `Reap` and
+`Suppressed` are terminal: after clean replacement and settle notification,
+the engine removes the resident body, asserted rows, memo, durable bytes, and
+SQLite rows.
 
 **Host out.** The host drains validated offers at keys it watches, performs
 external work, and admits facts reporting what happened. Host code never
@@ -222,7 +258,11 @@ local total-order break.
 
 Suppression closure is family discipline too: every fact that must die with
 a target carries the target's death keys directly (as `Suppress` needs).
-There is no consumer demotion cascade.
+There is no implicit cluster deletion or consumer demotion cascade. A related
+fact without that death key — including a detached signature — remains unless
+its own needs park, suppress, or reap it. Connection teardown copies the close
+keys into every secret/session fact that must be physically removed; content
+families copy a message death key into dependents that must die with it.
 
 ## Matching
 
@@ -234,10 +274,13 @@ need.role == offer.role  ∧  need.scope == offer.scope
 `target_covers` is exact equality, a range offer covering an exact need
 key byte-lexicographically (inclusive), or symmetrically a range need
 covering an exact offer key — bulk demand is ordinary matching. Range never
-matches range, and `SELF` never matches. The match index is bidirectional
-(need→offer for dependencies, offer→need for wakes) and every query in both
-directions runs over index ∪ intake — the overlay is transparent, and
-flushing moves rows without changing any result.
+matches range, and `SELF` never matches. Admission materializes every resident
+atom before it can be matched. The asserted index is bidirectional
+(need→offer for dependencies, offer→need for wakes), while the clean twin is
+the only validity justifier. Both use the same bucket shape: exact targets are
+indexed by point and spans are kept separately, so an exact lookup reaches its
+point bucket plus covering spans without counting or scanning every same-role
+point.
 
 ## Hydration
 
@@ -269,9 +312,9 @@ through admission, its bytes re-derived from rows and re-hashed against the
 fid it claims, so a wrong or corrupt row is a miss, never a wrong fact.
 Matching-side it is two indexed SELECTs: `owners(need)` (whose WHERE clause
 is the atom coverage relation, property-pinned to kernel `covers`) and
-`fact_bytes(fid)`. Windows, budgets, and delivery order died with the store
-spider: a demand is a key, drained whole; bounded working sets come from
-demanding bounded keys.
+`fact_bytes(fid)`. A demand is one key and drains all stored owners matching
+that key; bounded working sets come from choosing bounded keys rather than from
+a separate window, budget, or delivery-order API.
 
 ## Routing: Projectors Are the Routers
 
@@ -322,23 +365,23 @@ by `con.flush` and never reaped.
 Recurrence is central but the onus is on one party: everything that must
 happen repeats, and the repeating side drives it. Sync's periodic re-descend
 is a `sync.cadence` fact (see Sync) — its `wake@clock` alarm drives the
-schedule, not a daemon marker. The initiator's durable request still re-dials
-on a process-local cadence, and the responder answers each arrival with no
-cadence of its own; that socket-level redial backoff — which address to dial,
-and how often — stays process-local in the daemon (as poc-10 keeps it), the
-one operational repetition the facts do not carry.
+schedule, not a daemon marker. The initiator's durable request is also its
+known-peer anchor: the daemon dials it every 500 ms until answered, every 2 s
+after answering while no live session socket exists, and not at all while that
+socket is up. The responder answers each arrival and needs no cadence of its
+own. This address and retry timing is the one operational repetition kept
+process-local in the daemon.
 
 ## The CLI
 
 `bin/con.py`: `con <db> <scope.fact.verb> [args...]`. It is a thin client:
 resolve nothing locally, just proxy to the daemon that owns the db. `<db>.sock`
-accepts, the verb path and args go out as one framed request, one framed
-`+ok`/`-err` reply comes back (new durable facts hit the file before the
-reply). With no daemon reachable it exits with a message — the daemon is the
-only writer, which keeps the single-owner story simple (the earlier cold
-crash-and-demand path is gone). The daemon boots cold; a verb's queries
-demand the keys they read, and after an operator's `store.hydrate.pull`
-every later demand is a no-op behind the checked total.
+accepts, the verb path and args go out as one framed request, and one framed
+`+ok`/`-err` reply comes back after any authored durable facts reach SQLite.
+With no daemon reachable the client exits with an error. The daemon is the
+only writer and boots cold; a verb's queries demand the keys they read, and
+after an operator's `store.hydrate.pull` every later store-key demand is
+covered by the checked total.
 
 # Part II — Fact Families
 
@@ -383,14 +426,22 @@ Signatures are detached facts (`auth.signature`): an ordinary fact offering
 real Ed25519 signature. It self-checks at the admission gate over exactly the
 32-byte target id — the id IS the whole canonical fact, so signing the id
 covers everything, and wrong math is a falsy check: an inert miss, never a bad
-fact. A signed fact Requires the `b"pk"` offer at its own id, so it only
-validates once its signature lands — and the signer key is now in the
-projector's context. The gate proves only that SOME key signed; binding that
-key to workspace authority is a value-compare in the target's PROJECT (see
-Authority). Verification runs exactly once, at first admission; a faulted fact re-enters
-with the check skipped — existence in the store is the certificate, and the
-re-hash on reconstruction transfers it. Tampering with the local file is a local-integrity problem, not a
-protocol one: bytes from outside enter only through the gate.
+fact. The gate extracts the candidate fields, rebuilds the exact fact with the
+family's SHAPE constructor, and requires byte-for-byte canonical equality before
+verifying. PROJECT repeats that canonical-shape check before publishing the one
+verified public-key claim. Extra atoms, foreign scopes, alternate tags, and
+additional public-key claims are therefore inert rather than riding beside an
+honest signature.
+
+A signed fact Requires the `b"pk"` offer at its own id, so it validates only
+after its signature lands and the signer key is present in the projector's
+context. The signature proves that some key signed; the target projector binds
+that key to workspace authority by value comparison (see Authority).
+Cryptographic verification runs once at first admission. Store reconstruction
+re-hashes the canonical rows, and checked local faults reuse existence as the
+certificate that the gate already ran. PROJECT still checks canonical shape on
+that replay path. Tampering with the local file is a local-integrity problem;
+external bytes enter through the admission gate.
 
 ## Authority
 
@@ -398,8 +449,7 @@ A signature proves a key signed a fact; authority proves that key was allowed
 to. The `auth` families make membership a chain that every fact climbs, by
 value-compare, to one root — closing the gap where any key could mint a member.
 
-The root is a key embedded in the workspace fact itself (poc-10's shape: the
-workspace carries `public_key`; there is no separate founder fact). Two things
+The root public key is embedded in the workspace fact itself. Two things
 gate `auth.workspace`'s validity, so it is never self-trusting: a `pk`
 self-signature by that root key (you only found a workspace with the key you
 hold), and a LOCAL `workspace_accepted` offer from `auth.invite_accepted` — a
@@ -435,7 +485,7 @@ a real refusal, distinct from parking on a not-yet-arrived signature.
 - `auth.admin` grants admin to a named member; it Requires that membership (a
   grant can never outrun the member it elevates) and is valid iff signed by the
   workspace root — the bootstrap admin `create` authors. Admin-to-admin
-  delegation, poc-10 style, is a follow-up.
+  delegation is not implemented.
 - `auth.device_invite` / `auth.device` are the same two shapes for endpoints: a
   member blesses a device key; the device joins by signing with it.
 
@@ -454,139 +504,135 @@ machinery, it only names a key. The total demand (the reserved `\x00all`
 key) is the whole boot story — and the daemon itself doesn't even author
 it: it boots cold, and `con <db> store.hydrate.pull` (one verb, one fact)
 makes a full replica. Queries may author volatile demand and drain; they still never
-author durable facts. A durable hydrate fact is a pin (later wave, with
-standing demand).
+author durable facts. Persistent standing demand and pins are outside the
+implemented family.
 
 ## Sync
 
-Sync reconciles facts, never atoms — and the whole of it, set included, lives
-in `facts/sync/`. The kernel's contribution is two GENERIC seams, not state:
-the settle hook (a family that declares `settle()` sees every verdict its
-facts settle to — including `Suppressed` and `Parked`, which never reach
-`project()` — and maintains derived group state in its shared register) and
-`answer()` (a family claims a reserved role and serves the need from its own
-index). A family opts its facts into replication with one line — `from
-facts.sync.index import settle` — and `facts/sync/index.py` folds each
-verdict into the leaf set: `(ts, FactId) -> leaf hash` over every fact that is
-durable, shareable, and `Valid`, held in a treap in the `b"sync"` register,
-plus `ver`, a monotonic counter (never a hash) a host can cheaply poll for
-"my set moved" (bench and the sync tests do; the daemon today relies on the
-cadence alone). What replicates is thus a FAMILY decision, made identically
-on every peer because every peer runs the same family code over the same
-fact. Deletions reconcile through what DOES replicate: the deletion fact is
-a durable leaf, its target is purged everywhere it lands, and a laggard peer
-re-shipping the purged fact costs one admission that dies on arrival. The
-hook rides promotion, not projection, because the MINUS side needs the
-verdict: a leaf that settles Suppressed or Parked never reaches its
-projector. Replay needs no second path: hydration re-steps every durable
-fact and each re-promotion re-inserts its leaf. A
-leaf hash is `H(FactId ‖ ts ‖ H(bytes))` — bytes-only, so the tree stores only
-`key -> leaf hash`, never fact bodies. That body-independence is the seam for a
-later residency/sync split (sync the full leaf set, hydrate a recent subset).
+Sync reconciles complete facts, never individual atoms, and its set and
+protocol live in `facts/sync/`. The kernel contributes two generic seams:
 
-**Range-based set reconciliation (RBSR; Meyer & Scherer, rbsr_nonhomomorphic).**
-The reconciliation set is a treap (`facts/sync/index.py`) — a search tree on the `ts‖FactId` key
-AND a heap on a priority (the leaf hash), so the tree SHAPE is a function of the
-set alone (history-independence) and two peers holding the same set build the same
-tree. Each node caches its subtree size and a Merkle label
-`H(left ‖ leaf hash ‖ right)`. A key range `[lo, hi)` is summarised by its CLAMPED
-label — the label of the tree with all out-of-range items discarded — computed by
-walking only the two boundary spines, `O(log n)`. Clamping-invariance makes that
-label a canonical function of the in-range SET (independent of tree shape and of
-out-of-range items), so two peers agree using an ORDINARY hash — no homomorphic or
-XOR/sum fold. A range whose fingerprints differ is split into `B` sub-ranges of
-EQUAL COUNT (an order-statistic `select` over the subtree counts), NOT by key
-prefix — so fanout is the chosen `B` and depth is `log_B(n)` regardless of key
-distribution. A range of `<= T` leaves is listed by id rather than fingerprinted,
-which ends the recursion — and lets an empty peer pull, since it lists its (empty)
-set and the peer then advertises what to send. (A maliciously degenerate set costs
-`O(n)` local compute to fingerprint; the paper shows communication, roundtrips, and
-censorship-resistance stay immune.)
+- A family with `settle(node, fid, fact, verdict)` sees every verdict for its
+  facts, including `Parked` and `Suppressed`, and can fold that transition into
+  its group register.
+- `answer(role, fn)` registers a handler for a reserved Watch role and injects
+  the handler's rows into projector context like ordinary validated offers.
 
-**One bundled family, `compare`.** A compare fact carries a set of claims over
-ranges — `fp` (a range fingerprint) or `ids` (a small range's complete id
-list) — and, paired with each claim, a reserved `summary@range` need. Whoever
-admits the compare has the engine answer each summary with its OWN view of that
-range: its fingerprint, and its claims (the `B`-way split, or the id list
-expanded to the range's dependency closure). The projector reconciles each
-claim — a matching fingerprint prunes; a mismatch emits my claims for the range
-(descend by count, or my id list if small on my side); a peer id list naming
-ids I lack emits one batched `need` that ships them. Bundled: one compare is a
-whole message, so matched sub-ranges prune wholesale and a one-fact diff over
-100k facts settles in ~9 messages. No rounds and no daemon reaction: every
-response is a projector offer at the connection's outbox key, and a dropped
-frame just re-descends next cadence.
+A replicating family aliases `facts.sync.index.settle`. That hook maintains the
+`b"sync"` register with a treap, a leaf-membership set, a summary memo, and a
+monotonic `ver` counter. A fact is a leaf exactly while it is durable,
+shareable, and `Valid`. The decision to replicate is therefore owned by each
+fact family, while peers running the same family code derive the same set.
+
+Suppression removes the target leaf before terminal eviction. Deletion travels
+because the deletion fact itself is a durable, shareable, valid leaf; wherever
+it validates, its `dead` offer purges matching targets. A laggard may re-send a
+purged target, but the durable suppressor makes that admission settle
+`Suppressed` and disappear again. Hydration rebuilds the register by stepping
+durable facts through the ordinary promotion path, with no separate sync replay
+feed.
+
+Each reconciliation key is `ts‖FactId`, where `ts` is 8-byte big-endian for
+ordering. Its leaf hash is `H(FactId ‖ ts ‖ H(canonical_bytes))`; the treap stores
+only `key -> leaf hash`, not fact bodies. `ver` is a change counter rather than a
+set hash.
+
+**Range-based set reconciliation (RBSR; Meyer & Scherer,
+`rbsr_nonhomomorphic`).** The reconciliation set is a treap in
+`facts/sync/index.py`: a search tree on `ts‖FactId` and a heap on
+`(leaf_hash, key)`. Priority is a pure function of the item, so tree shape is a
+function of the set rather than insertion history. Each node caches subtree
+size and `H(left_label ‖ leaf_hash ‖ right_label)`.
+
+A range `[lo, hi)` is summarized by its clamped label: the label of the tree
+with out-of-range items discarded. The iterative implementation walks the two
+boundary spines and reuses labels for fully included subtrees, taking expected
+`O(log n)` time. The label is a canonical function of the in-range set, so it
+uses an ordinary cryptographic hash rather than a homomorphic XOR or sum. A
+mismatch splits into at most `B=16` equal-count ranges by order-statistic
+selection, independent of key-prefix distribution. A range with at most `T=8`
+leaves is listed by id, which terminates descent and also lets an empty peer
+pull. Adversarial priorities can produce an `O(n)` spine, but the iterative
+walks do not overflow the Python stack.
+
+**Bundled compare facts.** A `sync.compare` fact carries multiple claims:
+`fp` for a range fingerprint, `ids` for a small range's complete id list, or
+`done` for an agreed range. Each live claim carries a reserved
+`summary@range` Watch need. The sync index answers with its own fingerprint and
+either its equal-count split or its id list. The projector prunes a matching
+fingerprint, descends a mismatch, re-advertises local extras, and accumulates
+all missing peer ids into one batched `sync.need`. Each compare is one fact, so
+matched subranges prune together and mismatch depth is `O(log_B n)`.
 
 Windowing is the domain's lower bound: the root claim covers `[floor, HI)`, and
-every sub-range is within it. The floor IS the retention horizon; poc-13 has no
-retention/purge yet (Further Work), so the daemon passes `b""` and the domain
-is the whole durable-shareable set.
+every subrange stays inside it. The daemon's active tier pair uses `floor=b""`,
+so its domain is the complete resident durable/shareable set. A nonempty floor
+is the reconciliation counterpart of a retention horizon; enforcement is not
+implemented.
 
-Dependency-awareness rides the id lists, never a send-time walk. When a small
-range is listed, the engine expands each leaf to its transitive dependency
-closure (the Require/suppressor ancestry over the `deps` memo, `closure()` in
-the kernel) — so a below-floor dependency is advertised as one of the range's
-closure ids and pulled by id like any other, convergent because a peer only
-ever requests ids the other side vouched for. The receiver admits every shipped
-fact through the normal gate (the own-store `checked` path is never used for
-peer input).
+Dependency-awareness rides in id lists. For a windowed small range, the summary
+answerer expands its in-range leaves through `Node.closure()`, which computes
+Require and Suppress ancestry directly from resident asserted matches. It adds
+shareable dependencies below the floor to the listed ids, deduplicated and
+capped at 4096. A peer requests only ids that the other side advertised. Every
+received fact enters normal unchecked peer admission; the `checked=True` path
+is reserved for reconstruction from the node's own store.
 
-The split of labor: `compare`/`need` are volatile families (extract
-`(False, False)`), so a reboot never resurrects session state and they are
-excluded from the very leaves they reconcile; a frame crossing the wire IS a
-fact, so facts stay the wire's only payload. `need` ships requested facts by
-reference (fact ids resolved against the durable set at send time) at the
-host-watched outbox keys, reaping on the flush (`shipped@SELF`, see The Clock).
-The affordance seam — `summary@range` and `resident@id` — is answered into
-ctx exactly as validated offers are, so the families read a peer's view
-uniformly; `resident` by the engine from the durable set, `summary` by the
-index family itself through `answer()` (the engine dispatches the reserved
-role to its registered answerer — the kernel never reads the treap).
+`compare` and `need` are volatile and unshareable, so they are absent from the
+set they reconcile and leave no reboot state. A `need` offers requested ids by
+reference at the host-watched outbox key; the pump resolves them against
+resident durable bytes at send time, and the need reaps after its wire-flush
+report. `resident@id` is answered by the kernel's durable map, while
+`summary@range` is answered by the sync family. Both appear in projector
+context in the same row shape, and the kernel never reads the treap.
 
-**Cadence is a fact, not a daemon marker.** A `sync.cadence` fact per
-(connection, tier) Watches the clock and opens a fresh round once per period
-(emitting my domain claims); its own self-Watched `tick` offer — re-emitted
-by every branch that saw a clock, or the memory is lost — remembers the last
-boundary, so it fires at most once per period though the clock re-wakes it
-every turn. It offers a
-`wake@clock` alarm at its next boundary, which `runtime.next_wake` reads for the
-select timeout — an idle daemon sleeps until the next boundary, not on a fixed
-poll. A `closed@conn` Suppress tears it down; being volatile, a reconnect
-re-arms it (tiers — narrow+frequent … wide+rare — are several of these; arming
-is idempotent, so the daemon just arms every live connection each loop). The
-daemon keeps only the connection's re-dial cadence; no armed marker, no settle
-marker, no round bookkeeping. A lost frame needs no retry state; the next
-cadence compare repairs it. Every peer link is full-duplex, and reconciliation
-is what a fact authored on one side rides to reach the others.
+**Cadence and convergence certificates are facts.** Every live connection arms
+an idempotent pair of volatile `sync.cadence` facts over the full domain:
 
-**The daemon sends nothing to a peer twice — the re-descend is free.** Everything
-on the wire is content-addressed: a shipped fact by its id, and a compare frame by
-its content (a compare fixes `ts=0`, so an unchanged claim is byte-identical every
-time). The daemon keeps one per-connection *sent* set (source-side, process-local —
-poc-10's `network_outgoing` in spirit) holding both — both are 32-byte digests — and
-`pump` skips anything already sent this session. That closes the two halves of the
-old `O(n²)` catch-up: a `need` re-asks for facts still in flight (unadmitted on the
-peer), but each ships once; and a static source re-authoring the same split every
-cadence tick, or re-answering the same range on every re-descend, ships that compare
-once. A re-descend then costs `O(diff)` fresh discovery, not `O(n)` re-ship plus
-`O(n)` re-discovery — the difference between `O(n)` and `O(n²)` wire as the peer
-catches up, and a converged pair falls silent because its compares are all repeats.
-Handshake frames are exempt: `connection.connection`'s content *is* the connection id
-(both peers must derive it identically, and a durable request re-handshakes to the
-same id), so it can't vary — a reconnect must always re-send it. Only what actually
-left the outbox is marked (`deliver` reports the prefix it enqueued), so an
-overflow-dropped tail stays unmarked and re-ships on the next re-descend, and a
-partially-shipped `need` drains its remainder across turns rather than re-seal a
-parked frame. A peer's socket break clears its sent set — the connection id is
-deterministic and outlives the socket, so a reconnect (a healed partition) re-syncs
-in full. The set is wiped on restart, exactly as poc-10's temp-table outgoing queue is.
+- the 500 ms gated tier opens when its current claim hash differs from its last
+  opener and remained the same across a due boundary; this carries low latency
+  without launching overlapping cascades while the set is still changing; and
+- the 4 s anchor tier opens unconditionally, which supplies the liveness bound
+  under loss, duplication, reordering, restart, or starvation of the gated
+  optimization.
+
+Each tier Watches the clock, publishes its next `wake@clock` alarm, and stores
+`last boundary`, `sent`, `seen`, and `confirmed` hashes in a self-Watched tick
+offer keyed by `(connection, floor, period, mode)`. Every clock-handling branch
+re-emits that offer, so the register survives reprojection. `closed@conn`
+suppresses and purges both tiers; reconnecting arms fresh volatile facts.
+
+When every claim in a compare matches, the responder sends an all-`done`
+compare. Its `confirmed@connection` pulse lets the cadence record a certificate
+for the last opener only if the currently derived opener still hashes to the
+same value. `cadence.synced(node, cid)` is true exactly while such a certificate
+matches the current local split and becomes false as soon as the set changes.
+
+**Wire dedup is bounded and cannot veto healing.** The pump keeps a
+per-connection process-local `TTLSet`. Shipped facts are keyed by `FactId`, and
+sync control compares by content hash; handshake frames are exempt. A digest
+suppresses an identical send for 3 s, which collapses immediate re-asks and
+mirrored cascades. The TTL is strictly shorter than the 4 s unconditional
+anchor, so a lost byte-identical opener becomes sendable before the next anchor
+and dedup can delay recovery but cannot prevent it.
+
+`deliver` reports how many inner facts it actually enqueued. Only that prefix is
+marked, so an outbox-limited tail remains eligible for a later request. A socket
+break clears the connection's TTL set for immediate resynchronization, and a
+process restart starts with empty dedup memory. A converged full-duplex pair
+therefore exchanges bounded anchor claims and small all-done certificates rather
+than maintaining persistent round state.
+
+The current sync register is global per node and summarizes the resident set.
+Workspace-scoped lanes and explicit coverage claims for partial replicas are
+outside the implemented protocol.
 
 ## Connections
 
 Peer sessions are facts too — the transport is a fact family, not an engine
 primitive — living in `facts/connection/`. There is no kernel change.
 
-**First contact is a sealed handshake (poc-10's request/connection).** A
+**First contact is a sealed handshake.** A
 `connection.request` (durable, LocalOnly) is the sealed first-contact fact: its
 bytes ARE its id, and its public envelope (seal version, initiator ephemeral
 X25519 key, addressed endpoint, nonce) wraps a ciphertext hiding both static
@@ -600,10 +646,16 @@ message so both sides admit identical bytes): the plaintext carries the recomput
 `handshake_hash` and per-session `connection_secret`, and the projector refuses
 unless it re-derives them from the transcript. Key agreement is `ee = DH(init_eph,
 resp_eph)`, `es = DH(init_eph, resp_static)` → HKDF-SHA256 → the session key that
-seals every established frame with XChaCha20-Poly1305. Recurrence is edge-triggered
-on the requester: the durable request re-dials on a process-local cadence while
-unanswered; the responder answers each arrival with no cadence of its own, and the
-connection's `answered` offer retires the request's resend.
+seals every established frame with XChaCha20-Poly1305.
+
+The durable request remains after its first answer and continues to offer its
+bare handshake as a dial anchor. The connection's `answered` offer moves it
+from the 500 ms unanswered cadence to the 2 s known-peer cadence; a live socket
+suppresses actual dialing. Read EOF and write failure both reset the
+address-keyed outbound link and clear that connection's sent-memory, so the
+anchor can redial and the next session can resynchronize immediately. The
+responder remains arrival-driven and authors a response for each admitted
+request.
 
 **Two handshake modes, one shape.** *Bootstrap* signs the request with the invite
 key and proves authority with the invite's `bootstrap_hash` (the secret the
@@ -612,8 +664,8 @@ are enrolled, with no invite — signs with the member's own key and names its
 `endpoint_shared` record; the responder verifies the signature against the
 signing key that record binds. The endpoint (X25519) is machine-wide, one per
 node and identical across every workspace (`auth.endpoint`, LocalOnly, holding
-the secret); the per-workspace binding is `auth.device` (poc-10 endpoint_shared,
-role=Device): durable + **shareable**, self-attested by the member's signing key,
+the secret); the per-workspace binding is `auth.device`: durable and
+**shareable**, self-attested by the member's signing key,
 valid only if that signer is an enrolled member, publishing
 `endpoint_shared@auth = frame(endpoint, signing_pk, wid)` and an `endpoint_key`
 reverse index. So a node that joins two workspaces has two device facts carrying
@@ -641,47 +693,61 @@ frame); the sync driver's shipments ride bundles instead of one fact per wire
 frame. A receiver unpacks a bundle and
 admits each inner fact through the normal gate, a bounded batch per turn — a
 corrupt inner is a per-fact miss that never poisons its siblings, and the wrapper
-itself is never admitted. Bundling, paired with the deferred-round rule above,
-turns a bulk catch-up from hundreds of leaf-rescanning compare rounds into a
-handful: on the measured 5000-fact catch-up it is roughly a 10x lift in both
-facts/s and MB/s.
+itself is never admitted. Bundling amortizes framing, encryption, and socket
+overhead during bulk catch-up while preserving per-inner admission checks.
 
 ## Content
 
-`facts/content/` is the messaging surface: `message` (a text message in a
-channel), `reaction` and `message_deletion` (each carrying its target's
-death keys per the suppression-closure discipline), and `retention_policy`
-(records the retention window as an ordinary offer — last-write-wins is a
-read-side fold; the purge
-machinery that enforces it is a later family). The poc-12 blob content
-spec — descriptor/outboard/chunk facts with `chunk -> outboard ->
-descriptor -> anchor` arrows, anchors never requiring chunks, validity
-public over ciphertext, the tree sharing the descriptor's death keys — is
-protocol, not yet implemented.
+`facts/content/` is the messaging surface. Every command below authors a
+content fact plus its detached Ed25519 signature:
 
-## Family Specs Not Yet Implemented
+- `message` carries workspace, channel, body, author member id, and its own
+  death key. It Requires the workspace, its signature key, and the workspace's
+  member-key offers. PROJECT rebuilds the canonical SHAPE and accepts only when
+  the key blessed for the claimed author is one of the actual signers.
+- `reaction` Requires the target message's valid `posted` offer, carries the
+  target's death key, and binds its claimed reactor member id to the signer.
+  It parks without the message and is physically suppressed when the message
+  is deleted.
+- `message_deletion` is target-independent so the thing it must kill cannot
+  race its validity. Any enrolled member may currently sign a deletion; a
+  per-author policy is outside this implementation.
+- `retention_policy` records a window as an ordinary offer and binds its signer
+  to both an enrolled member and an admin grant. The query chooses the latest
+  `(timestamp, owner)` row, so last-write-wins is a read-side fold rather than
+  kernel state.
 
-These are protocol, specified fully in the poc-12 design; they land as fact
-families without kernel changes:
+Signed content makes the authority chain part of hydration and sync closure: a
+message feed faults the author's membership resident, and a windowed sync id
+list carries shareable authority ancestors below the floor. A detached
+signature remains an independent fact when its target is suppressed unless it
+also carries the applicable death key.
 
-- **Blob content** — the descriptor/outboard/chunk tree above (Content).
-- **Retention and purge** — the policy fact exists (Content); enforcement
-  does not. Timestamp order alone never purges: pins, retained closures,
-  and live suppressor targets all hold facts; purge is `DELETE` over the
-  db, and `VACUUM` reclaims space. The purge horizon is sync's window
-  floor (see Sync).
-- **Drivers** — local input as a host-authored fact family; the event source
-  reading the OS is outside the boundary. (The connection driver is built —
-  see Connections; time is a turn primitive — see The Clock.)
+## Outside the Implemented Surface
+
+- **Blob content** — descriptor, outboard, and chunk fact families are not
+  implemented.
+- **Retention enforcement** — the signed policy fact and query exist, but no
+  worker applies its horizon. Policy-based purge must preserve pins,
+  dependency closures, and suppressors whose targets remain live. Physical
+  purge uses `DELETE`, and `VACUUM` reclaims SQLite file space.
+- **Workspace sync lanes** — one global `b"sync"` register currently feeds
+  every peer. Per-workspace authorization and coverage isolation are required
+  before unrelated workspace sets can safely share a node.
+- **LocalOnly ingress enforcement** — shareability excludes facts from sync
+  egress, but the peer inbox does not yet reject LocalOnly types by provenance.
+- **Local-input drivers** — connection driving exists and time is a turn
+  primitive; a general host-authored input family is not implemented.
 
 ## Testing
 
-Tests replace theorems by mirroring their quantifiers: where the poc-12
-proof says "for all fact streams," a test shuffles admission orders and
-asserts bit-identical derived state; where it says "for all bytes," a test
-feeds mutated frames and asserts misses, never wrong validations. The
-source-contract test keeps every fact file in the six-part shape. Black-box
-tests drive `bin/con.py` end to end, one process per command, hydrating
-from the db every time. Hydration tests assert the demand theorem:
-every resident fact's verdict equals full replay's, under shuffled file
-orders, with and without budgets.
+Tests mirror the protocol's quantifiers: admission-order tests shuffle fact
+streams and assert identical derived state; codec, crypto, and storage tests
+feed mutations and assert inert misses; treap tests pin history independence,
+clamping invariance, deletion, and degenerate-spine safety; reliability tests
+exercise loss, duplication, reordering, partitions, TTL dedup, anchor liveness,
+and convergence certificates. The source-contract test keeps every fact file
+in the prescribed module shape. Black-box stories drive `bin/con.py` and real
+daemon subprocesses over Unix and TCP sockets. Hydration tests compare
+demand-selected verdicts with a fully resident node, including suppression
+across the cold boundary and authority closure for signed content.
