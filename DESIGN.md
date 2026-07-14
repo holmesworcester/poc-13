@@ -649,27 +649,52 @@ facts/s and MB/s.
 ## Content
 
 `facts/content/` is the messaging surface: `message` (a text message in a
-channel), `reaction` and `message_deletion` (each carrying its target's
-death keys per the suppression-closure discipline), and `retention_policy`
-(records the retention window as an ordinary offer — last-write-wins is a
-read-side fold; the purge
-machinery that enforces it is a later family). The poc-12 blob content
-spec — descriptor/outboard/chunk facts with `chunk -> outboard ->
-descriptor -> anchor` arrows, anchors never requiring chunks, validity
-public over ciphertext, the tree sharing the descriptor's death keys — is
-protocol, not yet implemented.
+channel), `reaction`, file attachments, `message_deletion`, and
+`retention_policy` (the retention window is an ordinary offer;
+last-write-wins is a read-side fold).
+
+**Attachments are facts, not a second blob store.** `content.file` is the
+message-attached descriptor: content instance id, byte and chunk geometry,
+outboard root, filename, MIME, and encoding. `content.file_outboard` is the
+ordered chunk-hash index committed by that root. `content.file_chunk` carries
+one indexed byte range. The dependency arrows point only toward metadata:
+
+```
+chunk -> outboard -> descriptor -> message
+```
+
+The message never Requires its descriptor or chunks, so its dependency closure
+does not drag attachment bytes. Each chunk is at most 256 KiB and a descriptor
+may name at most 10 GiB. The outboard root is a domain-separated BLAKE3 hash of
+the canonical geometry, encoding, and ordered hash list; each leaf is a
+domain-separated hash over `(index, bytes)`. Outboard and chunk projectors
+compare those commitments against validated parent context. Only their
+validated offers count toward download progress or save, and save rechecks the
+root and total length before atomically replacing its output path.
+
+Every descriptor, outboard, and chunk directly Suppress-needs the parent
+message's `dead` key. A valid message deletion therefore terminally purges the
+whole attachment tree from residency, durable bytes, SQLite, and the sync
+register. The deletion fact is the durable replicated relationship; deleted
+bytes are not tombstone leaves, and a laggard re-shipping an old attachment
+fact buys one admission that re-derives Suppressed and dies.
+
+The active attachment encoding is `clear-v1`, matching message bodies: bytes
+are visible in the local fact store and sealed by the established-connection
+transport on the wire. A content-key family can replace the payload with
+ciphertext without changing the public descriptor/outboard/chunk validation
+graph, because the commitment is over the carried bytes.
 
 ## Family Specs Not Yet Implemented
 
 These are protocol, specified fully in the poc-12 design; they land as fact
 families without kernel changes:
 
-- **Blob content** — the descriptor/outboard/chunk tree above (Content).
 - **Retention and purge** — the policy fact exists (Content); enforcement
-  does not. Timestamp order alone never purges: pins, retained closures,
-  and live suppressor targets all hold facts; purge is `DELETE` over the
-  db, and `VACUUM` reclaims space. The purge horizon is sync's window
-  floor (see Sync).
+  does not. Timestamp order alone never purges: pins and retained closures
+  hold facts. Semantic deletion is separate and immediate through Suppress;
+  retention still needs a policy-driven deletion fact and `VACUUM` to reclaim
+  freed SQLite pages. The purge horizon is sync's window floor (see Sync).
 - **Drivers** — local input as a host-authored fact family; the event source
   reading the OS is outside the boundary. (The connection driver is built —
   see Connections; time is a turn primitive — see The Clock.)

@@ -51,6 +51,34 @@ $ bin/con.py w.facts content.message.feed <wid> general
 hello
 ```
 
+Attach, inspect, and save a file through the same daemon-owned fact store:
+
+```
+$ bin/con.py w.facts content.file.send <wid> general al "see attached" ./notes.txt text/plain
+message_id: <message-fact-id>
+file_fact_id: <descriptor-fact-id>
+file_id: <content-instance-id>
+filename: notes.txt
+mime: text/plain
+blob_bytes: 1234
+total_chunks: 1
+$ bin/con.py w.facts content.message.view <wid> general
+see attached
+  file: notes.txt (1234 bytes, complete)
+$ bin/con.py w.facts content.file.list <wid>
+FILES (1 total):
+1. complete notes.txt (1234 bytes, 1/1 chunks, 100%)
+$ bin/con.py w.facts content.file.save <wid> 1 ./saved-notes.txt
+```
+
+Attachments are ordinary descriptor, outboard, and 256 KiB chunk facts, capped
+at 10 GiB. The outboard commits to every indexed chunk hash, so only validated
+chunks count toward progress or save. `content.message_deletion.delete` removes
+the message and its complete attachment tree from memory, SQLite, and sync
+state. Attachment payloads currently use the same confidentiality boundary as
+message bodies: `clear-v1` bytes at rest and sealed established-connection
+frames in transit.
+
 ## Performance
 
 `python3 bench/bench.py` — one file, stdlib only, ~20s. It prints a table and
@@ -84,4 +112,3 @@ later wave). If a single db
 ever outgrows the daemon's resident set, the next step is teaching the sync
 family to ship from the Store rather than from residency — a family change,
 not a kernel one. Linear is accepted and measured, not hidden.
-
