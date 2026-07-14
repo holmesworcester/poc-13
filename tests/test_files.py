@@ -68,10 +68,10 @@ def test_send_view_save_roundtrip_atomized_descriptor_and_cold_hydration():
         descriptor = n.facts[receipt["file_fact_id"]]
         assert {a.name for a in descriptor.atoms if a.relationship == PROVIDE} >= {
             b"file", b"descriptor", b"file_size", b"file_slices",
-            b"file_slice_bytes", b"file_encoding", b"file_name", b"file_mime"}
+            b"file_slice_bytes", b"file_name", b"file_mime"}
         assert {a.name for a in descriptor.atoms if a.relationship != PROVIDE} >= {
             b"posted", b"pk", b"key", b"dead"}
-        assert len(descriptor.atoms) == 13
+        assert len(descriptor.atoms) == 12
         assert signature.signed(n, wid, receipt["file_fact_id"])
         size_atom = next(a for a in descriptor.atoms if a.name == b"file_size")
         assert int.from_bytes(size_atom.value, "big") == len(payload)

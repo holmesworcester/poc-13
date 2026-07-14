@@ -222,5 +222,6 @@ and one `name`; there is no separate kind, effect, role, or atom mode. All
 three consumer relationships exhaustively fault and match the same stored
 state, then settle differently: Gather passes zero or more matches, Require
 parks on zero, and SuppressIf purges on nonzero. The wire header and SQLite
-relation follow that same shape, so the identity domain is
-`tinyp2p.fact.v2`; old atom tables fail closed.
+relation follow that same shape. The identity domain is `tinyp2p.fact`, carrying
+no version: this is a proof of concept, stale stores are deleted rather than
+migrated, so there is nothing for a version marker to protect.

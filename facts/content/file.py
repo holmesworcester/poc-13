@@ -12,14 +12,13 @@ from facts.auth import signature
 from facts.store import hydrate
 
 TAG = b"content.file"
-ENCODING_CLEAR = b"clear-v1"
-FILE_ID_DOMAIN = b"tinyp2p.file.id.v2"
+FILE_ID_DOMAIN = b"tinyp2p.file.id"
 SLICE_BYTES = 256 * 1024
 MAX_FILE_BYTES = 10 * 1024 * 1024 * 1024
 MAX_FILENAME_BYTES = 255
 MAX_MIME_BYTES = 128
 FIELD_NAMES = (b"descriptor", b"file_size", b"file_slices", b"file_slice_bytes",
-               b"file_encoding", b"file_name", b"file_mime")
+               b"file_name", b"file_mime")
 PROJECTED_NAMES = (b"file", *FIELD_NAMES)
 
 
@@ -33,7 +32,7 @@ def file_id_for(workspace_id, message_id, root, filename, mime_type):
 
 # SHAPE — each metadata field is a named scalar Provide at (file id, root).
 def file(workspace_id, message_id, file_id, root, blob_bytes, total_slices,
-         filename, mime_type, t, encoding=ENCODING_CLEAR):
+         filename, mime_type, t):
     return fact(TAG, ts_atom(t, workspace_id),
                 Atom(REQUIRE, b"posted", workspace_id, Exact(message_id)),
                 Atom(REQUIRE, b"pk", workspace_id, SELF),
@@ -44,7 +43,6 @@ def file(workspace_id, message_id, file_id, root, blob_bytes, total_slices,
                 Atom(PROVIDE, b"file_size", file_id, Exact(root), _u64(blob_bytes)),
                 Atom(PROVIDE, b"file_slices", file_id, Exact(root), _u32(total_slices)),
                 Atom(PROVIDE, b"file_slice_bytes", file_id, Exact(root), _u32(SLICE_BYTES)),
-                Atom(PROVIDE, b"file_encoding", file_id, Exact(root), encoding),
                 Atom(PROVIDE, b"file_name", file_id, Exact(root), filename),
                 Atom(PROVIDE, b"file_mime", file_id, Exact(root), mime_type))
 
@@ -77,14 +75,12 @@ def _canonical(f):
         filename.decode("utf-8"); mime_type.decode("utf-8")
         valid = (len(workspace_id) == len(message_id) == len(file_id) == len(root) == 32
                  and blob_bytes <= MAX_FILE_BYTES and total_slices == expected
-                 and values[b"file_encoding"] == ENCODING_CLEAR
                  and 0 < len(filename) <= MAX_FILENAME_BYTES
                  and len(mime_type) <= MAX_MIME_BYTES
                  and file_id == file_id_for(workspace_id, message_id, root,
                                             filename, mime_type))
         rebuilt = file(workspace_id, message_id, file_id, root, blob_bytes,
-                       total_slices, filename, mime_type, ts_of(f),
-                       values[b"file_encoding"])
+                       total_slices, filename, mime_type, ts_of(f))
         return (listing, posted, fields) if valid and f == rebuilt else None
     except Exception:
         return None
@@ -226,7 +222,7 @@ def _descriptor(node, owner, workspace_id, message_id, file_id):
             "root": root, "blob_bytes": int.from_bytes(rows[b"file_size"].value, "big"),
             "total_slices": int.from_bytes(rows[b"file_slices"].value, "big"),
             "slice_bytes": int.from_bytes(rows[b"file_slice_bytes"].value, "big"),
-            "encoding": rows[b"file_encoding"].value, "filename": rows[b"file_name"].value,
+            "filename": rows[b"file_name"].value,
             "mime_type": rows[b"file_mime"].value}
 
 

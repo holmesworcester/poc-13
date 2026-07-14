@@ -129,7 +129,7 @@ class Fact:
 def fact(tag, *atoms):                   # canonicalize: sort + dedup + validate
     return Fact(tag, tuple(dec_atom(e) for e in sorted({enc_atom(a) for a in atoms})))
 
-DOMAIN = b"tinyp2p.fact.v2"                # relationship grammar is a new fact dialect
+DOMAIN = b"tinyp2p.fact"                 # separation: a fact id is never any other hash
 _blob = lambda f: b"".join(frame(enc_atom(a)) for a in f.atoms)
 def fact_id(f): return H(frame(DOMAIN, f.type_tag, _blob(f)))
 def encode(f): return frame(f.type_tag) + _blob(f)

@@ -24,7 +24,6 @@ def file_slice(workspace_id, message_id, file_id, root, index, proof, t):
                 Atom(REQUIRE, b"file_size", file_id, Exact(root)),
                 Atom(REQUIRE, b"file_slices", file_id, Exact(root)),
                 Atom(REQUIRE, b"file_slice_bytes", file_id, Exact(root)),
-                Atom(REQUIRE, b"file_encoding", file_id, Exact(root)),
                 Atom(SUPPRESS_IF, b"dead", workspace_id, Exact(message_id)),
                 Atom(PROVIDE, b"slice", file_id, Exact(index.to_bytes(4, "big")), proof))
 
@@ -65,15 +64,14 @@ def project(f, ctx):
     index = int.from_bytes(atom.target[1], "big")
     for owner, _, _ in by(ctx, b"descriptor"):
         rows = {name: next((row for row in by(ctx, name) if row[0] == owner), None)
-                for name in (b"file", b"file_size", b"file_slices",
-                             b"file_slice_bytes", b"file_encoding")}
+                for name in (b"file", b"file_size", b"file_slices", b"file_slice_bytes")}
         if any(row is None for row in rows.values()) or rows[b"file"][2].value != atom.scope:
             continue
         try:
             blob_bytes = int.from_bytes(rows[b"file_size"][2].value, "big")
             total = int.from_bytes(rows[b"file_slices"][2].value, "big")
             width = int.from_bytes(rows[b"file_slice_bytes"][2].value, "big")
-            if rows[b"file_encoding"][2].value != b"clear-v1" or width != SLICE_BYTES:
+            if width != SLICE_BYTES:
                 continue
             if total != (0 if blob_bytes == 0 else (blob_bytes + width - 1) // width):
                 continue

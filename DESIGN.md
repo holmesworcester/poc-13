@@ -113,12 +113,13 @@ atoms, ordered byte-lexicographically on the canonical atom encoding.
 LE length). Each atom contributes its own framed canonical byte form.
 
 ```text
-FactId = H("tinyp2p.fact.v2" ‖ type_tag ‖ atoms)
+FactId = H("tinyp2p.fact" ‖ type_tag ‖ atoms)
 ```
 
 `H` is BLAKE3-256 (32 bytes, via the `blake3` package). The encoding is one fixed
-self-delimiting byte form, version-free forever; the domain string is the
-only dialect marker. Strict decode rejects malformed encodings, unsorted or
+self-delimiting byte form, version-free forever; the domain string carries no
+version either, and exists only so that a fact id can never collide with any
+other hash in the system. Strict decode rejects malformed encodings, unsorted or
 duplicate atoms, and trailing bytes — anything that does not re-encode
 byte-identically.
 
@@ -806,7 +807,7 @@ last-write-wins is a read-side fold).
 
 **Attachments are facts, not a second blob store.** `content.file` is the
 message-attached descriptor. Content instance id, BLAKE3 root, byte and slice
-geometry, filename, MIME, and encoding are separate named atoms; there is no
+geometry, filename, and MIME are separate named atoms; there is no
 family-specific metadata record inside an atom value. `content.file_slice`
 carries one indexed canonical Bao slice encoding: the requested bytes plus the
 authentication path that proves them against the descriptor root. The
@@ -819,8 +820,8 @@ Bao slice -> descriptor -> message
 The message never Requires its descriptor or slices, so its dependency closure
 does not drag attachment bytes. Each requested range is at most 256 KiB and a
 descriptor may name at most 10 GiB. A slice's intrinsic gate bounds its index
-and proof bytes. Its projector obtains root, length, slice count, width, encoding,
-and message binding from one validated descriptor owner, then uses the official
+and proof bytes. Its projector obtains root, length, slice count, width, and
+message binding from one validated descriptor owner, then uses the official
 Bao format to authenticate the range. Only projected proof Provides count toward
 download progress. Save authenticates every proof again, streams the extracted
 bytes through BLAKE3, checks root and total length, fsyncs a sibling temporary,
@@ -847,11 +848,15 @@ is the durable replicated relationship; deleted bytes are not tombstone leaves,
 and a laggard re-shipping an old attachment fact buys one admission that
 re-derives Suppressed and dies.
 
-The active attachment encoding is `clear-v1`, matching message bodies: bytes
-are visible in the local fact store and sealed by the established-connection
-transport on the wire. A content-key family can replace the payload with
-ciphertext without changing the public descriptor/slice validation graph,
-because the Bao root and proofs commit to the carried bytes.
+Attachment payloads sit on the same confidentiality boundary as message bodies:
+bytes are visible in the local fact store and sealed by the established-connection
+transport on the wire. The descriptor carries no encoding tag and needs none. A
+content-key family can replace the payload with ciphertext without changing the
+public descriptor/slice validation graph, because the Bao root and proofs commit
+to whatever bytes are carried; ciphertext authenticates against a ciphertext root
+exactly as cleartext does, and decryption is a save-time concern above the
+validation layer. A mode field inside the descriptor would only restate, in a
+place a peer could lie about, what the bytes already prove.
 
 - `channel` is replicated structural state whose fact id is the routing id and
   whose bounded UTF-8 name is only display data. It Requires its workspace,

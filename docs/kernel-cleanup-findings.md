@@ -12,8 +12,15 @@ The four relationships now share one `Atom` shape. Gather, Require, and
 SuppressIf use the same exhaustive resident-and-store match acquisition;
 settlement alone differs. The wire header is now `(relationship, target-tag)`,
 the SQLite relation stores `relationship` and `name`, and the fact identity
-domain is `tinyp2p.fact.v2`. V1 atom databases fail closed rather than being
-silently reinterpreted.
+domain is `tinyp2p.fact` — unversioned, because a proof of concept deletes stale
+stores rather than migrating them.
+
+The descriptor's `file_encoding` atom went with it. Its only value was
+`clear-v1`, `content.file.check` pinned that constant, and the `content.file_slice`
+projector then re-tested it against a descriptor that could not have been
+admitted holding anything else — a dead check behind a Require that gated on a
+fact its five sibling Requires already gated on. Bao commits to whatever bytes a
+slice carries, so a future sealed-payload family needs no tag to interpret them.
 
 ## Applied (2026-07-05)
 

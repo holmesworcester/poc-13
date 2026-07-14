@@ -36,7 +36,7 @@ def test_relationships_have_one_atom_shape_and_one_wire_tag():
         header = unframe(encoded)[0]
         assert header == bytes((relationship, EXACT))
         assert dec_atom(encoded) == atom
-    assert DOMAIN == b"tinyp2p.fact.v2"
+    assert DOMAIN == b"tinyp2p.fact"
 
 
 def test_retired_kind_effect_header_is_not_a_relationship():

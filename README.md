@@ -67,7 +67,7 @@ MessageFact(W, C, A, body, t) ::=
   )
 
 M ::= FactId(MessageFact(W, C, A, body, t))
-    = BLAKE3(frame("tinyp2p.fact.v2", tag, canonical(atoms)))
+    = BLAKE3(frame("tinyp2p.fact", tag, canonical(atoms)))
 
 materialize(SELF, owner=M) ::= Exact(M)
 ```
@@ -267,8 +267,8 @@ independently against the descriptor's BLAKE3 root, so only proven slices count
 toward progress or save. Descriptor metadata is first-class atom vocabulary,
 not a nested record. `content.message_deletion.delete` removes the message,
 descriptor, and every slice from memory, SQLite, and sync state. Payloads
-currently use the same confidentiality boundary as message bodies: `clear-v1`
-bytes at rest and sealed established-connection frames in transit.
+currently use the same confidentiality boundary as message bodies: bytes in the
+clear at rest and sealed established-connection frames in transit.
 
 ## Performance
 
