@@ -1,30 +1,49 @@
 """TinyP2P kernel: the atom model engine, one file (design: DESIGN.md).
 
-Facts are the unit of identity, atoms the unit of matching, and needs/offers
-are the whole fact language. The kernel owns exactly four things: canonical
-identity, admission, matching, and the turn loop (which the host feeds `now`).
-Everything else — sync, queues, effects, content, retention — is a fact family
-under facts/; time alone is a turn primitive, not a family (see turn/now_need).
-Two generic seams let a family own an index the kernel never reads: the
-settle() hook (a family sees every verdict its facts settle to and folds it
-into its register under regs — volatile, rebuilt by replay through the same
-hook) and answer() (a family claims a reserved role and serves it itself).
+The kernel exists to keep one answer current — which facts are valid, and
+what do they offer — from nothing but durable fact bytes and the signals the
+host hands each turn. Everything in this file serves that answer: naming
+facts unforgeably, letting only genuine ones in, matching needs to offers,
+and re-judging a fact whenever the offers it depends on change.
 
-Projectors ARE the routers: the kernel runs one root projector, and a Router
-is just a projector that dispatches on the next type-tag segment. Extraction
-routes through the same tree.
+The vocabulary: a Fact is the unit of identity — an immutable set of atoms,
+named by the hash of its canonical bytes. An Atom is the unit of matching —
+a need or an offer at a (role, scope) key. Needs and offers are the whole
+fact language: a fact can state nothing else, and an offer counts only
+while its owner's verdict is Valid.
 
-Derived state (validity memo, clean twin, frontier) is rebuildable
-from the durable fact set alone. There is no replay: a stepped fact's needs
-fault their cold matches resident from the Store (the persisted atom
-relation), so boot is one total demand and a session pays for what it asks
-about. The store answers existence, never standing.
+The story of one fact:
+  1. admit()    the one door in: decode strictly, name the fact by its
+                bytes, self-check via its family, index its atoms, queue it.
+  2. turn()     the host hands in the clock and the wire's flush reports;
+                the engine judges up to `bound` queued facts.
+  3. _step()    judge one fact: fault its cold matches in from the Store,
+                gate (a matched Suppress kills, an unmet Require parks),
+                else hand the fact and the validated answers to its needs
+                to its family's project(), which returns the verdict.
+  4. _settle()  make the verdict real: memo it, run the family settle()
+                hook, publish or withdraw the fact's offers, wake every
+                fact those changed offers answer (back to step 3), and on
+                a terminal verdict erase the fact whole (_evict).
+  5. watched()  the one door out: the host reads validated offers at keys
+                it watches, does the external work, and admits new facts
+                reporting what happened.
 
-Life of a fact: admit() decodes, self-checks, indexes, and enqueues; turn()
-drains the frontier (bounded); _step() faults cold matches resident, gates
-(Suppress > Require/Park), and projects; _promote() memos the verdict, runs
-the family settle() hook, replaces the fact's validated offers, wakes what
-changed, and evicts on a terminal verdict; the host reads watched().
+Who owns what: the kernel owns identity, admission, matching, and the turn
+loop — and knows no domain. Fact families under facts/ own all judgment
+(project()), plus two seams for family state the kernel never reads:
+settle() (fold every verdict into a register under regs) and answer()
+(serve a reserved role from a family index). The Store owns existence only
+— durable atoms, "who offers at this key" — never standing. The host owns
+time and effects: it feeds turn(), drains watched(), performs the I/O; it
+never writes engine state. Projectors ARE the routers: the kernel runs one
+root projector, and a Router is just a projector that dispatches on the
+next type-tag segment; extraction routes through the same tree.
+
+Derived state (validity memo, clean twin, frontier) is rebuildable from the
+durable fact set alone. There is no replay: a stepped fact's needs fault
+their cold matches resident from the Store, so boot is one total demand and
+a session pays for what it asks about.
 
 Hash: BLAKE3-256 (the `blake3` package; stdlib has none).
 """
@@ -40,7 +59,9 @@ except ImportError as e:                 # the repo's one non-crypto-suite depen
 H = lambda b: _b3(b).digest()
 now = lambda: int(time.time())           # host convenience; never engine input
 
-def frame(*ps):                          # ‖ : length-framed concat (injective)
+# Framing: injective concat — distinct structures never share bytes, which is
+# what lets the hash of a fact's bytes serve as its name.
+def frame(*ps):                          # ‖ : length-framed concat
     assert all(len(p) < 2**32 for p in ps)
     return b"".join(len(p).to_bytes(4, "little") + p for p in ps)
 
@@ -55,6 +76,7 @@ def unframe(b):                          # the dual of frame: every length-frame
     return out
 
 # --- Canonical data -----------------------------------------------------------
+# This makes identity a pure function of one canonical byte encoding.
 NEED, OFFER = 0, 1
 NONE, REQUIRE, WATCH, SUPPRESS = 0, 1, 2, 3
 EXACT, SELF_T, RANGE = 0, 1, 2           # wire tags only; in memory a target is (lo, hi) or SELF
@@ -113,6 +135,7 @@ def ts_of(f):
                  for a in f.atoms if a.kind == OFFER and a.role == b"ts"), 0)
 
 # --- Matching -------------------------------------------------------------------
+# This materializes self references and decides which atom targets meet.
 def covers(off_t, need_t):               # SELF and span↔span never match; else a match is one
     if SELF in (off_t, need_t): return False                # side being a point inside the other
     if need_t[0] == need_t[1]: return off_t[0] <= need_t[0] <= off_t[1]   # point need in the offer's span
@@ -125,11 +148,12 @@ def needs_of(f, fid): return [mat(a, fid) for a in f.atoms if a.kind == NEED]
 
 # The one row shape, everywhere a matched atom travels with its owner — both
 # match indexes, ctx, watched(). Asserted rows carry ts=0: ts is only ever
-# read off clean rows, where promotion stamps ts_of(owner).
+# read off clean rows, where settlement stamps ts_of(owner).
 Row = namedtuple("Row", "owner ts atom")
 
-# --- The projector contract ------------------------------------------------------
-# The verdict alphabet — who says it, and what _promote does with it:
+# --- Projector contract ----------------------------------------------------------
+# This defines what families may return and how each verdict changes standing.
+# The verdict alphabet — who says it, and what _settle does with it:
 #   Unknown             seeded at admit(): a fact not yet stepped
 #   Valid               family: publish out.offers to the clean twin
 #   Invalid | Parked    family / engine (unmet Require, or no family): withdraw
@@ -147,6 +171,7 @@ class Out:                               # project() -> verdict + all it may emi
 def by(ctx, role): return [r for n, rs in ctx.items() if n.role == role for r in rs]
 
 # --- Host signals & reserved roles -------------------------------------------------
+# This turns clocks, flush reports, and reserved indexes into context rows.
 # Roles no ordinary projection answers. Host signals arrive through turn() as
 # one transient clean-twin slot each; reserved roles (leading NUL — decode pins
 # them to NEED+WATCH, so no family can author or collide with one, and they
@@ -219,7 +244,8 @@ class Router:
         c = self._child(f)
         return c.project(f, ctx) if c else None
 
-# --- The durable store --------------------------------------------------------------
+# --- Store -----------------------------------------------------------------------
+# This persists admitted atoms and reconstructs only bytes that still hash true.
 class Store:
     """The persisted atom relation: one row per atom of every durable fact —
     canonical columns plus materialized match columns (SELF rewritten to the
@@ -299,7 +325,8 @@ class Store:
 
     def commit(self): self.db.commit()   # host calls it: durable before the reply
 
-# --- The match index ---------------------------------------------------------------
+# --- Bucket ----------------------------------------------------------------------
+# This narrows point/range matching to only the rows a query can touch.
 class Bucket:
     """One match bucket of Rows sharing an index key — (kind, role, scope) in
     the asserted index, (role, scope) in the clean twin. Point-target rows
@@ -338,7 +365,8 @@ class Bucket:
     def __bool__(self):                  # truthiness is presence, O(1) — `b.match(t) if b else []`
         return bool(self.exact) or bool(self.ranges)   # must never pay the linear count
 
-# --- The engine --------------------------------------------------------------------
+# --- Node ------------------------------------------------------------------------
+# This carries resident facts from admission to observable validated offers.
 class Node:
     """One engine over one root projector. Durable authority = self.durable
     (canonical bytes, 'the disk'); memo/clean/frontier are derived.
@@ -368,8 +396,10 @@ class Node:
         self.purged = []                     # durable fids a terminal verdict evicted, for the host's
                                              # flush bookkeeping (a purged fid is no longer "on disk")
 
-    # Host in — admission gates; a failed gate is inert. checked=True (replay
-    # from own durable file) skips the family self-check: those bytes passed once.
+    # --- The way in (admit) -----------------------------------------------------
+    # This accepts one canonical fact, indexes it, and queues its first judgment.
+    # A failed gate is inert. checked=True (replay from own durable file) skips
+    # the family self-check: those bytes passed once.
     def admit(self, b, expect=None, checked=False):
         try: f = decode(b)
         except Exception: return None
@@ -386,39 +416,16 @@ class Node:
         self._enqueue(fid)
         return fid
 
+    # --- The index queries ------------------------------------------------------
+    # This answers asserted discovery, validated standing, and reserved lookups.
     # A shared role+scope is the whole precondition for a match, so it keys the
-    # bucket; the bucket's own index decides the rest over just the candidates a
-    # point/range can touch — the same covers() relation, without the linear scan.
+    # bucket; the bucket's own index narrows the point/range candidates.
     def offers_for(self, need):          # asserted, dirty: discovery only
         b = self.rows.get((OFFER, need.role, need.scope)); return b.match(need.target) if b else []
     def needs_for(self, offer):          # wake fanout direction
         b = self.rows.get((NEED, offer.role, offer.scope)); return b.match(offer.target) if b else []
-    def valid_offers(self, need):        # the clean twin: the only justifier — a point/range lookup, not a scan
+    def valid_offers(self, need):        # the clean twin: the only justifier
         b = self.clean.get((need.role, need.scope)); return b.match(need.target) if b else []
-
-    def _enqueue(self, fid):             # add to the frontier iff not already pending (mirror keeps 'in' O(1))
-        if fid not in self._queued: self.frontier.append(fid); self._queued.add(fid)
-
-    def _wake(self, offer, skip=None):   # re-enqueue every need this offer covers (never its own owner)
-        for r in self.needs_for(offer):
-            if r.owner != skip: self._enqueue(r.owner)
-
-    def deps(self, fid):                 # fid's direct Require/suppress edge owners: its dependency spine.
-        f = self.facts.get(fid)          # STRUCTURAL/asserted (from offers_for), NOT validity-gated — decided in _step
-        return frozenset() if f is None else frozenset(
-            r.owner for n in needs_of(f, fid) if n.effect in (REQUIRE, SUPPRESS)
-            for r in self.offers_for(n))
-
-    def closure(self, fid, out=None):    # transitive deps (requires + suppressors), incl fid — the sync spine.
-        out = set() if out is None else out          # a shared visited-set across leaves dedups the union closure
-        if fid in out: return out
-        out.add(fid)
-        for d in self.deps(fid): self.closure(d, out)
-        return out
-
-    def refault(self):                   # the relation changed underneath (delete + re-add):
-        self.checked.clear()             # forget the fault memos and re-step every resident
-        for fid in self.facts: self._enqueue(fid)     # fact, so their keys re-check the store
 
     # Reserved index needs (see the census above): the kernel answers resident
     # itself, a registered family answerer serves the rest, and everything
@@ -432,15 +439,8 @@ class Node:
         fid = n.target[1]
         return [Row(_RES, 0, Atom(OFFER, b"resident", b"sync", Exact(fid)))] if fid in self.durable else []
 
-    # A host signal is one transient clean-twin slot, replaced each turn
-    # (nothing accumulates), waking every need its offers now cover.
-    def _present(self, role, scope, rows):
-        b = Bucket()
-        for r in rows: b.add(r)
-        self.clean[(role, scope)] = b
-        for r in rows: self._wake(r.atom)
-
-    # Engine drain — bounded; overflow parks on the frontier, never drops.
+    # --- The turn loop (turn / run / _step / _fault) ---------------------------
+    # This presents host signals, judges the frontier, and faults cold matches.
     def turn(self, now=None, shipped=(), bound=64):
         if now is not None:                          # the host hands time to the turn
             self._present(NOW_ROLE, NOW_SCOPE, [Row(_NOW, now,
@@ -457,20 +457,6 @@ class Node:
             self.turn()
         raise RuntimeError("no quiescence")
 
-    def _fault(self, ns):
-        """The fault leg: each need key is checked against the store once (a
-        checked total covers every key). Cold owners re-enter through ordinary
-        admission, and their own needs fault in turn — the step loop IS the
-        closure walk."""
-        if not self.store or _ALL_KEY in self.checked: return
-        for n in ns:
-            k = (n.role, n.scope, n.target)
-            if k in self.checked: continue
-            self.checked.add(k)
-            for o in self.store.owners(n):
-                if o not in self.facts and (b := self.store.fact_bytes(o)):
-                    self.admit(b, checked=True)
-
     def _step(self, fid):
         if fid not in self.facts: return
         f = self.facts[fid]; ns = needs_of(f, fid)
@@ -485,9 +471,44 @@ class Node:
         else:                            # Context<Validated>; Watch never gates. Reserved index needs are
             ctx = {n: self._answer(n) for n in ns if n.effect in (REQUIRE, WATCH)}   # answered from the engine
             out = self.root.project(f, ctx) or Out(PARKED)
-        self._promote(fid, f, out, fam)
+        self._settle(fid, f, out, fam)
 
-    def _promote(self, fid, f, out, fam=None):
+    def _fault(self, ns):
+        """The fault leg: each need key is checked against the store once (a
+        checked total covers every key). Cold owners re-enter through ordinary
+        admission, and their own needs fault in turn — the step loop IS the
+        closure walk."""
+        if not self.store or _ALL_KEY in self.checked: return
+        for n in ns:
+            k = (n.role, n.scope, n.target)
+            if k in self.checked: continue
+            self.checked.add(k)
+            for o in self.store.owners(n):
+                if o not in self.facts and (b := self.store.fact_bytes(o)):
+                    self.admit(b, checked=True)
+
+    # A host signal is one transient clean-twin slot, replaced each turn
+    # (nothing accumulates), waking every need its offers now cover.
+    def _present(self, role, scope, rows):
+        b = Bucket()
+        for r in rows: b.add(r)
+        self.clean[(role, scope)] = b
+        for r in rows: self._wake(r.atom)
+
+    def _enqueue(self, fid):             # add iff not already pending; the set keeps membership O(1)
+        if fid not in self._queued: self.frontier.append(fid); self._queued.add(fid)
+
+    def _wake(self, offer, skip=None):   # re-enqueue every need this offer covers (never its own owner)
+        for r in self.needs_for(offer):
+            if r.owner != skip: self._enqueue(r.owner)
+
+    def refault(self):                   # the relation changed underneath (delete + re-add):
+        self.checked.clear()             # forget the fault memos and re-step every resident
+        for fid in self.facts: self._enqueue(fid)     # fact, so their keys re-check the store
+
+    # --- Making a verdict real (_settle / _evict) ------------------------------
+    # This records standing, replaces validated offers, wakes dependents, and evicts terminals.
+    def _settle(self, fid, f, out, fam=None):
         self.memo[fid] = out.verdict
         # The family lifecycle hook: a family that declares settle() sees every
         # verdict its fact settles to — including Suppressed and Parked, which
@@ -527,8 +548,8 @@ class Node:
             self.purged.append(fid)
             if self.store: self.store.delete(fid)
 
-    # Host out — the host drains validated offers at keys it watches, performs
-    # external work, and admits facts reporting what happened. It never writes.
+    # --- The way out (watched) --------------------------------------------------
+    # This exposes validated offers and a deterministic snapshot of derived state.
     def watched(self, role, scope):
         return list(self.clean.get((role, scope), ()))
 
@@ -538,3 +559,18 @@ class Node:
     def derived(self):
         return (sorted((o, t, enc_atom(a)) for rs in self.clean.values() for o, t, a in rs),
                 sorted(self.memo.items()))
+
+    # --- The sync spine (deps / closure) ---------------------------------------
+    # This traces asserted Require/Suppress owners for dependency-complete sync.
+    def deps(self, fid):                 # direct structural edge owners
+        f = self.facts.get(fid)          # asserted, not validity-gated — standing is decided in _step
+        return frozenset() if f is None else frozenset(
+            r.owner for n in needs_of(f, fid) if n.effect in (REQUIRE, SUPPRESS)
+            for r in self.offers_for(n))
+
+    def closure(self, fid, out=None):    # transitive deps, including fid
+        out = set() if out is None else out          # a shared visited-set across leaves dedups the union closure
+        if fid in out: return out
+        out.add(fid)
+        for d in self.deps(fid): self.closure(d, out)
+        return out

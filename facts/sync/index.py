@@ -33,7 +33,7 @@ fanout is B and depth is log_B(n) regardless of key distribution. A range of
 <= T leaves is listed by id instead, ending the recursion. (A maliciously
 degenerate set costs O(n) local compute; the paper shows communication,
 roundtrips, and censorship-resistance stay immune.)"""
-from kernel import Atom, H, NEED, OFFER, Range, WATCH, answer, frame, ts_of
+from kernel import Atom, H, NEED, OFFER, Range, Row, WATCH, answer, frame, ts_of
 
 TAG = b"sync.index"                      # the namespace claim; no wire fact carries it yet
 
@@ -216,8 +216,9 @@ def summary(node, n):
     cached = reg["memo"].get((lo, hi, floor))
     if cached is not None and (not floor or cached[1] == len(node.durable)):
         return cached[0]
-    t = reg["tree"]; R = lambda a: (_SUM, 0, a)
-    rows = [R(Atom(OFFER, b"fp", b"sync", Range(lo, hi), t.fp(lo, hi)))]   # the prune-check fingerprint
+    t = reg["tree"]
+    def row(a): return Row(_SUM, 0, a)
+    rows = [row(Atom(OFFER, b"fp", b"sync", Range(lo, hi), t.fp(lo, hi)))]   # the prune-check fingerprint
     def claim(a, b):                     # my claim for [a,b): the leaves (+ windowed: their below-floor deps), else a fp
         if t.small(a, b):
             ids = list(t.fids(a, b))                            # my leaves in range: always advertised (enumerate)
@@ -227,8 +228,8 @@ def summary(node, n):
                 ids += [d for d in seen if d in node.facts and _kb(ts_of(node.facts[d]), d) < floor
                         and node.root.extract(node.facts[d])[1]]
             blob = frame(*ids[:CLOSURE_CAP])                    # full round (floor==b""): leaves only — none below b""
-            return R(Atom(OFFER, b"cids", b"sync", Range(a, b), blob))
-        return R(Atom(OFFER, b"cfp", b"sync", Range(a, b), t.fp(a, b)))
+            return row(Atom(OFFER, b"cids", b"sync", Range(a, b), blob))
+        return row(Atom(OFFER, b"cfp", b"sync", Range(a, b), t.fp(a, b)))
     rows += [claim(lo, hi)] if t.small(lo, hi) else [claim(a, b) for a, b in t.parts(lo, hi)]
     reg["memo"][(lo, hi, floor)] = (rows, len(node.durable))
     return rows
