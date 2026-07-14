@@ -184,14 +184,16 @@ Then use the CLI from another terminal:
 ```text
 $ bin/tiny.py w.facts auth.workspace.create acme
 <workspace-id>
-$ bin/tiny.py w.facts content.channel.list <workspace-id>
+$ bin/tiny.py w.facts auth.active_workspace.use <workspace-id>   # select it; verbs may now omit wid=
+$ bin/tiny.py w.facts content.channel.list
 <channel-id> general
-$ bin/tiny.py w.facts content.channel.create <workspace-id> random
+$ bin/tiny.py w.facts content.channel.create random
 <channel-id>
-$ bin/tiny.py w.facts content.message.send <workspace-id> general al "hello"
+$ bin/tiny.py w.facts content.message.send general hello there    # multi-word body; author is the local signer
 <message-id>
-$ bin/tiny.py w.facts content.message.feed <workspace-id> general
-hello
+$ bin/tiny.py w.facts content.message.feed general
+hello there
+$ bin/tiny.py --commands | grep content.message                   # discover verbs (needs no daemon)
 ```
 
 `auth.workspace.create` authors a replicated, member-signed `general` channel.
@@ -201,6 +203,14 @@ a validated name or a 64-hex channel id. A message cannot validate until the
 exact channel fact, its signature, and its workspace authority closure are
 valid, so channel lists and isolated feeds converge across peers instead of
 depending on local aliases that happen to share a string.
+
+The content verbs share one deterministic grammar: ambient context rides as
+keyed tokens — `wid=<64hex>` (else the workspace selected by
+`auth.active_workspace.use`, or the sole workspace) and `t=<int>` (else now) —
+so a numeric or hex-looking body is never re-read as a workspace or a timestamp.
+Everything else is a positional in the verb's order; a message body is the
+trailing words, joined. `tiny --commands` lists every verb and
+`tiny --completion bash` prints a shell completion; both run without a daemon.
 
 The daemon starts cold. A normal query faults only the keys it needs;
 `bin/tiny.py w.facts store.hydrate.pull` explicitly makes the complete durable

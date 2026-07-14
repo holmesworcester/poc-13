@@ -9,6 +9,7 @@ from kernel import (Atom, Exact, NEED, OFFER, Out, REQUIRE, SELF, encode,
                     fact, now, ts_atom, ts_of)
 from facts.auth import signature
 from facts.store import hydrate
+import cliargs
 
 TAG = b"content.channel"
 MAX_NAME_BYTES = 64
@@ -79,10 +80,21 @@ def resolve(node, workspace_id, ref):
         except ValueError: pass
     raise RuntimeError(f"unknown channel: {ref}")
 
-# CLI — string boundary over COMMANDS/QUERIES.
-CLI = {"create": lambda n, wid, name, t=None:
-           create(n, bytes.fromhex(wid), name.encode(), int(t or now())).hex(),
-       "list": lambda n, wid:
-           "\n".join(f"{cid.hex()} {name.decode()}"
-                     for cid, name in index(n, bytes.fromhex(wid))),
-       "id": lambda n, wid, ref: resolve(n, bytes.fromhex(wid), ref).hex()}
+# CLI — string boundary over COMMANDS/QUERIES. Grammar: `[wid=] <name>` etc.
+def _cli_create(n, *argv):
+    kv, pos = cliargs.split(argv)
+    if len(pos) != 1: raise RuntimeError("usage: content.channel.create [wid=<id>] <name> [t=<n>]")
+    return create(n, cliargs.wid_of(n, kv), pos[0].encode(), cliargs.t_of(kv)).hex()
+
+def _cli_list(n, *argv):
+    kv, pos = cliargs.split(argv)
+    if pos: raise RuntimeError("usage: content.channel.list [wid=<id>]")
+    return "\n".join(f"{cid.hex()} {name.decode()}"
+                     for cid, name in index(n, cliargs.wid_of(n, kv)))
+
+def _cli_id(n, *argv):
+    kv, pos = cliargs.split(argv)
+    if len(pos) != 1: raise RuntimeError("usage: content.channel.id [wid=<id>] <name-or-id>")
+    return resolve(n, cliargs.wid_of(n, kv), pos[0]).hex()
+
+CLI = {"create": _cli_create, "list": _cli_list, "id": _cli_id}

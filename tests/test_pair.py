@@ -33,48 +33,48 @@ def test_pair_story():
         f.spawn(dba, "--listen", A)
         f.spawn(dbb, "--listen", B)
         wid = tiny(dba, "auth.workspace.create", "acme", "1")
-        mids = [tiny(dba, "content.message.send", wid, "general", "al", "m%d" % i, str(i + 2))
+        mids = [tiny(dba, "content.message.send", "wid="+wid, "general", "m%d" % i, "t="+str(i + 2))
                 for i in range(3)]
         # bootstrap: B dials A on the link, accepts the workspace, and syncs
         link = _bootstrap(dba, dbb, wid, A, B)
-        converge(dbb, "m0\nm1\nm2", "content.message.feed", wid, "general", phase="bootstrap sync to B")
+        converge(dbb, "m0\nm1\nm2", "content.message.feed", "wid="+wid, "general", phase="bootstrap sync to B")
         assert wid in tiny(dbb, "auth.workspace.index")
         # invite chain: B joins as a member on the same link; membership travels
         tiny(dbb, "auth.user.join", wid, "bo", link, "8")
         converge(dba, "founder\nbo", "auth.user.roster", wid, phase="B's membership reaches A")
         converge(dbb, "founder\nbo", "auth.user.roster", wid, phase="A's membership on B")
         # reaction closure re-derives on B
-        tiny(dba, "content.reaction.react", wid, mids[0], ":+1:", "9")
-        converge(dbb, ":+1: founder", "content.reaction.on", wid, mids[0], phase="reaction closure")
+        tiny(dba, "content.reaction.react", "wid="+wid, mids[0], ":+1:", "t=9")
+        converge(dbb, ":+1: founder", "content.reaction.on", "wid="+wid, mids[0], phase="reaction closure")
         # concurrent disjoint authorship merges to one (ts, owner) feed
-        b1 = tiny(dbb, "content.message.send", wid, "general", "bo", "b1", "10")
-        a1 = tiny(dba, "content.message.send", wid, "general", "al", "a1", "11")
-        tiny(dbb, "content.message.send", wid, "general", "bo", "b2", "12")
-        tiny(dba, "content.message.send", wid, "general", "al", "a2", "13")
+        b1 = tiny(dbb, "content.message.send", "wid="+wid, "general", "b1", "t=10")
+        a1 = tiny(dba, "content.message.send", "wid="+wid, "general", "a1", "t=11")
+        tiny(dbb, "content.message.send", "wid="+wid, "general", "b2", "t=12")
+        tiny(dba, "content.message.send", "wid="+wid, "general", "a2", "t=13")
         merged = "m0\nm1\nm2\nb1\na1\nb2\na2"
-        converge(dba, merged, "content.message.feed", wid, "general", phase="merged feed on A")
-        converge(dbb, merged, "content.message.feed", wid, "general", phase="merged feed on B")
+        converge(dba, merged, "content.message.feed", "wid="+wid, "general", phase="merged feed on A")
+        converge(dbb, merged, "content.message.feed", "wid="+wid, "general", phase="merged feed on B")
         # cross deletions travel
-        tiny(dba, "content.message_deletion.delete", wid, a1, "14")
-        tiny(dbb, "content.message_deletion.delete", wid, b1, "15")
+        tiny(dba, "content.message_deletion.delete", "wid="+wid, a1, "t=14")
+        tiny(dbb, "content.message_deletion.delete", "wid="+wid, b1, "t=15")
         pruned = "m0\nm1\nm2\nb2\na2"
-        converge(dba, pruned, "content.message.feed", wid, "general", phase="cross deletions on A")
-        converge(dbb, pruned, "content.message.feed", wid, "general", phase="cross deletions on B")
+        converge(dba, pruned, "content.message.feed", "wid="+wid, "general", phase="cross deletions on A")
+        converge(dbb, pruned, "content.message.feed", "wid="+wid, "general", phase="cross deletions on B")
         # partition: mutate A while B is down, then heal — B's durable request re-handshakes
         f.stop(dbb)
-        tiny(dba, "content.message.send", wid, "general", "al", "p1", "16")
-        tiny(dba, "content.message_deletion.delete", wid, mids[2], "17")
+        tiny(dba, "content.message.send", "wid="+wid, "general", "p1", "t=16")
+        tiny(dba, "content.message_deletion.delete", "wid="+wid, mids[2], "t=17")
         f.spawn(dbb, "--listen", B)
         healed = "m0\nm1\nb2\na2\np1"
-        converge(dbb, healed, "content.message.feed", wid, "general", secs=20, phase="healed partition")
+        converge(dbb, healed, "content.message.feed", "wid="+wid, "general", secs=20, phase="healed partition")
         # restart both: replay restores state, the connection re-establishes
         f.stop(dba); f.stop(dbb)
         f.spawn(dba, "--listen", A)
         f.spawn(dbb, "--listen", B)
-        converge(dba, healed, "content.message.feed", wid, "general", secs=0, phase="A replay after restart")
-        converge(dbb, healed, "content.message.feed", wid, "general", secs=0, phase="B replay after restart")
-        tiny(dba, "content.message.send", wid, "general", "al", "live", "18")
-        converge(dbb, healed + "\nlive", "content.message.feed", wid, "general", secs=20,
+        converge(dba, healed, "content.message.feed", "wid="+wid, "general", secs=0, phase="A replay after restart")
+        converge(dbb, healed, "content.message.feed", "wid="+wid, "general", secs=0, phase="B replay after restart")
+        tiny(dba, "content.message.send", "wid="+wid, "general", "live", "t=18")
+        converge(dbb, healed + "\nlive", "content.message.feed", "wid="+wid, "general", secs=20,
                  phase="sync live after restart")
 
 def test_pair_burst_does_not_wedge():
@@ -89,12 +89,12 @@ def test_pair_burst_does_not_wedge():
         _bootstrap(dba, dbb, wid, A, B)
         converge(dbb, lambda got: wid in got, "auth.workspace.index", secs=10, phase="connection up")
         for i in range(100):
-            tiny(dba, "content.message.send", wid, "general", "al", "m%d" % i, str(i + 2))
+            tiny(dba, "content.message.send", "wid="+wid, "general", "m%d" % i, "t="+str(i + 2))
             if i == 50:
-                converge(dba, 51, "content.message.feed", wid, "general",
+                converge(dba, 51, "content.message.feed", "wid="+wid, "general",
                          secs=0, phase="A answers mid-burst")
-        converge(dba, 100, "content.message.feed", wid, "general", secs=0, phase="A holds the burst")
-        converge(dbb, 100, "content.message.feed", wid, "general", secs=30,
+        converge(dba, 100, "content.message.feed", "wid="+wid, "general", secs=0, phase="A holds the burst")
+        converge(dbb, 100, "content.message.feed", "wid="+wid, "general", secs=30,
                  phase="burst reaches B")
 
 def test_answered_request_redials_after_responder_restart():
@@ -112,9 +112,9 @@ def test_answered_request_redials_after_responder_restart():
         converge(dba, "founder\nbo", "auth.user.roster", wid, secs=15,
                  phase="B's membership reaches A before the responder restart")
         f.stop(dba)
-        tiny(dbb, "content.message.send", wid, "general", "bo", "while-a-down", "6")
+        tiny(dbb, "content.message.send", "wid="+wid, "general", "while-a-down", "t=6")
         f.spawn(dba, "--listen", A)
-        converge(dba, "while-a-down", "content.message.feed", wid, "general", secs=25,
+        converge(dba, "while-a-down", "content.message.feed", "wid="+wid, "general", secs=25,
                  phase="the answered anchor redials and the send crosses")
 
 if __name__ == "__main__":

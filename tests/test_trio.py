@@ -32,53 +32,53 @@ def test_trio_story():
         # bob bootstrap-connects to alice on the first invite, then joins
         _join(dba, wid, addr_a, ep_a, dbb, addr_b, "bo", "5")
         converge(dba, "founder\nbo", "auth.user.roster", wid, secs=15, phase="bob's join reaches alice")
-        tiny(dba, "content.message.send", wid, "general", "al", "steady-al", "6")
-        tiny(dbb, "content.message.send", wid, "general", "bo", "steady-bo", "7")
-        converge(dba, 2, "content.message.feed", wid, "general", secs=15, phase="steady traffic on alice")
-        converge(dbb, 2, "content.message.feed", wid, "general", secs=15, phase="steady traffic on bob")
+        tiny(dba, "content.message.send", "wid="+wid, "general", "steady-al", "t=6")
+        tiny(dbb, "content.message.send", "wid="+wid, "general", "steady-bo", "t=7")
+        converge(dba, 2, "content.message.feed", "wid="+wid, "general", secs=15, phase="steady traffic on alice")
+        converge(dbb, 2, "content.message.feed", "wid="+wid, "general", secs=15, phase="steady traffic on bob")
         # carol joins late; her chain and bob's cross-relay through alice
         addr_c = f.spawn(dbc, "--listen", C)
         _join(dba, wid, addr_a, ep_a, dbc, addr_c, "ca", "10")
         trio = ((dba, "alice"), (dbb, "bob"), (dbc, "carol"))
         for db, who in trio:
             converge(db, "founder\nbo\nca", "auth.user.roster", wid, secs=25, phase="full roster on " + who)
-        tiny(dba, "content.message.send", wid, "general", "al", "probe-al", "11")
-        tiny(dbb, "content.message.send", wid, "general", "bo", "probe-bo", "12")
-        tiny(dbc, "content.message.send", wid, "general", "ca", "probe-ca", "13")
+        tiny(dba, "content.message.send", "wid="+wid, "general", "probe-al", "t=11")
+        tiny(dbb, "content.message.send", "wid="+wid, "general", "probe-bo", "t=12")
+        tiny(dbc, "content.message.send", "wid="+wid, "general", "probe-ca", "t=13")
         for db, who in trio:
-            converge(db, 5, "content.message.feed", wid, "general", secs=25,
+            converge(db, 5, "content.message.feed", "wid="+wid, "general", secs=25,
                      phase="probes relayed to " + who)
         # carol offline: pin her at the pre-offline count while still up (tiny.py no
         # longer cold-reads a stopped daemon's file), then freeze her by stopping
-        converge(dbc, 5, "content.message.feed", wid, "general", secs=0, phase="carol pinned pre-offline")
+        converge(dbc, 5, "content.message.feed", "wid="+wid, "general", secs=0, phase="carol pinned pre-offline")
         f.stop(dbc)
         # the delta she misses: ~1k messages plus a tail marker from each author
         for i in range(DELTA):
-            sock(dba, "content.message.send", wid, "general", "al", "d%d" % i, str(1000 + i))
+            sock(dba, "content.message.send", "wid="+wid, "general", "d%d" % i, "t="+str(1000 + i))
         for i in range(DELTA):
-            sock(dbb, "content.message.send", wid, "general", "bo", "e%d" % i, str(2000 + i))
-        sock(dba, "content.message.send", wid, "general", "al", "tail-al", "3001")
-        sock(dbb, "content.message.send", wid, "general", "bo", "tail-bo", "3002")
+            sock(dbb, "content.message.send", "wid="+wid, "general", "e%d" % i, "t="+str(2000 + i))
+        sock(dba, "content.message.send", "wid="+wid, "general", "tail-al", "t=3001")
+        sock(dbb, "content.message.send", "wid="+wid, "general", "tail-bo", "t=3002")
         total = 5 + 2 * DELTA + 2
-        converge(dba, total, "content.message.feed", wid, "general", secs=90,
+        converge(dba, total, "content.message.feed", "wid="+wid, "general", secs=90,
                  phase="delta converges on alice")
-        converge(dbb, total, "content.message.feed", wid, "general", secs=90,
+        converge(dbb, total, "content.message.feed", "wid="+wid, "general", secs=90,
                  phase="delta converges on bob")
         # rejoin: carol's durable request re-handshakes and she catches the whole delta
         f.spawn(dbc, "--listen", C)
-        got = converge(dbc, total, "content.message.feed", wid, "general", secs=150,
+        got = converge(dbc, total, "content.message.feed", "wid="+wid, "general", secs=150,
                        phase="carol rejoin catch-up")
         assert "tail-al" in got and "tail-bo" in got, "carol caught the count but not both tails"
         # post-rejoin liveness in every direction
-        tiny(dba, "content.message.send", wid, "general", "al", "post-al", "4001")
-        tiny(dbb, "content.message.send", wid, "general", "bo", "post-bo", "4002")
+        tiny(dba, "content.message.send", "wid="+wid, "general", "post-al", "t=4001")
+        tiny(dbb, "content.message.send", "wid="+wid, "general", "post-bo", "t=4002")
         for db, who in trio:
-            converge(db, total + 2, "content.message.feed", wid, "general", secs=40,
+            converge(db, total + 2, "content.message.feed", "wid="+wid, "general", secs=40,
                      phase="post-rejoin sends reach " + who)
-        tiny(dbc, "content.message.send", wid, "general", "ca", "post-ca", "4003")
-        converge(dba, total + 3, "content.message.feed", wid, "general", secs=40,
+        tiny(dbc, "content.message.send", "wid="+wid, "general", "post-ca", "t=4003")
+        converge(dba, total + 3, "content.message.feed", "wid="+wid, "general", secs=40,
                  phase="carol's send reaches alice")
-        converge(dbb, total + 3, "content.message.feed", wid, "general", secs=40,
+        converge(dbb, total + 3, "content.message.feed", "wid="+wid, "general", secs=40,
                  phase="carol's send reaches bob")
 
 if __name__ == "__main__":

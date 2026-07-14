@@ -43,7 +43,7 @@ def test_file_attachment_sync_restart_save_and_real_delete():
         converge(bob, lambda output: "1. complete payload.bin" in output,
                  "content.file.list", wid, secs=30, phase="attachment completes on bob")
         converge(bob, lambda output: "see attached" in output and "file: payload.bin" in output,
-                 "content.message.view", wid, "general", secs=0,
+                 "content.message.view", "wid=" + wid, "general", secs=0,
                  phase="message view includes attachment")
         target = os.path.join(directory, "bob-copy.bin")
         saved = tiny(bob, "content.file.save", wid, "#1", target)
@@ -57,12 +57,12 @@ def test_file_attachment_sync_restart_save_and_real_delete():
         tiny(bob, "content.file.save", wid, "1", after_restart)
         assert open(after_restart, "rb").read() == payload
 
-        tiny(alice, "content.message_deletion.delete", wid, message_id, "3")
+        tiny(alice, "content.message_deletion.delete", "wid=" + wid, message_id, "t=3")
         converge(alice, "FILES (0 total):", "content.file.list", wid, secs=0,
                  phase="source attachment is physically deleted")
         converge(bob, "FILES (0 total):", "content.file.list", wid, secs=30,
                  phase="synced deletion removes bob attachment")
-        converge(bob, "", "content.message.feed", wid, "general", secs=0,
+        converge(bob, "", "content.message.feed", "wid=" + wid, "general", secs=0,
                  phase="deleted parent leaves the feed")
         try:
             sock(bob, "content.file.save", wid, "1", os.path.join(directory, "deleted.bin"))

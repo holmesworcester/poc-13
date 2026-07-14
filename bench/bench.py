@@ -151,7 +151,7 @@ def bench_cli(db):
     try:
         t = time.time(); uverb(db + ".sock", "store.hydrate.pull")        # residency is a verb
         report("hydrate everything (one verb)", time.time() - t, "s", 3.5)
-        t = time.time(); cli(db, "content.message.send", WID.hex(), "c0", "al", "warm", "98")
+        t = time.time(); cli(db, "content.message.send", "wid=" + WID.hex(), "c0", "warm", "t=98")
         report("daemon-proxy tiny.py (one verb)", time.time() - t, "s", 0.2)
     finally: stop(p)
 
@@ -234,15 +234,15 @@ def bench_daemons():
             peer(sa, sb, wid, addr_a, addr_b)                       # B bootstrap-dials A
             cap, t0, qlat = 2000, time.time(), None
             for i in range(cap):
-                uverb(sa, "content.message.send", wid, "general", "al", "m%d" % i, str(i + 2))
+                uverb(sa, "content.message.send", "wid=" + wid, "general", "m%d" % i, "t=" + str(i + 2))
                 if i == cap // 2:                         # a query on B mid-stream
-                    q = time.time(); uverb(sb, "content.message.feed", wid, "general")
+                    q = time.time(); uverb(sb, "content.message.feed", "wid=" + wid, "general")
                     qlat = (time.time() - q) * 1e3
                 if time.time() - t0 > 30: cap = i + 1; break
             auth = time.time() - t0
             end = time.time() + 60
             while time.time() < end:
-                got = len(uverb(sb, "content.message.feed", wid, "general").splitlines())
+                got = len(uverb(sb, "content.message.feed", "wid=" + wid, "general").splitlines())
                 if got >= cap: break
                 time.sleep(0.05)
             conv = time.time() - t0
@@ -261,9 +261,9 @@ def bench_catchup():                      # a bulk backlog authored on A (the fo
         dba, dbb = os.path.join(d, "a.facts"), os.path.join(d, "b.facts")
         pa, addr_a = spawn(dba, "--listen", "127.0.0.1:0"); sa = dba + ".sock"
         wid = uverb(sa, "auth.workspace.create", "acme", "1")
-        for name in CHAN_NAMES: uverb(sa, "content.channel.create", wid, name.decode(), "2")
+        for name in CHAN_NAMES: uverb(sa, "content.channel.create", "wid=" + wid, name.decode(), "t=2")
         for i in range(n):                                    # author the backlog on A (untimed setup)
-            uverb(sa, "content.message.send", wid, CHAN_NAMES[i % 5].decode(), "al", "m%d" % i, str(i + 3))
+            uverb(sa, "content.message.send", "wid=" + wid, CHAN_NAMES[i % 5].decode(), "m%d" % i, "t=" + str(i + 3))
         pb, addr_b = spawn(dbb, "--listen", "127.0.0.1:0")
         peer(sa, dbb + ".sock", wid, addr_a, addr_b)          # B bootstrap-dials A
         t0 = time.time()
@@ -271,7 +271,7 @@ def bench_catchup():                      # a bulk backlog authored on A (the fo
             got, end = 0, time.time() + 120
             while got < n and time.time() < end:
                 got = sum(len(uverb(dbb + ".sock", "content.message.feed",
-                                    wid, c.decode()).splitlines()) for c in CHAN_NAMES)
+                                    "wid=" + wid, c.decode()).splitlines()) for c in CHAN_NAMES)
                 time.sleep(0.05)
             dt = time.time() - t0
             assert got >= n, f"caught up only {got}/{n}"
@@ -287,20 +287,20 @@ def bench_newest():                       # live-tail: a freshly-authored leaf r
         dba, dbb = os.path.join(d, "a.facts"), os.path.join(d, "b.facts")
         pa, addr_a = spawn(dba, "--listen", "127.0.0.1:0"); sa = dba + ".sock"
         wid = uverb(sa, "auth.workspace.create", "acme", "1")
-        uverb(sa, "content.channel.create", wid, "c0", "2")
+        uverb(sa, "content.channel.create", "wid=" + wid, "c0", "t=2")
         for i in range(n):                                    # a backlog B first catches up on (untimed)
-            uverb(sa, "content.message.send", wid, "c0", "al", "m%d" % i, str(i + 3))
+            uverb(sa, "content.message.send", "wid=" + wid, "c0", "m%d" % i, "t=" + str(i + 3))
         pb, addr_b = spawn(dbb, "--listen", "127.0.0.1:0"); sb = dbb + ".sock"
         peer(sa, sb, wid, addr_a, addr_b)                     # B bootstrap-dials A
         try:
             end = time.time() + 60        # wait until B has fully caught up and gone quiet
-            while time.time() < end and len(uverb(sb, "content.message.feed", wid, "c0").splitlines()) < n:
+            while time.time() < end and len(uverb(sb, "content.message.feed", "wid=" + wid, "c0").splitlines()) < n:
                 time.sleep(0.02)
             t0 = time.time()
-            uverb(sa, "content.message.send", wid, "c0", "al", "newest", str(n + 99))
+            uverb(sa, "content.message.send", "wid=" + wid, "c0", "newest", "t=" + str(n + 99))
             got, end = "", time.time() + 30
             while time.time() < end:
-                got = uverb(sb, "content.message.feed", wid, "c0")
+                got = uverb(sb, "content.message.feed", "wid=" + wid, "c0")
                 if got.endswith("newest"): break
                 time.sleep(0.01)
             dt = time.time() - t0

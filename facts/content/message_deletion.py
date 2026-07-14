@@ -6,6 +6,7 @@ enrolled member may delete; per-author deletion is a policy for a later wave."""
 from kernel import (Atom, Exact, NEED, OFFER, Out, REQUIRE, SELF, encode, fact,
                     now, ts_atom, ts_of)
 from facts.auth import signature
+import cliargs
 
 TAG = b"content.message_deletion"
 
@@ -38,6 +39,10 @@ def delete(node, workspace_id, target_id, t):
 
 # QUERIES — none yet.
 
-# CLI — string boundary over COMMANDS/QUERIES.
-CLI = {"delete": lambda n, wid, tid, t=None:
-           delete(n, bytes.fromhex(wid), bytes.fromhex(tid), int(t or now())).hex()}
+# CLI — string boundary over COMMANDS/QUERIES. Grammar: `[wid=] <message-id> [t=]`.
+def _cli_delete(n, *argv):
+    kv, pos = cliargs.split(argv)
+    if len(pos) != 1: raise RuntimeError("usage: content.message_deletion.delete [wid=<id>] <message-id> [t=<n>]")
+    return delete(n, cliargs.wid_of(n, kv), bytes.fromhex(pos[0]), cliargs.t_of(kv)).hex()
+
+CLI = {"delete": _cli_delete}

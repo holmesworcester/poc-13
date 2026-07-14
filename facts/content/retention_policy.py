@@ -8,6 +8,7 @@ from kernel import (Atom, Exact, NEED, OFFER, Out, REQUIRE, Range, SELF, by,
                     encode, fact, now, ts_atom, ts_of)
 from facts.auth import signature
 from facts.store import hydrate
+import cliargs
 
 TAG = b"content.retention_policy"
 IDS = Range(b"", b"\xff" * 32)           # any admin grant in the workspace
@@ -53,7 +54,15 @@ def window(node, workspace_id):                       # the latest (ts, owner) r
     row = max(node.watched(b"retention", workspace_id), key=lambda r: (r[1], r[0]), default=None)
     return int.from_bytes(row[2].value, "little") if row else None
 
-# CLI — string boundary over COMMANDS/QUERIES.
-CLI = {"set": lambda n, wid, ttl, t=None:
-           set_window(n, bytes.fromhex(wid), int(ttl), int(t or now())).hex(),
-       "window": lambda n, wid: str(window(n, bytes.fromhex(wid)) or "")}
+# CLI — string boundary over COMMANDS/QUERIES. Grammar: `[wid=] <ttl> [t=]`.
+def _cli_set(n, *argv):
+    kv, pos = cliargs.split(argv)
+    if len(pos) != 1: raise RuntimeError("usage: content.retention_policy.set [wid=<id>] <ttl> [t=<n>]")
+    return set_window(n, cliargs.wid_of(n, kv), int(pos[0]), cliargs.t_of(kv)).hex()
+
+def _cli_window(n, *argv):
+    kv, pos = cliargs.split(argv)
+    if pos: raise RuntimeError("usage: content.retention_policy.window [wid=<id>]")
+    return str(window(n, cliargs.wid_of(n, kv)) or "")
+
+CLI = {"set": _cli_set, "window": _cli_window}

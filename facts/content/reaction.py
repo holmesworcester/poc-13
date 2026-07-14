@@ -9,6 +9,7 @@ from kernel import (Atom, Exact, NEED, OFFER, Out, REQUIRE, SELF, SUPPRESS,
                     encode, fact, frame, now, ts_atom, ts_of, unframe)
 from facts.auth import signature
 from facts.store import hydrate
+import cliargs
 
 TAG = b"content.reaction"
 
@@ -55,9 +56,17 @@ def on(node, workspace_id, message_id):
         out.append(emoji + b" " + names.get(reactor_id, reactor_id.hex().encode()[:8]))
     return out
 
-# CLI — string boundary over COMMANDS/QUERIES.
-CLI = {"react": lambda n, wid, mid, emoji, t=None:
-           react(n, bytes.fromhex(wid), bytes.fromhex(mid), emoji.encode(),
-                 int(t or now())).hex(),
-       "on": lambda n, wid, mid:
-           b"\n".join(on(n, bytes.fromhex(wid), bytes.fromhex(mid))).decode()}
+# CLI — string boundary over COMMANDS/QUERIES. Grammar: `[wid=] <message-id>
+# <emoji> [t=]`.
+def _cli_react(n, *argv):
+    kv, pos = cliargs.split(argv)
+    if len(pos) != 2: raise RuntimeError("usage: content.reaction.react [wid=<id>] <message-id> <emoji> [t=<n>]")
+    return react(n, cliargs.wid_of(n, kv), bytes.fromhex(pos[0]), pos[1].encode(),
+                 cliargs.t_of(kv)).hex()
+
+def _cli_on(n, *argv):
+    kv, pos = cliargs.split(argv)
+    if len(pos) != 1: raise RuntimeError("usage: content.reaction.on [wid=<id>] <message-id>")
+    return b"\n".join(on(n, cliargs.wid_of(n, kv), bytes.fromhex(pos[0]))).decode()
+
+CLI = {"react": _cli_react, "on": _cli_on}

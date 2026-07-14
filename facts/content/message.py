@@ -9,6 +9,7 @@ from kernel import (Atom, Exact, NEED, OFFER, Out, REQUIRE, SELF, SUPPRESS,
 from facts.auth import signature
 from facts.content import channel as channels
 from facts.store import hydrate
+import cliargs
 
 TAG = b"content.message"
 
@@ -53,16 +54,6 @@ def feed(node, workspace_id, channel_id):
                                           key=lambda r: (r[1], r[0]))
             if a.target == Exact(channel_id)]
 
-# CLI — string boundary over COMMANDS/QUERIES. A not-yet-synced name reads as
-# an empty feed so polling can observe the channel arrive; sends still fail
-# closed unless given a validated name or an explicit 32-byte id.
-def _cli_feed(node, workspace_id, ref):
-    try: channel_id = channels.resolve(node, workspace_id, ref)
-    except RuntimeError as e:
-        if str(e).startswith("unknown channel:"): return ""
-        raise
-    return b"\n".join(feed(node, workspace_id, channel_id)).decode()
-
 def view(node, workspace_id, channel):
     from facts.content import file as filemod
     hydrate.demand(node, b"msg", workspace_id)
@@ -81,19 +72,33 @@ def view(node, workspace_id, channel):
                          (item["filename"].decode(), item["blob_bytes"], state))
     return lines
 
-def _cli_view(node, workspace_id, ref):
-    try: channel_id = channels.resolve(node, workspace_id, ref)
+# CLI — string boundary over COMMANDS/QUERIES. Grammar: `[wid=] <channel>
+# <body...> [t=]`; the author is always the local signer. A not-yet-synced
+# channel name reads as an empty feed so polling can observe the channel arrive.
+def _resolve_or_empty(node, wid, ref, run):
+    try: channel_id = channels.resolve(node, wid, ref)
     except RuntimeError as e:
         if str(e).startswith("unknown channel:"): return ""
         raise
-    return "\n".join(view(node, workspace_id, channel_id))
+    return run(channel_id)
 
-# CLI — string boundary over COMMANDS/QUERIES. The author is the local signer;
-# the `who` slot is accepted and ignored for wire-compat until the CLI rework.
-CLI = {"send": lambda n, wid, ch, who, body, t=None:
-           send(n, bytes.fromhex(wid), channels.resolve(n, bytes.fromhex(wid), ch),
-                body.encode(), int(t or now())).hex(),
-       "feed": lambda n, wid, ch:
-           _cli_feed(n, bytes.fromhex(wid), ch),
-       "view": lambda n, wid, ch:
-           _cli_view(n, bytes.fromhex(wid), ch)}
+def _cli_send(n, *argv):
+    kv, pos = cliargs.split(argv)
+    if len(pos) < 2: raise RuntimeError("usage: content.message.send [wid=<id>] <channel> <body...> [t=<n>]")
+    wid = cliargs.wid_of(n, kv)
+    channel_id = channels.resolve(n, wid, pos[0])
+    return send(n, wid, channel_id, " ".join(pos[1:]).encode(), cliargs.t_of(kv)).hex()
+
+def _cli_feed(n, *argv):
+    kv, pos = cliargs.split(argv)
+    if len(pos) != 1: raise RuntimeError("usage: content.message.feed [wid=<id>] <channel>")
+    wid = cliargs.wid_of(n, kv)
+    return _resolve_or_empty(n, wid, pos[0], lambda cid: b"\n".join(feed(n, wid, cid)).decode())
+
+def _cli_view(n, *argv):
+    kv, pos = cliargs.split(argv)
+    if len(pos) != 1: raise RuntimeError("usage: content.message.view [wid=<id>] <channel>")
+    wid = cliargs.wid_of(n, kv)
+    return _resolve_or_empty(n, wid, pos[0], lambda cid: "\n".join(view(n, wid, cid)))
+
+CLI = {"send": _cli_send, "feed": _cli_feed, "view": _cli_view}

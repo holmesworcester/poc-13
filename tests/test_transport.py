@@ -20,17 +20,17 @@ def test_bootstrap_connect_and_sync():
             wid = sock(dba, "auth.workspace.create", "acme", "1")
             assert sock(dba, "auth.user.roster", wid) == "founder"     # create enrolled the founder
             iid, secret, ep = _invite(dba, wid)
-            sock(dba, "content.message.send", wid, "general", "al", "hi-from-host", "5")
+            sock(dba, "content.message.send", "wid="+wid, "general", "hi-from-host", "t=5")
             # the joiner bootstraps on the link; its own listen addr is the reply route
             sock(dbb, "connection.request.connect", wid, iid, secret, ep, addr_a, addr_b)
-            assert until(lambda: sock(dbb, "content.message.feed", wid, "general") == "hi-from-host", secs=10), \
+            assert until(lambda: sock(dbb, "content.message.feed", "wid="+wid, "general") == "hi-from-host", secs=10), \
                 "workspace + message must sync to the joiner over the sealed connection"
             # and it validated on the joiner only because connect authored acceptance
             assert wid in sock(dbb, "auth.workspace.index")
             # reverse direction: the joiner must become a signed member before authoring
             sock(dbb, "auth.user.join", wid, "bo", iid + ":" + secret, "6")
-            sock(dbb, "content.message.send", wid, "general", "bo", "hi-from-joiner", "7")
-            assert until(lambda: sock(dba, "content.message.feed", wid, "general")
+            sock(dbb, "content.message.send", "wid="+wid, "general", "hi-from-joiner", "t=7")
+            assert until(lambda: sock(dba, "content.message.feed", "wid="+wid, "general")
                          == "hi-from-host\nhi-from-joiner", secs=10)
 
 def test_wire_is_ciphertext():
@@ -59,10 +59,10 @@ def test_wire_is_ciphertext():
             wid = sock(dba, "auth.workspace.create", "acme", "1")
             iid, secret, ep = _invite(dba, wid)
             leak = b"TOPSECRETPLAINTEXTQZX"
-            sock(dba, "content.message.send", wid, "general", "al", leak.decode(), "5")
+            sock(dba, "content.message.send", "wid="+wid, "general", leak.decode(), "t=5")
             # joiner dials the TAP (which forwards to A), so cap sees every joiner<->A byte
             sock(dbb, "connection.request.connect", wid, iid, secret, ep, "127.0.0.1:%d" % tap, addr_b)
-            assert until(lambda: sock(dbb, "content.message.feed", wid, "general") == leak.decode(), secs=10)
+            assert until(lambda: sock(dbb, "content.message.feed", "wid="+wid, "general") == leak.decode(), secs=10)
             assert len(cap) > 0, "the tap must have seen wire bytes"
             assert leak not in bytes(cap), "plaintext leaked onto the wire — transit is not encrypted"
 
