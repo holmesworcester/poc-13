@@ -50,7 +50,7 @@ def view(node, workspace_id, channel):
         lines.append(atom.value.decode())
         for item in attachments.get(owner, ()):
             state = "complete" if item["complete"] else \
-                "%d/%d chunks" % (item["chunks_received"], item["total_chunks"])
+                "%d/%d slices" % (item["slices_received"], item["total_slices"])
             lines.append("  file: %s (%d bytes, %s)" %
                          (item["filename"].decode(), item["blob_bytes"], state))
     return lines

@@ -1,74 +1,50 @@
 """facts/content/file.py — a message attachment descriptor and its user
-surface. The descriptor names one content instance, commits to its outboard
-root, and carries filename/MIME metadata. It Requires the parent message and
-directly carries that message's death key: deletion suppresses and therefore
-physically purges the descriptor. The byte-bearing outboard and chunk families
-carry the same key, so no parked attachment residue survives deletion."""
+surface. Metadata is ordinary atom vocabulary rather than a nested record. The
+descriptor commits a BLAKE3 root; each content.file_slice carries a canonical
+Bao proof against it. Descriptor and slices directly carry the message death
+key, so semantic deletion physically purges the complete attachment."""
 import mimetypes, os, tempfile
+from blake3 import blake3
+import poc13_bao
 from kernel import (Atom, Exact, H, NEED, OFFER, Out, REQUIRE, SELF, SUPPRESS,
-                    encode, fact, fact_id, frame, now, ts_atom, unframe)
+                    encode, fact, fact_id, frame, now, ts_atom)
 from facts.store import hydrate
 
 TAG = b"content.file"
-VERSION = b"\x01"
 ENCODING_CLEAR = b"clear-v1"
-FILE_ID_DOMAIN = b"poc13.file.id.v1"
-CHUNK_BYTES = 256 * 1024
+FILE_ID_DOMAIN = b"poc13.file.id.v2"
+SLICE_BYTES = 256 * 1024
 MAX_FILE_BYTES = 10 * 1024 * 1024 * 1024
 MAX_FILENAME_BYTES = 255
 MAX_MIME_BYTES = 128
+FIELD_ROLES = (b"descriptor", b"file_size", b"file_slices", b"file_slice_bytes",
+               b"file_encoding", b"file_name", b"file_mime")
+PROJECTED_ROLES = (b"file", *FIELD_ROLES)
 
 
-def metadata(workspace_id, message_id, file_id, root, blob_bytes,
-             total_chunks, filename, mime_type, encoding=ENCODING_CLEAR):
-    return frame(VERSION, workspace_id, message_id, file_id, root,
-                 blob_bytes.to_bytes(8, "big"), CHUNK_BYTES.to_bytes(4, "big"),
-                 total_chunks.to_bytes(4, "big"), encoding, filename, mime_type)
+def _atoms(f, kind, role): return [a for a in f.atoms if a.kind == kind and a.role == role]
+def _u32(value): return value.to_bytes(4, "big")
+def _u64(value): return value.to_bytes(8, "big")
 
 
-def decode_metadata(value):
-    parts = unframe(value)
-    if len(parts) != 11 or parts[0] != VERSION:
-        raise ValueError("invalid file metadata")
-    _, workspace_id, message_id, file_id, root, blob_raw, chunk_raw, total_raw, \
-        encoding, filename, mime_type = parts
-    if not all(len(x) == 32 for x in (workspace_id, message_id, file_id, root)):
-        raise ValueError("invalid file id")
-    if len(blob_raw) != 8 or len(chunk_raw) != 4 or len(total_raw) != 4:
-        raise ValueError("invalid file geometry")
-    blob_bytes = int.from_bytes(blob_raw, "big")
-    chunk_bytes = int.from_bytes(chunk_raw, "big")
-    total_chunks = int.from_bytes(total_raw, "big")
-    if blob_bytes > MAX_FILE_BYTES or chunk_bytes != CHUNK_BYTES:
-        raise ValueError("unsupported file geometry")
-    expected = 0 if blob_bytes == 0 else (blob_bytes + chunk_bytes - 1) // chunk_bytes
-    if total_chunks != expected or total_chunks >= 2 ** 32:
-        raise ValueError("file chunk count does not match size")
-    if not filename or len(filename) > MAX_FILENAME_BYTES or len(mime_type) > MAX_MIME_BYTES:
-        raise ValueError("invalid file metadata text")
-    filename.decode("utf-8"); mime_type.decode("utf-8")
-    if encoding != ENCODING_CLEAR:
-        raise ValueError("unsupported file encoding")
-    return {"workspace_id": workspace_id, "message_id": message_id,
-            "file_id": file_id, "root": root, "blob_bytes": blob_bytes,
-            "chunk_bytes": chunk_bytes, "total_chunks": total_chunks,
-            "encoding": encoding, "filename": filename, "mime_type": mime_type}
+def file_id_for(workspace_id, message_id, root, filename, mime_type):
+    return H(frame(FILE_ID_DOMAIN, workspace_id, message_id, root, filename, mime_type))
 
 
-def _atoms(f, kind, role):
-    return [a for a in f.atoms if a.kind == kind and a.role == role]
-
-
-# SHAPE — descriptor offered both beside its message and at its content id.
-def file(workspace_id, message_id, file_id, root, blob_bytes, total_chunks,
+# SHAPE — each metadata field is a named scalar offer at (file id, root).
+def file(workspace_id, message_id, file_id, root, blob_bytes, total_slices,
          filename, mime_type, t, encoding=ENCODING_CLEAR):
-    value = metadata(workspace_id, message_id, file_id, root, blob_bytes,
-                     total_chunks, filename, mime_type, encoding)
     return fact(TAG, ts_atom(t, workspace_id),
                 Atom(NEED, b"posted", workspace_id, Exact(message_id), effect=REQUIRE),
                 Atom(NEED, b"dead", workspace_id, Exact(message_id), effect=SUPPRESS),
-                Atom(OFFER, b"file", workspace_id, Exact(message_id), value),
-                Atom(OFFER, b"descriptor", file_id, Exact(file_id), value))
+                Atom(OFFER, b"file", workspace_id, Exact(message_id), file_id),
+                Atom(OFFER, b"descriptor", file_id, Exact(root)),
+                Atom(OFFER, b"file_size", file_id, Exact(root), _u64(blob_bytes)),
+                Atom(OFFER, b"file_slices", file_id, Exact(root), _u32(total_slices)),
+                Atom(OFFER, b"file_slice_bytes", file_id, Exact(root), _u32(SLICE_BYTES)),
+                Atom(OFFER, b"file_encoding", file_id, Exact(root), encoding),
+                Atom(OFFER, b"file_name", file_id, Exact(root), filename),
+                Atom(OFFER, b"file_mime", file_id, Exact(root), mime_type))
 
 
 # EXTRACT — durable and shared; attachment descriptors reconcile like messages.
@@ -76,139 +52,135 @@ def extract(f): return True, True
 from facts.sync.index import settle      # opt in: these facts replicate
 
 
-# CHECK — intrinsic shape and geometry. Contextual parent proof is PROJECT's job.
+# CHECK — exact atoms, scalar widths, geometry, text, and content-instance id.
 def check(f):
     try:
-        if len(f.atoms) != 5:
+        if len(f.atoms) != 11: return False
+        files, posted, dead, stamps = (_atoms(f, OFFER, b"file"), _atoms(f, NEED, b"posted"),
+                                       _atoms(f, NEED, b"dead"), _atoms(f, OFFER, b"ts"))
+        fields = {role: _atoms(f, OFFER, role) for role in FIELD_ROLES}
+        if any(len(items) != 1 for items in fields.values()) or \
+                any(len(items) != 1 for items in (files, posted, dead, stamps)):
             return False
-        files = _atoms(f, OFFER, b"file")
-        descriptors = _atoms(f, OFFER, b"descriptor")
-        posted = _atoms(f, NEED, b"posted")
-        dead = _atoms(f, NEED, b"dead")
-        stamps = _atoms(f, OFFER, b"ts")
-        if not all(len(x) == 1 for x in (files, descriptors, posted, dead, stamps)):
-            return False
-        meta = decode_metadata(files[0].value)
-        return (descriptors[0].value == files[0].value
-                and files[0].scope == meta["workspace_id"]
-                and files[0].target == Exact(meta["message_id"])
-                and descriptors[0].scope == meta["file_id"]
-                and descriptors[0].target == Exact(meta["file_id"])
-                and posted[0].scope == meta["workspace_id"]
-                and posted[0].target == Exact(meta["message_id"])
+        listing, descriptor = files[0], fields[b"descriptor"][0]
+        workspace_id, message_id, file_id, root = (listing.scope, listing.target[1],
+                                                    listing.value, descriptor.target[1])
+        values = {role: fields[role][0].value for role in FIELD_ROLES[1:]}
+        blob_bytes = int.from_bytes(values[b"file_size"], "big")
+        total_slices = int.from_bytes(values[b"file_slices"], "big")
+        slice_bytes = int.from_bytes(values[b"file_slice_bytes"], "big")
+        expected = 0 if blob_bytes == 0 else (blob_bytes + slice_bytes - 1) // slice_bytes
+        filename, mime_type = values[b"file_name"], values[b"file_mime"]
+        filename.decode("utf-8"); mime_type.decode("utf-8")
+        return (len(workspace_id) == len(message_id) == len(file_id) == len(root) == 32
+                and listing.target[0] == message_id
+                and descriptor.scope == file_id and descriptor.target[0] == root
+                and descriptor.value is None
+                and all(fields[role][0].scope == file_id
+                        and fields[role][0].target == Exact(root) for role in FIELD_ROLES[1:])
+                and len(values[b"file_size"]) == 8 and len(values[b"file_slices"]) == 4
+                and len(values[b"file_slice_bytes"]) == 4
+                and blob_bytes <= MAX_FILE_BYTES and slice_bytes == SLICE_BYTES
+                and total_slices == expected and values[b"file_encoding"] == ENCODING_CLEAR
+                and 0 < len(filename) <= MAX_FILENAME_BYTES and len(mime_type) <= MAX_MIME_BYTES
+                and file_id == file_id_for(workspace_id, message_id, root, filename, mime_type)
+                and posted[0].scope == workspace_id and posted[0].target == Exact(message_id)
                 and posted[0].effect == REQUIRE and posted[0].value is None
-                and dead[0].scope == meta["workspace_id"]
-                and dead[0].target == Exact(meta["message_id"])
+                and dead[0].scope == workspace_id and dead[0].target == Exact(message_id)
                 and dead[0].effect == SUPPRESS and dead[0].value is None
-                and stamps[0].scope == meta["workspace_id"]
-                and stamps[0].target == SELF)
+                and stamps[0].scope == workspace_id and stamps[0].target == SELF)
     except Exception:
         return False
 
 
-# PROJECT — parent existence is already proven by the posted Require.
+# PROJECT — parent existence is proven by posted; publish the descriptor atoms.
 def project(f, ctx):
     return Out(offers=tuple(a for a in f.atoms
-                            if a.kind == OFFER and a.role in (b"file", b"descriptor")))
+                            if a.kind == OFFER and a.role in PROJECTED_ROLES))
 
 
-# COMMANDS — author the complete message/descriptor/outboard/chunk DAG only
-# after the source has been read successfully. A temporary spool keeps memory
-# bounded while preserving an all-inputs-before-admission boundary.
+# COMMANDS — read and prove the complete source before admitting any graph fact.
 def send(node, workspace_id, channel, author, body, path, mime_type=None, t=None):
-    from facts.content import file_chunk, file_outboard, message
+    from facts.content import file_slice, message
 
     t = int(now() if t is None else t)
-    source_path = os.fspath(path)
-    if not os.path.isfile(source_path):
-        raise ValueError("file path is not a regular file")
+    source_path = os.path.abspath(os.fspath(path))
+    if not os.path.isfile(source_path): raise ValueError("file path is not a regular file")
     declared_size = os.path.getsize(source_path)
-    if declared_size > MAX_FILE_BYTES:
-        raise ValueError("file exceeds the 10 GiB limit")
+    if declared_size > MAX_FILE_BYTES: raise ValueError("file exceeds the 10 GiB limit")
     filename = os.path.basename(source_path).encode("utf-8")
     guessed = mimetypes.guess_type(source_path)[0] or "application/octet-stream"
-    mime_bytes = (guessed if mime_type is None else mime_type)
-    if isinstance(mime_bytes, str):
-        mime_bytes = mime_bytes.encode("utf-8")
+    mime_bytes = guessed if mime_type is None else mime_type
+    if isinstance(mime_bytes, str): mime_bytes = mime_bytes.encode("utf-8")
     if not filename or len(filename) > MAX_FILENAME_BYTES or len(mime_bytes) > MAX_MIME_BYTES:
         raise ValueError("filename or MIME type is too long")
 
+    read_bytes = declared_size
+    total_slices = 0 if read_bytes == 0 else (read_bytes + SLICE_BYTES - 1) // SLICE_BYTES
     message_fact = message.message(workspace_id, channel, author, body, t)
     message_id = fact_id(message_fact)
-    hashes, read_bytes = [], 0
-    with tempfile.TemporaryFile() as spool, open(source_path, "rb") as source:
-        while True:
-            data = source.read(CHUNK_BYTES)
-            if not data:
-                break
-            if read_bytes + len(data) > MAX_FILE_BYTES:
-                raise ValueError("file exceeds the 10 GiB limit")
-            index = len(hashes)
-            hashes.append(file_outboard.chunk_hash(index, data))
-            spool.write(len(data).to_bytes(4, "big")); spool.write(data)
-            read_bytes += len(data)
-        if read_bytes != declared_size:
-            raise ValueError("file size changed while reading")
 
-        root = file_outboard.root_for(hashes, read_bytes, CHUNK_BYTES, ENCODING_CLEAR)
-        file_id = H(frame(FILE_ID_DOMAIN, workspace_id, message_id, root, filename, mime_bytes))
+    with tempfile.TemporaryDirectory(prefix="poc13-bao-") as directory, \
+            tempfile.TemporaryFile() as spool:
+        outboard = os.path.join(directory, "source.obao")
+        root = bytes(poc13_bao.prepare_file(source_path, outboard))
+        file_id = file_id_for(workspace_id, message_id, root, filename, mime_bytes)
+        for index in range(total_slices):
+            start = index * SLICE_BYTES
+            count = min(SLICE_BYTES, read_bytes - start)
+            proof = bytes(poc13_bao.extract_slice(source_path, outboard, start, count))
+            verified = file_slice.verified_bytes(proof, root, index, read_bytes, SLICE_BYTES)
+            if len(verified) != count: raise RuntimeError("Bao returned a short slice")
+            spool.write(len(proof).to_bytes(4, "big")); spool.write(proof)
+        if os.path.getsize(source_path) != declared_size:
+            raise ValueError("file size changed while proving")
+
         descriptor_fact = file(workspace_id, message_id, file_id, root, read_bytes,
-                               len(hashes), filename, mime_bytes, t)
-        outboard_fact = file_outboard.outboard(workspace_id, message_id, file_id,
-                                               root, read_bytes, hashes, t)
-        parents = (message_fact, descriptor_fact, outboard_fact)
+                               total_slices, filename, mime_bytes, t)
         parent_ids = []
-        for item in parents:
+        for item in (message_fact, descriptor_fact):
             fid = node.admit(encode(item))
-            if fid is None:
-                raise RuntimeError("locally authored attachment fact failed admission")
+            if fid is None: raise RuntimeError("locally authored attachment fact failed admission")
             parent_ids.append(fid)
 
-        chunk_ids = []
-        spool.seek(0)
-        for index in range(len(hashes)):
+        slice_ids = []; spool.seek(0)
+        for index in range(total_slices):
             raw_len = spool.read(4)
-            size = int.from_bytes(raw_len, "big")
-            data = spool.read(size)
-            if len(raw_len) != 4 or len(data) != size:
-                raise RuntimeError("temporary attachment spool is truncated")
-            chunk_fact = file_chunk.chunk(workspace_id, message_id, file_id, index, data, t)
-            chunk_id = node.admit(encode(chunk_fact))
-            if chunk_id is None:
-                raise RuntimeError("locally authored attachment chunk failed admission")
-            chunk_ids.append(chunk_id)
+            if len(raw_len) != 4: raise RuntimeError("temporary Bao spool is truncated")
+            size = int.from_bytes(raw_len, "big"); proof = spool.read(size)
+            if len(proof) != size: raise RuntimeError("temporary Bao spool is truncated")
+            item = file_slice.file_slice(workspace_id, message_id, file_id, root, index, proof, t)
+            fid = node.admit(encode(item))
+            if fid is None: raise RuntimeError("locally authored file slice failed admission")
+            slice_ids.append(fid)
 
     return {"message_id": parent_ids[0], "file_fact_id": parent_ids[1],
-            "outboard_fact_id": parent_ids[2], "chunk_fact_ids": tuple(chunk_ids),
-            "file_id": file_id, "filename": filename, "mime_type": mime_bytes,
-            "blob_bytes": read_bytes, "total_chunks": len(hashes)}
+            "slice_fact_ids": tuple(slice_ids), "file_id": file_id,
+            "filename": filename, "mime_type": mime_bytes, "blob_bytes": read_bytes,
+            "total_slices": total_slices}
 
 
 def save(node, workspace_id, selector, output_path):
-    from facts.content import file_outboard
+    from facts.content import file_slice
 
     record = resolve(node, workspace_id, selector)
-    if record is None:
-        raise ValueError("file selector did not match a visible attachment")
-    if record["chunks_received"] != record["total_chunks"]:
-        raise ValueError("file incomplete: have %d/%d chunks" %
-                         (record["chunks_received"], record["total_chunks"]))
-    chunks = _chunks(node, record["file_id"])
-    ordered = [chunks[i] for i in range(record["total_chunks"])]
-    hashes = [file_outboard.chunk_hash(i, data) for i, data in enumerate(ordered)]
-    root = file_outboard.root_for(hashes, record["blob_bytes"],
-                                  record["chunk_bytes"], record["encoding"])
-    if root != record["root"] or sum(map(len, ordered)) != record["blob_bytes"]:
-        raise ValueError("file root or length mismatch")
-
-    target = os.path.abspath(os.fspath(output_path))
-    directory = os.path.dirname(target) or "."
+    if record is None: raise ValueError("file selector did not match a visible attachment")
+    if record["slices_received"] != record["total_slices"]:
+        raise ValueError("file incomplete: have %d/%d slices" %
+                         (record["slices_received"], record["total_slices"]))
+    proofs = _slices(node, record["file_id"])
+    target = os.path.abspath(os.fspath(output_path)); directory = os.path.dirname(target) or "."
     fd, temporary = tempfile.mkstemp(prefix=".poc13-file-", dir=directory)
     try:
+        written, hasher = 0, blake3()
         with os.fdopen(fd, "wb") as output:
-            for data in ordered:
-                output.write(data)
+            for index in range(record["total_slices"]):
+                data = file_slice.verified_bytes(proofs[index], record["root"], index,
+                                                 record["blob_bytes"], record["slice_bytes"])
+                output.write(data); hasher.update(data); written += len(data)
             output.flush(); os.fsync(output.fileno())
+        if written != record["blob_bytes"] or hasher.digest() != record["root"]:
+            raise ValueError("file root or length mismatch")
         os.replace(temporary, target)
     except BaseException:
         try: os.unlink(temporary)
@@ -218,26 +190,40 @@ def save(node, workspace_id, selector, output_path):
             "bytes_written": record["blob_bytes"], "output_path": target}
 
 
-# QUERIES — visible descriptors and validated chunks only. Progress is the
-# count of unique indexes whose chunk projector proved against the outboard.
-def _chunks(node, file_id):
-    hydrate.demand(node, b"chunk", file_id)
+# QUERIES — join only promoted descriptor atoms; count unique validated slices.
+def _slices(node, file_id):
+    hydrate.demand(node, b"slice", file_id)
     out = {}
-    for owner, t, atom in sorted(node.watched(b"chunk", file_id), key=lambda r: (r[1], r[0])):
-        index = int.from_bytes(atom.target[1], "big")
-        out.setdefault(index, atom.value)
+    for owner, t, atom in sorted(node.watched(b"slice", file_id), key=lambda row: (row[1], row[0])):
+        out.setdefault(int.from_bytes(atom.target[1], "big"), atom.value)
     return out
+
+
+def _descriptor(node, owner, workspace_id, message_id, file_id):
+    hydrate.demand(node, b"descriptor", file_id)
+    rows = {}
+    for role in FIELD_ROLES:
+        row = next((item for item in node.watched(role, file_id) if item[0] == owner), None)
+        if row is None: return None
+        rows[role] = row[2]
+    root = rows[b"descriptor"].target[1]
+    return {"workspace_id": workspace_id, "message_id": message_id, "file_id": file_id,
+            "root": root, "blob_bytes": int.from_bytes(rows[b"file_size"].value, "big"),
+            "total_slices": int.from_bytes(rows[b"file_slices"].value, "big"),
+            "slice_bytes": int.from_bytes(rows[b"file_slice_bytes"].value, "big"),
+            "encoding": rows[b"file_encoding"].value, "filename": rows[b"file_name"].value,
+            "mime_type": rows[b"file_mime"].value}
 
 
 def files(node, workspace_id, limit=0):
     hydrate.demand(node, b"file", workspace_id)
     records = []
-    for owner, t, atom in sorted(node.watched(b"file", workspace_id), key=lambda r: (r[1], r[0])):
-        meta = decode_metadata(atom.value)
-        chunks = _chunks(node, meta["file_id"])
-        item = dict(meta)
-        item.update(file_fact_id=owner, created_at=t, chunks_received=len(chunks),
-                    complete=len(chunks) == meta["total_chunks"])
+    for owner, t, atom in sorted(node.watched(b"file", workspace_id), key=lambda row: (row[1], row[0])):
+        item = _descriptor(node, owner, workspace_id, atom.target[1], atom.value)
+        if item is None: continue
+        proofs = _slices(node, item["file_id"])
+        item.update(file_fact_id=owner, created_at=t, slices_received=len(proofs),
+                    complete=len(proofs) == item["total_slices"])
         records.append(item)
     return records[:limit] if limit else records
 
@@ -247,8 +233,7 @@ def resolve(node, workspace_id, selector):
     text = selector.decode() if isinstance(selector, bytes) else str(selector)
     numbered = text[1:] if text.startswith("#") else text
     if numbered.isdigit():
-        index = int(numbered)
-        return records[index - 1] if 0 < index <= len(records) else None
+        index = int(numbered); return records[index - 1] if 0 < index <= len(records) else None
     try: wanted = bytes.fromhex(text)
     except ValueError: return None
     return next((item for item in records if item["file_fact_id"] == wanted), None)
@@ -258,8 +243,7 @@ def for_message(node, workspace_id, message_id):
     return [item for item in files(node, workspace_id) if item["message_id"] == message_id]
 
 
-# CLI — the dotted string surface. `feed` remains body-only; message.view adds
-# attachment rendering without changing that existing machine-friendly output.
+# CLI — dotted string surface for send, progress, and atomic verified export.
 def _send_cli(n, wid, channel, author, body, path, mime_type=None, t=None):
     receipt = send(n, bytes.fromhex(wid), channel.encode(), author.encode(), body.encode(),
                    path, mime_type, int(t) if t is not None else None)
@@ -269,19 +253,18 @@ def _send_cli(n, wid, channel, author, body, path, mime_type=None, t=None):
                       "filename: " + receipt["filename"].decode(),
                       "mime: " + receipt["mime_type"].decode(),
                       "blob_bytes: " + str(receipt["blob_bytes"]),
-                      "total_chunks: " + str(receipt["total_chunks"])))
+                      "total_slices: " + str(receipt["total_slices"])))
 
 
 def _list_cli(n, wid, limit=None):
-    rows = files(n, bytes.fromhex(wid), int(limit or 0))
-    lines = ["FILES (%d total):" % len(rows)]
+    rows = files(n, bytes.fromhex(wid), int(limit or 0)); lines = ["FILES (%d total):" % len(rows)]
     for index, item in enumerate(rows, 1):
         state = "complete" if item["complete"] else "incomplete"
-        pct = 100 if item["total_chunks"] == 0 else \
-            item["chunks_received"] * 100 // item["total_chunks"]
-        lines.append("%d. %s %s (%d bytes, %d/%d chunks, %d%%)" %
+        pct = 100 if item["total_slices"] == 0 else \
+            item["slices_received"] * 100 // item["total_slices"]
+        lines.append("%d. %s %s (%d bytes, %d/%d slices, %d%%)" %
                      (index, state, item["filename"].decode(), item["blob_bytes"],
-                      item["chunks_received"], item["total_chunks"], pct))
+                      item["slices_received"], item["total_slices"], pct))
     return "\n".join(lines)
 
 

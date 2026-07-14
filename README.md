@@ -41,8 +41,15 @@ were proven.
   file shape), and black-box tests (one process per command, plus real
   daemon subprocesses on real sockets).
 
-Run: `pytest` or `python3 tests/test_<name>.py`. Two dependencies: PyNaCl and
-blake3 (`pip install pynacl blake3`).
+Run: `pytest` or `python3 tests/test_<name>.py`. Install PyNaCl, blake3, and
+the repository's narrow binding to the official Bao 0.13.1 Rust crate:
+
+```
+pip install pynacl blake3 ./native/bao_py
+```
+
+Building the Bao binding requires Cargo; the installed module is ABI3-compatible
+with CPython 3.8 and newer.
 
 ```
 $ bin/con.py w.facts auth.workspace.create acme        # prints <wid>
@@ -61,23 +68,24 @@ file_id: <content-instance-id>
 filename: notes.txt
 mime: text/plain
 blob_bytes: 1234
-total_chunks: 1
+total_slices: 1
 $ bin/con.py w.facts content.message.view <wid> general
 see attached
   file: notes.txt (1234 bytes, complete)
 $ bin/con.py w.facts content.file.list <wid>
 FILES (1 total):
-1. complete notes.txt (1234 bytes, 1/1 chunks, 100%)
+1. complete notes.txt (1234 bytes, 1/1 slices, 100%)
 $ bin/con.py w.facts content.file.save <wid> 1 ./saved-notes.txt
 ```
 
-Attachments are ordinary descriptor, outboard, and 256 KiB chunk facts, capped
-at 10 GiB. The outboard commits to every indexed chunk hash, so only validated
-chunks count toward progress or save. `content.message_deletion.delete` removes
-the message and its complete attachment tree from memory, SQLite, and sync
-state. Attachment payloads currently use the same confidentiality boundary as
-message bodies: `clear-v1` bytes at rest and sealed established-connection
-frames in transit.
+Attachments are ordinary descriptor and 256 KiB slice facts, capped at 10 GiB.
+Every slice carries its bytes in a canonical Bao range proof and verifies
+independently against the descriptor's BLAKE3 root, so only proven slices count
+toward progress or save. Descriptor metadata is first-class atom vocabulary,
+not a nested record. `content.message_deletion.delete` removes the message,
+descriptor, and every slice from memory, SQLite, and sync state. Payloads
+currently use the same confidentiality boundary as message bodies: `clear-v1`
+bytes at rest and sealed established-connection frames in transit.
 
 ## Performance
 

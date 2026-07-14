@@ -654,36 +654,47 @@ channel), `reaction`, file attachments, `message_deletion`, and
 last-write-wins is a read-side fold).
 
 **Attachments are facts, not a second blob store.** `content.file` is the
-message-attached descriptor: content instance id, byte and chunk geometry,
-outboard root, filename, MIME, and encoding. `content.file_outboard` is the
-ordered chunk-hash index committed by that root. `content.file_chunk` carries
-one indexed byte range. The dependency arrows point only toward metadata:
+message-attached descriptor. Content instance id, BLAKE3 root, byte and slice
+geometry, filename, MIME, and encoding are separate named atoms; there is no
+family-specific metadata record inside an atom value. `content.file_slice`
+carries one indexed canonical Bao slice encoding: the requested bytes plus the
+authentication path that proves them against the descriptor root. The
+dependency arrows point only toward metadata:
 
 ```
-chunk -> outboard -> descriptor -> message
+Bao slice -> descriptor -> message
 ```
 
-The message never Requires its descriptor or chunks, so its dependency closure
-does not drag attachment bytes. Each chunk is at most 256 KiB and a descriptor
-may name at most 10 GiB. The outboard root is a domain-separated BLAKE3 hash of
-the canonical geometry, encoding, and ordered hash list; each leaf is a
-domain-separated hash over `(index, bytes)`. Outboard and chunk projectors
-compare those commitments against validated parent context. Only their
-validated offers count toward download progress or save, and save rechecks the
-root and total length before atomically replacing its output path.
+The message never Requires its descriptor or slices, so its dependency closure
+does not drag attachment bytes. Each requested range is at most 256 KiB and a
+descriptor may name at most 10 GiB. A slice's intrinsic gate bounds its index
+and proof bytes. Its projector obtains root, length, slice count, width, encoding,
+and message binding from one validated descriptor owner, then uses the official
+Bao format to authenticate the range. Only promoted proof offers count toward
+download progress. Save authenticates every proof again, streams the extracted
+bytes through BLAKE3, checks root and total length, fsyncs a sibling temporary,
+and atomically replaces its output path.
 
-Every descriptor, outboard, and chunk directly Suppress-needs the parent
-message's `dead` key. A valid message deletion therefore terminally purges the
-whole attachment tree from residency, durable bytes, SQLite, and the sync
-register. The deletion fact is the durable replicated relationship; deleted
-bytes are not tombstone leaves, and a laggard re-shipping an old attachment
-fact buys one admission that re-derives Suppressed and dies.
+The narrow `native/bao_py` binding uses the official Rust `bao` 0.13.1 crate for
+streaming outboard creation, range extraction, and proof decoding. Send builds
+one temporary outboard, extracts each bounded range proof in-process, verifies
+all of them, then discards the outboard before admission. Projection and save
+call the same optimized decoder, so engine validity never invokes a subprocess
+or depends on host files. The dependency is pinned because upstream describes
+Bao as beta cryptographic software that has not been formally audited.
+
+Every descriptor and slice directly Suppress-needs the parent message's `dead`
+key. A valid message deletion therefore terminally purges the whole attachment
+from residency, durable bytes, SQLite, and the sync register. The deletion fact
+is the durable replicated relationship; deleted bytes are not tombstone leaves,
+and a laggard re-shipping an old attachment fact buys one admission that
+re-derives Suppressed and dies.
 
 The active attachment encoding is `clear-v1`, matching message bodies: bytes
 are visible in the local fact store and sealed by the established-connection
 transport on the wire. A content-key family can replace the payload with
-ciphertext without changing the public descriptor/outboard/chunk validation
-graph, because the commitment is over the carried bytes.
+ciphertext without changing the public descriptor/slice validation graph,
+because the Bao root and proofs commit to the carried bytes.
 
 ## Family Specs Not Yet Implemented
 

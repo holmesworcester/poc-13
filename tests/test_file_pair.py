@@ -1,4 +1,4 @@
-"""A real two-daemon attachment story: a multi-chunk binary file crosses the
+"""A real two-daemon attachment story: a multi-slice binary file crosses the
 sealed transport, survives receiver restart, saves byte-for-byte, then a synced
 message deletion physically removes the message and complete attachment tree on
 both databases while leaving an already exported user file alone."""
@@ -38,7 +38,7 @@ def test_file_attachment_sync_restart_save_and_real_delete():
                    source, "application/octet-stream", "2")
         message_id = _field(sent, "message_id")
         assert _field(sent, "filename") == "payload.bin"
-        assert _field(sent, "total_chunks") == "2"
+        assert _field(sent, "total_slices") == "2"
 
         converge(bob, lambda output: "1. complete payload.bin" in output,
                  "content.file.list", wid, secs=30, phase="attachment completes on bob")
@@ -72,8 +72,7 @@ def test_file_attachment_sync_restart_save_and_real_delete():
         assert open(target, "rb").read() == payload       # exports are outside the fact store
 
         f.stop(alice); f.stop(bob)
-        content_tags = (b"content.message", b"content.file", b"content.file_outboard",
-                        b"content.file_chunk")
+        content_tags = (b"content.message", b"content.file", b"content.file_slice")
         for db in (alice, bob):
             store = Store(db)
             remaining = {row[0] for row in store.db.execute("SELECT tag FROM facts")}

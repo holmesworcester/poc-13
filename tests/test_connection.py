@@ -37,7 +37,7 @@ def test_corrupt_inner_fact_misses_siblings_land():
     assert fact_id(msgs[2]) not in n.facts                    # the corrupt inner missed
 
 def test_oversized_content_fact_gets_a_solo_sealed_frame():
-    inner = os.urandom(frames.TARGET + 1)                      # file chunks exceed the bundle target
+    inner = os.urandom(frames.TARGET + 1)                      # Bao slices exceed the bundle target
     packed = frames.pack_counts([inner, b"tail"])
     assert [count for _, count in packed] == [1, 1]            # oversize is legal, but never co-bundled
     blob, _ = packed[0]
