@@ -81,30 +81,25 @@ projector publishes them.
 
 Every fact follows the same admission and evaluation pipeline. The root router
 uses the type tag to select the owning family for both `extract()` and
-`project()`:
+`project()`. The fact remains immutable throughout; evaluation adds a verdict
+and, for a valid fact, a set of projected offers:
 
 ```mermaid
 flowchart TB
-    I["command, sealed peer bundle, or store fault<br/>canonical fact bytes"] --> A["admit<br/>decode canonically · compute id · run optional intrinsic check for new input"]
+    I["FACT IN<br/>canonical bytes"] --> A["admit<br/>decode canonically · compute id · run optional intrinsic check"]
     A --> X["family extract(fact)<br/>pure classification: durable, shareable"]
-    X --> R["materialize SELF and index every asserted atom<br/>enqueue the fact"]
-    X -. "durable" .-> S["SQLite on host commit<br/>facts(fid, tag) + one row per atom"]
-    R --> E["step<br/>fault cold matching owners and consult validated offers"]
-    E --> D{"matching valid<br/>Suppress need?"}
-    D -- yes --> Z["Suppressed<br/>purge fact, atom rows, outputs, and sync membership"]
+    X --> M["materialize SELF · index atoms<br/>match needs against validated offers"]
+    M --> D{"valid offer matches<br/>a Suppress need?"}
+    D -- yes --> Z["FACT OUT<br/>Suppressed · no offers · purged"]
     D -- no --> Q{"every Require need<br/>has a valid match?"}
-    Q -- no --> K["Parked<br/>publish nothing; wake when dependencies change"]
+    Q -- no --> K["FACT OUT<br/>Parked · no offers"]
     Q -- yes --> C["validated context<br/>matching offers for Require and Watch needs"]
     C --> P["family project(fact, context)<br/>check exact shape, semantics, and authority"]
-    P --> O["Out(verdict, offers)"]
-    O --> V["promote only a Valid fact's returned offers<br/>replace its prior clean rows and wake dependents"]
-    O --> T["optional family settle hook sees every verdict"]
-    K --> T
-    Z --> T
-    T --> Y["sync register membership<br/>only while durable + shareable + Valid"]
-    V --> U["queries and host effects read validated offers"]
-    Y --> G["treap range reconciliation<br/>sealed fact bundles to peers"]
-    G --> I
+    P --> O{"projector verdict"}
+    O -- Valid --> V["FACT OUT<br/>Valid · projected offers"]
+    O -- Parked --> K
+    O -- Invalid --> N["FACT OUT<br/>Invalid · no offers"]
+    O -- Reap --> R["FACT OUT<br/>Reap · no offers · purged"]
 ```
 
 Despite its name, `extract()` does not unpack the atoms. It is a content-pure
