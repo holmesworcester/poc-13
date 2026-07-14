@@ -23,17 +23,106 @@ The design of record is [`DESIGN.md`](DESIGN.md).
 
 ## How it works
 
-```text
-command
-  -> canonical fact + detached signature
-  -> admission and need/offer matching
-  -> one SQLite row per atom
-  -> validated offers and family-owned derived indexes
-  -> treap range reconciliation
-  -> sealed fact bundles to peers
-  -> the same admission path on receipt
-  -> queries over validated offers
+### Facts are canonical sets of atoms
+
+A fact has a dotted family tag and a canonical, sorted set of atoms. Its id is
+the BLAKE3 hash of the protocol domain, tag, and encoded atoms, so changing any
+atom creates a different event. An atom is the small relational statement
+`(kind, role, scope, target, value?, effect?)`:
+
+- an **offer** is a candidate claim, such as a message body at a channel id;
+- a **need** looks for offers with the same role and scope whose point or range
+  target matches; and
+- a need's effect says whether the match is required, merely watched, or
+  suppresses the owning fact.
+
+For example, a member-signed message is one fact containing seven atoms. In
+this diagram `W` is the workspace id, `C` the channel fact id, `A` the author
+member id, and `M` the message fact id:
+
+```mermaid
+flowchart TB
+    F["fact M<br/>tag: content.message<br/>id: BLAKE3(domain, tag, canonical atoms)"]
+
+    subgraph needs["NEED atoms — relationships consumed by M"]
+        N1["Require channel<br/>role=channel · scope=W · target=C"]
+        N2["Require detached signature<br/>role=pk · scope=W · target=SELF → M"]
+        N3["Require workspace member keys<br/>role=key · scope=W · target=W"]
+        N4["Suppress on deletion<br/>role=dead · scope=W · target=SELF → M"]
+    end
+
+    subgraph offers["OFFER atoms — candidate claims made by M"]
+        O1["message body<br/>role=msg · scope=W · target=C · value=body"]
+        O2["authorship<br/>role=posted · scope=W · target=SELF → M · value=A"]
+        O3["timestamp<br/>role=ts · scope=W · target=SELF → M · value=time"]
+    end
+
+    F --> N1
+    F --> N2
+    F --> N3
+    F --> N4
+    F --> O1
+    F --> O2
+    F --> O3
 ```
+
+`SELF` is encoded as a symbolic target, which avoids a hash cycle while the
+fact id is being computed. In the match index and atom store it is materialized
+as `Exact(M)`. The `channel` need therefore links the message to a
+validated channel, the `pk` and `key` needs bring its detached signer and
+workspace authority into context, and a matching `dead@M` offer suppresses and
+physically purges it. The `msg` and `posted` atoms do not become trusted merely
+because they occur in the fact: they are asserted candidates until the family
+projector publishes them.
+
+### Extraction and projection
+
+Every fact follows the same admission and evaluation pipeline. The root router
+uses the type tag to select the owning family for both `extract()` and
+`project()`:
+
+```mermaid
+flowchart TB
+    I["command, sealed peer bundle, or store fault<br/>canonical fact bytes"] --> A["admit<br/>decode canonically · compute id · run optional intrinsic check for new input"]
+    A --> X["family extract(fact)<br/>pure classification: durable, shareable"]
+    X --> R["materialize SELF and index every asserted atom<br/>enqueue the fact"]
+    X -. "durable" .-> S["SQLite on host commit<br/>facts(fid, tag) + one row per atom"]
+    R --> E["step<br/>fault cold matching owners and consult validated offers"]
+    E --> D{"matching valid<br/>Suppress need?"}
+    D -- yes --> Z["Suppressed<br/>purge fact, atom rows, outputs, and sync membership"]
+    D -- no --> Q{"every Require need<br/>has a valid match?"}
+    Q -- no --> K["Parked<br/>publish nothing; wake when dependencies change"]
+    Q -- yes --> C["validated context<br/>matching offers for Require and Watch needs"]
+    C --> P["family project(fact, context)<br/>check exact shape, semantics, and authority"]
+    P --> O["Out(verdict, offers)"]
+    O --> V["promote only a Valid fact's returned offers<br/>replace its prior clean rows and wake dependents"]
+    O --> T["optional family settle hook sees every verdict"]
+    K --> T
+    Z --> T
+    T --> Y["sync register membership<br/>only while durable + shareable + Valid"]
+    V --> U["queries and host effects read validated offers"]
+    Y --> G["treap range reconciliation<br/>sealed fact bundles to peers"]
+    G --> I
+```
+
+Despite its name, `extract()` does not unpack the atoms. It is a content-pure
+policy decision made at admission: `durable` decides whether the canonical
+fact is retained in the atom relation, while `shareable` makes a valid,
+durable fact eligible for the sync family's treap. Local secrets and connection
+anchors are durable but unshareable; protocol work such as sync compares and
+outbox sends is neither.
+
+The projector is the fact family's semantic boundary. It runs only after no
+validated suppressor matches and every `Require` need is satisfied. Its
+context contains matching **validated** offers for `Require` and `Watch`
+needs, including each offer's owner and timestamp. The projector normally
+rebuilds the expected family shape, applies authorization or cryptographic
+policy, and returns `Out(offers=...)`. Only those returned offers enter the
+clean index read by dependents and queries; raw asserted offers never justify
+another fact on their own. `Parked`, `Invalid`, `Suppressed`, and family-chosen
+`Reap` verdicts publish no clean offers. A family's `settle()` hook observes
+every verdict, including ones that never call the projector, which is how sync
+maintains its own leaf set and treap in `node.regs[b"sync"]`.
 
 SQLite does not store canonical fact blobs. Its durable relation is a
 two-column `facts(fid, tag)` spine plus one `atoms` row for every atom. Reads
