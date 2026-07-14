@@ -36,35 +36,37 @@ atom creates a different event. An atom is the small relational statement
 - a need's effect says whether the match is required, merely watched, or
   suppresses the owning fact.
 
-For example, a member-signed message is one fact containing seven atoms. In
-this diagram `W` is the workspace id, `C` the channel fact id, `A` the author
-member id, and `M` the message fact id:
+For example, a member-signed message is one fact containing seven atoms. Using
+protocol notation, `W` is the workspace id, `C` the channel fact id, `A` the
+author member id, and `t` the timestamp:
 
-```mermaid
-flowchart TB
-    F["fact M<br/>tag: content.message<br/>id: BLAKE3(domain, tag, canonical atoms)"]
+```text
+Need  (effect, role, scope, target, value?)
+Offer (        role, scope, target, value?)
 
-    subgraph needs["NEED atoms — relationships consumed by M"]
-        N1["Require channel<br/>role=channel · scope=W · target=C"]
-        N2["Require detached signature<br/>role=pk · scope=W · target=SELF → M"]
-        N3["Require workspace member keys<br/>role=key · scope=W · target=W"]
-        N4["Suppress on deletion<br/>role=dead · scope=W · target=SELF → M"]
-    end
+MessageFact(W, C, A, body, t) ::=
+  Fact(
+    tag   = "content.message",
+    atoms = {
+      Need  (REQUIRE,  "channel", W, Exact(C))
+      Need  (REQUIRE,  "pk",      W, SELF)
+      Need  (REQUIRE,  "key",     W, Exact(W))
+      Need  (SUPPRESS, "dead",    W, SELF)
 
-    subgraph offers["OFFER atoms — candidate claims made by M"]
-        O1["message body<br/>role=msg · scope=W · target=C · value=body"]
-        O2["authorship<br/>role=posted · scope=W · target=SELF → M · value=A"]
-        O3["timestamp<br/>role=ts · scope=W · target=SELF → M · value=time"]
-    end
+      Offer (          "msg",     W, Exact(C), body)
+      Offer (          "posted",  W, SELF,     A)
+      Offer (          "ts",      W, SELF,     u64le(t))
+    }
+  )
 
-    F --> N1
-    F --> N2
-    F --> N3
-    F --> N4
-    F --> O1
-    F --> O2
-    F --> O3
+M ::= FactId(MessageFact(W, C, A, body, t))
+    = BLAKE3(frame("tinyp2p.fact.v1", tag, canonical(atoms)))
+
+materialize(SELF, owner=M) ::= Exact(M)
 ```
+
+The braces denote a set, not wire order: canonical encoding sorts atoms by
+their encoding and removes duplicates before computing `M`.
 
 `SELF` is encoded as a symbolic target, which avoids a hash cycle while the
 fact id is being computed. In the match index and atom store it is materialized
