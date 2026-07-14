@@ -86,20 +86,20 @@ and, for a valid fact, a set of projected offers:
 
 ```mermaid
 flowchart TB
-    I["FACT IN<br/>canonical bytes"] --> A["admit<br/>decode canonically · compute id · run optional intrinsic check"]
+    I["canonical bytes"] --> A["admit<br/>decode canonically · compute id · run optional intrinsic check"]
     A --> X["family extract(fact)<br/>pure classification: durable, shareable"]
     X --> M["materialize SELF · index atoms<br/>match needs against validated offers"]
     M --> D{"valid offer matches<br/>a Suppress need?"}
-    D -- yes --> Z["FACT OUT<br/>Suppressed · no offers · purged"]
+    D -- yes --> Z["Suppressed · no offers · purged"]
     D -- no --> Q{"every Require need<br/>has a valid match?"}
-    Q -- no --> K["FACT OUT<br/>Parked · no offers"]
+    Q -- no --> K["Parked · no offers"]
     Q -- yes --> C["validated context<br/>matching offers for Require and Watch needs"]
     C --> P["family project(fact, context)<br/>check exact shape, semantics, and authority"]
     P --> O{"projector verdict"}
-    O -- Valid --> V["FACT OUT<br/>Valid · projected offers"]
+    O -- Valid --> V["Valid · projected offers"]
     O -- Parked --> K
-    O -- Invalid --> N["FACT OUT<br/>Invalid · no offers"]
-    O -- Reap --> R["FACT OUT<br/>Reap · no offers · purged"]
+    O -- Invalid --> N["Invalid · no offers"]
+    O -- Reap --> R["Reap · no offers · purged"]
 ```
 
 Despite its name, `extract()` does not unpack the atoms. It is a content-pure
