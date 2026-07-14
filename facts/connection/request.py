@@ -13,9 +13,11 @@ with its static endpoint secret, the initiator with its own ephemeral — the
 X25519 box is symmetric). A failed open or a bad branch signature is Invalid; a
 missing key or absent proof is Parked until it lands. On success the projector
 publishes the decrypted plaintext as `req_open` (the connection fact's transcript
-input), re-offers the wire bytes as a `send` while the initiator is unanswered
-(the resend loop the pump dials), and — on the addressee, once a receipt proves
-the request arrived — a host-watched `respond` naming the reply route."""
+input), re-offers the wire bytes as a durable `dial` anchor on the initiator
+(fast until answered, slow after — the request IS the known-peer record, so a
+responder restart heals by the next slow redial), and — on the addressee, once a
+receipt proves the request arrived — a host-watched `respond` naming the reply
+route."""
 from kernel import (Atom, Exact, FULL, NEED, OFFER, Out, SELF, SUPPRESS, WATCH,
                     by, encode, fact, frame, now, ts_atom, unframe)
 from crypto import open_x25519
@@ -60,7 +62,7 @@ def request(env, to_ep, init_eph_pk, t):
                 Atom(NEED, b"invite_secret", b"local", FULL, effect=WATCH),
                 Atom(NEED, b"endpoint_shared", b"auth", FULL, effect=WATCH),
                 Atom(NEED, b"endpoint", b"local", FULL, effect=WATCH),     # am I addressee?
-                Atom(NEED, b"answered", SC, SELF, effect=WATCH),                 # retire resend
+                Atom(NEED, b"answered", SC, SELF, effect=WATCH),                 # slow the redial once answered
                 Atom(NEED, b"closed", SC, SELF, effect=SUPPRESS))
 
 # EXTRACT — content-pure: (durable, LocalOnly). First contact is never synced.
@@ -104,7 +106,7 @@ def project(f, ctx):
     mine = {r[2].target[1] for r in by(ctx, b"endpoint")}
     if to_ep in mine:                    # responder (only the addressee can open it): reply
         offers.append(Atom(OFFER, b"respond", SC, SELF, F["init_addr"]))   # to the initiator's listen addr
-    elif not by(ctx, b"answered") and F["dialed_addr"]:   # initiator: (re)dial until answered
+    elif F["dialed_addr"]:               # initiator: a known-peer dial anchor, answered or not
         offers.append(Atom(OFFER, b"dial", SC, Exact(F["dialed_addr"]), encode(f)))
     return Out(offers=tuple(offers))
 
@@ -143,10 +145,12 @@ def membership(node, workspace_id, to_ep, dialed_addr, init_addr, t):
     return _seal(node, MEMBERSHIP, epk, to_ep, dialed_addr, init_addr,
                  dict(esid=did), lambda m: sign(sk, m), t)
 
-# QUERIES — the dials the daemon still owes (addr -> bare handshake bytes).
+# QUERIES — the dials the daemon owes: (request id, addr, bare handshake bytes,
+# answered?). Answered anchors redial slowly; unanswered ones fast.
 def dials(node):
     node.run()
-    return [(a.target[1], a.value) for o, _, a in node.watched(b"dial", SC)]
+    answered = {a.target[0] for _, _, a in node.watched(b"answered", SC)}
+    return [(o, a.target[0], a.value, o in answered) for o, _, a in node.watched(b"dial", SC)]
 
 # CLI — the joiner's bootstrap: `connect wid iid secret to_ep addr [init_addr]`.
 # The invite link carries the workspace, invite id, secret, inviter endpoint,

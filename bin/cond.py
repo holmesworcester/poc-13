@@ -45,7 +45,8 @@ OUTCAP = 32 << 20                        # per-address outbox byte cap: overflow
                                          # Larger = fewer catch-up round-trips (each re-descend re-fingerprints),
                                          # bounded by the memory a stalled peer may hold. The buffer is a
                                          # bytearray drained by offset, so a big cap stays O(1)-amortized.
-CADENCE = 0.5                            # s between redials / periodic root compares per peer
+CADENCE = 0.5                            # s between redials of an unanswered request / next_wake floor
+KNOWN_PEER_CADENCE = 2.0                 # s between redials of an answered anchor whose session is down
 BARE, SEALED = 0, 1                      # wire discriminators
 now_ms = lambda: int(time.time() * 1000)
 now_s = lambda: int(time.time())         # fact-ts unit (kernel now())
@@ -122,7 +123,7 @@ def main(db, *argv):
         h, pt = listen.rsplit(":", 1)
         tsock = socket.create_server((h, int(pt))); tsock.setblocking(False)
     links, inbound = {}, []              # links: addr -> outbound socket; inbound: read sources
-    redial = {}                                       # redial: addr -> last dial
+    redial = {}                                       # redial: (addr, request id) -> last dial
     to_ship = set()                                   # flushed senders awaiting their reap
     sent = {}                                         # cid -> TTLSet (runtime.SENT_TTL < the anchor period): a shipped fact by id
                                                       # AND a sync compare by content hash (both 32-byte digests). The
@@ -162,6 +163,13 @@ def main(db, *argv):
                     except OSError: c = b""
                     if c: src["inb"] = src.get("inb", b"") + c; work = True
                     elif src in inbound: s.close(); inbound.remove(src)
+                    else:                              # EOF on an outbound link: reset it (else the dead
+                        for addr, p in links.items(): # socket spins in select and no redial ever fires)
+                            if p is src:
+                                s.close(); p["s"], p["out"], p["off"], p["down"] = None, bytearray(), 0, nowm + 0.05
+                                for _e, _a, cid, _w in conn.peers(node):     # forget what we shipped this addr,
+                                    if _a.decode() == addr: sent.pop(cid, None)   # so a reconnect re-ships
+                                break
             n, arrived, inbox = 0, [], []             # collect inbound, bounded per turn
             for src in inbound + [p for p in links.values() if p["s"]]:
                 if "inb" not in src: continue
@@ -188,10 +196,17 @@ def main(db, *argv):
                 if reply: conn.respond(node, rid, reply, now_s()); work = True   # response ships via the pump
             # HOST OUT — flush, redial, pump data, open sync rounds (one per peer), drain writes.
             flush(node, store, flushed)
-            for addr, env in request.dials(node):     # (re)dial unanswered requests
-                a = addr.decode()
-                if nowm - redial.get(a, 0) >= CADENCE:
-                    enqueue(link(links, a), BARE, env); redial[a] = nowm; work = True
+            ds = request.dials(node)                  # (re)dial: fast while unanswered, slow known-peer
+            live = {a.decode() for _e, a, _c, _w in conn.peers(node)}   # anchor when the session is down —
+            for rid, addr, env, answered in ds:                         # and SILENT while it is up: a
+                a = addr.decode()                                       # converged pair owes the wire nothing
+                p = links.get(a)
+                if answered and a in live and p and p["s"]: continue
+                interval, key = (KNOWN_PEER_CADENCE if answered else CADENCE), (a, rid)
+                if nowm - redial.get(key, 0) >= interval:
+                    enqueue(link(links, a), BARE, env); redial[key] = nowm; work = True
+            redial = {k: v for k, v in redial.items()                   # retired requests leave no residue
+                      if k in {(a.decode(), r) for r, a, _, _ in ds}}
             def deliver(cid, addr, secret, inners):        # one out door: seal iff a session secret, else bare.
                 p = link(links, addr.decode()); n = 0      # returns how many inners went out (a prefix): a full
                 if secret:                                 # outbox stops the tail, which pump leaves unmarked so

@@ -97,6 +97,27 @@ def test_pair_burst_does_not_wedge():
         converge(dbb, 100, "content.message.feed", wid, "general", secs=30,
                  phase="burst reaches B")
 
+def test_answered_request_redials_after_responder_restart():
+    # B owns the durable request. Once answered, older code stopped dialing, so
+    # restarting only A (the responder) left both sides with no live session and
+    # nobody dialing. The answered anchor redials slowly and heals it.
+    with tempfile.TemporaryDirectory() as d, fleet() as f:
+        dba, dbb = os.path.join(d, "a.facts"), os.path.join(d, "b.facts")
+        A, B = port(), port()
+        f.spawn(dba, "--listen", A)
+        f.spawn(dbb, "--listen", B)
+        wid = con(dba, "auth.workspace.create", "acme", "1")
+        link = _bootstrap(dba, dbb, wid, A, B)
+        con(dbb, "auth.user.join", wid, "bo", link, "5")
+        converge(dba, "founder\nbo", "auth.user.roster", wid, secs=15,
+                 phase="B's membership reaches A before the responder restart")
+        f.stop(dba)
+        con(dbb, "content.message.send", wid, "general", "bo", "while-a-down", "6")
+        f.spawn(dba, "--listen", A)
+        converge(dba, "while-a-down", "content.message.feed", wid, "general", secs=25,
+                 phase="the answered anchor redials and the send crosses")
+
 if __name__ == "__main__":
-    for t in (test_pair_story, test_pair_burst_does_not_wedge):
+    for t in (test_pair_story, test_pair_burst_does_not_wedge,
+              test_answered_request_redials_after_responder_restart):
         t(); print(f"ok  {t.__name__}")
