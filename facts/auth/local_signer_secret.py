@@ -20,6 +20,10 @@ def secret(sk, pk, t):
 # EXTRACT — content-pure durability. The projector emits no sync marker.
 def extract(f): return True
 
+# CHECK — local-only: the signing secret is authored here and must never be
+# admitted from a peer, or a peer could set our identity.
+def check(f, local): return local
+
 # PROJECT — the only place this family's meaning lives.
 def project(f, ctx):
     return Out(offers=tuple(a for a in f.atoms if a.role in (b"sk", b"pk")))

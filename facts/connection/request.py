@@ -69,7 +69,7 @@ def request(env, to_ep, init_eph_pk, t):
 def extract(f): return True
 
 # CHECK — structural only: the envelope parses to the right widths (no context).
-def check(f):
+def check(f, local):                     # the handshake legitimately arrives from a peer: provenance ignored
     env = next((a.value for a in f.atoms if a.role == b"sreq"), None)
     if env is None: return False
     try: ver, eph, to, nc, ct = _unenv(env)

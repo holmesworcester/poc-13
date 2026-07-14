@@ -21,10 +21,10 @@ def ephemeral(eph_sk, eph_pk, t):
 def extract(f): return True
 
 # CHECK — self-verification at the gate: the secret must derive the pub it keys.
-def check(f):
+def check(f, local):                     # local-only: an ephemeral secret is minted here, never off the wire
     v = {a.role: (a.target, a.value) for a in f.atoms}
     (tgt, sk) = v.get(b"ephsk", (None, None))
-    return bool(sk) and tgt == Exact(x25519_pk(sk))
+    return bool(sk) and tgt == Exact(x25519_pk(sk)) and local
 
 # PROJECT — the only place this family's meaning lives.
 def project(f, ctx):

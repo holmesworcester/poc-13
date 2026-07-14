@@ -21,6 +21,10 @@ def active_workspace(workspace_id, t):
 # EXTRACT — content-pure durability. The projector emits no sync marker.
 def extract(f): return True
 
+# CHECK — local-only: the selection is UI state authored here, never a fact a
+# peer may inject.
+def check(f, local): return local
+
 # PROJECT — accept exactly SHAPE (the workspace Require gates validity upstream).
 def project(f, ctx):
     try:

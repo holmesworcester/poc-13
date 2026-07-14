@@ -61,14 +61,16 @@ def test_requires_suppression_and_wakes():
     assert [a.value for _, _, a in n.watched(b"msg", WID)] == [b"keep"]
 
 def test_admission_check_hook():
-    class SigLike:                       # throwaway family: a self-check at the gate
-        extract = staticmethod(lambda f: True)
+    class SigLike:                       # throwaway family: a self-check at the gate that
+        extract = staticmethod(lambda f: True)        # also refuses a non-local origin
         project = staticmethod(lambda f, ctx: Out())
-        check = staticmethod(lambda f: ts_of(f) != 13)
-    n = Node(Router({b"sig": Router({b"x": SigLike}, depth=1)}))
+        check = staticmethod(lambda f, local: ts_of(f) != 13 and local)
+    root = Router({b"sig": Router({b"x": SigLike}, depth=1)})
+    n = Node(root)
     ok, bad = encode(fact(b"sig.x", ts_atom(7))), encode(fact(b"sig.x", ts_atom(13)))
-    assert n.admit(ok) is not None
+    assert n.admit(ok) is not None                    # a local command admits
     assert n.admit(bad) is None                       # falsy check: inert miss
+    assert Node(root).admit(ok, local=False) is None  # provenance: a peer cannot inject it (fresh node)
     assert n.admit(bad, checked=True) is not None     # replay path never re-runs the check
 
 def test_outbox_reap_and_reboot():

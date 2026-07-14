@@ -214,16 +214,3 @@ Known gap left deliberately: the set-moved counter (leaf_ver, now
 facts.sync.index.ver) is polled by bench/tests only; the daemon relies on
 the cadence (DESIGN.md prose softened to match).
 
-# TODO — node-private wire ingress
-
-Projected `leaf@sync` offers now gate both treap membership and `sync.need`'s
-by-id egress, but `cycle()` still admits every inbound wire byte with no
-provenance filter. A connected peer can therefore write into b"local" scope —
-including auth.local_signer_secret (identity selection: current() takes the
-first sk/pk rows independently) and auth.invite_accepted (the trust anchor
-gating workspace validity). Ingress permission is deliberately not inferred
-from whether a projector currently emits a marker: handshake and sync-control
-facts legitimately arrive from the wire without becoming reconciliation
-leaves. Land a separate family-level wire-ingress capability at the inbox seam
-(tinyd knows provenance; the kernel must not). Until then the threat model
-assumes connected peers are honest about locals.
