@@ -168,19 +168,19 @@ Run every native suite:
 
 ```bash
 # Installs the locked TypeScript development dependencies when absent.
-./language-lab/run_all.sh
+./docs/language-lab/run_all.sh
 ```
 
 Run stricter language checks:
 
 ```bash
-cargo fmt --manifest-path language-lab/rust/Cargo.toml --check
-cargo clippy --manifest-path language-lab/rust/Cargo.toml --all-targets -- -D warnings
-(cd language-lab/go && go test -race ./... && go vet ./...)
+cargo fmt --manifest-path docs/language-lab/rust/Cargo.toml --check
+cargo clippy --manifest-path docs/language-lab/rust/Cargo.toml --all-targets -- -D warnings
+(cd docs/language-lab/go && go test -race ./... && go vet ./...)
 tmp=$(mktemp -d); elixirc --warnings-as-errors -o "$tmp" \
-  language-lab/elixir/kernel.exs language-lab/elixir/runtime.exs; rm -rf "$tmp"
-mix format --check-formatted language-lab/elixir/*.exs
-(cd language-lab/typescript && npm run typecheck && npm test && \
+  docs/language-lab/elixir/kernel.exs docs/language-lab/elixir/runtime.exs; rm -rf "$tmp"
+mix format --check-formatted docs/language-lab/elixir/*.exs
+(cd docs/language-lab/typescript && npm run typecheck && npm test && \
   node --check model.ts && node --check kernel.ts && \
   node --check runtime.ts && node --check lab.test.ts)
 ```
@@ -188,5 +188,5 @@ mix format --check-formatted language-lab/elixir/*.exs
 Recompute LOC (requires `cloc`):
 
 ```bash
-./language-lab/measure_loc.sh
+./docs/language-lab/measure_loc.sh
 ```
