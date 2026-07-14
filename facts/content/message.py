@@ -63,10 +63,37 @@ def _cli_feed(node, workspace_id, ref):
         raise
     return b"\n".join(feed(node, workspace_id, channel_id)).decode()
 
+def view(node, workspace_id, channel):
+    from facts.content import file as filemod
+    hydrate.demand(node, b"msg", workspace_id)
+    attachments = {}
+    for item in filemod.files(node, workspace_id):
+        attachments.setdefault(item["message_id"], []).append(item)
+    lines = []
+    for owner, t, atom in sorted(node.watched(b"msg", workspace_id), key=lambda r: (r[1], r[0])):
+        if atom.target != Exact(channel):
+            continue
+        lines.append(atom.value.decode())
+        for item in attachments.get(owner, ()):
+            state = "complete" if item["complete"] else \
+                "%d/%d slices" % (item["slices_received"], item["total_slices"])
+            lines.append("  file: %s (%d bytes, %s)" %
+                         (item["filename"].decode(), item["blob_bytes"], state))
+    return lines
+
+def _cli_view(node, workspace_id, ref):
+    try: channel_id = channels.resolve(node, workspace_id, ref)
+    except RuntimeError as e:
+        if str(e).startswith("unknown channel:"): return ""
+        raise
+    return "\n".join(view(node, workspace_id, channel_id))
+
 # CLI — string boundary over COMMANDS/QUERIES. The author is the local signer;
 # the `who` slot is accepted and ignored for wire-compat until the CLI rework.
 CLI = {"send": lambda n, wid, ch, who, body, t=None:
            send(n, bytes.fromhex(wid), channels.resolve(n, bytes.fromhex(wid), ch),
                 body.encode(), int(t or now())).hex(),
        "feed": lambda n, wid, ch:
-           _cli_feed(n, bytes.fromhex(wid), ch)}
+           _cli_feed(n, bytes.fromhex(wid), ch),
+       "view": lambda n, wid, ch:
+           _cli_view(n, bytes.fromhex(wid), ch)}
