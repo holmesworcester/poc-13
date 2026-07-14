@@ -415,15 +415,17 @@ class Node:
     # --- The way in (admit) -----------------------------------------------------
     # This accepts one canonical fact, indexes it, and queues its first judgment.
     # A failed gate is inert. checked=True (replay from own durable file) skips
-    # the family self-check: those bytes passed once.
-    def admit(self, b, expect=None, checked=False):
+    # the family self-check: those bytes passed once. `local` is provenance: True
+    # for a command or a replay from our own store, False for bytes off the wire —
+    # a family whose facts are node-private authority may refuse a non-local origin.
+    def admit(self, b, expect=None, checked=False, local=True):
         try: f = decode(b)
         except Exception: return None
         fid = fact_id(f)
         if expect not in (None, fid): return None
         if fid in self.facts: return fid     # idempotent admission
         chk = None if checked else getattr(self.root.resolve(f.type_tag.split(b".")), "check", None)
-        if chk and not chk(f): return None   # per-family self-check: falsy = inert miss
+        if chk and not chk(f, local): return None   # per-family self-check: falsy = inert miss
         durable = self.root.extract(f)
         self.facts[fid], self.memo[fid] = f, UNKNOWN
         if durable: self.durable[fid] = b

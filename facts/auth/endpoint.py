@@ -22,10 +22,10 @@ def endpoint(esk, epk, t):
 def extract(f): return True
 
 # CHECK — self-verification at the gate: the secret must derive the pub it names.
-def check(f):
+def check(f, local):                     # local-only: the endpoint secret is authored here, never off the wire
     v = {a.name: (a.target, a.value) for a in f.atoms}
     (tgt, esk) = v.get(b"esk", (None, None))
-    return bool(esk) and tgt == Exact(x25519_pk(esk))
+    return bool(esk) and tgt == Exact(x25519_pk(esk)) and local
 
 # PROJECT — the only place this family's meaning lives.
 def project(f, ctx):

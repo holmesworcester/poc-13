@@ -26,10 +26,10 @@ def invite_accepted(workspace_id, invite_id, secret, addr, endpoint_pk, t):
 def extract(f): return True
 
 # CHECK — the bootstrap_hash it keys by must be the hash of the secret it carries.
-def check(f):
+def check(f, local):                     # local-only: the trust anchor is accepted here, never off the wire
     v = {a.name: (a.target, a.value) for a in f.atoms}
     (tgt, secret) = v.get(b"invite_secret", (None, None))
-    return bool(secret) and tgt == Exact(bootstrap_hash(secret))
+    return bool(secret) and tgt == Exact(bootstrap_hash(secret)) and local
 
 # PROJECT — publish acceptance + the bootstrap context.
 def project(f, ctx):

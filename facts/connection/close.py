@@ -23,6 +23,10 @@ def close(targets, t):
 # EXTRACT — content-pure durability. A local close projects no sync marker.
 def extract(f): return True
 
+# CHECK — local-only: a session is retired here; a wire-injected close would
+# let a peer tear down our connections.
+def check(f, local): return local
+
 # PROJECT — the only place this family's meaning lives.
 def project(f, ctx):
     return Out(provides=tuple(a for a in f.atoms if a.name == b"closed"))

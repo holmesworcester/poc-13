@@ -173,9 +173,9 @@ def main(db, *argv):
             n, arrived, inbox = 0, [], []             # collect inbound, bounded per turn
             for src in inbound + [p for p in links.values() if p["s"]]:
                 if "inb" not in src: continue
-                for kind, body in messages(src):
+                for kind, body in messages(src):     # local=False: peer bytes — a family may refuse them
                     if kind == BARE:                  # a handshake fact: admit now (idempotent), react after
-                        rid = node.admit(body)
+                        rid = node.admit(body, local=False)
                         if rid and node.facts[rid].type_tag == request.TAG: arrived.append(rid)
                     else:
                         inbox += _open_frame(node, body)   # a sealed frame -> its inner fact bytes
@@ -185,7 +185,7 @@ def main(db, *argv):
             # ENGINE DRAIN — admit the inbox and drain one bounded turn, presenting the wire's
             # flush reports: a flushed sender that Gathers shipped reaps this turn; keep
             # re-presenting until it does, then prune the acted-on. Leftover frontier is next turn.
-            cycle(node, inbox, now_ms(), to_ship, BOUND); work |= bool(node.frontier)
+            cycle(node, inbox, now_ms(), to_ship, BOUND, local=False); work |= bool(node.frontier)
             to_ship &= {o for o, _, _ in outbox(node)}     # keep only owners still Providing send/ship
             # respond seam: the onus is on the requester — its durable request re-dials on
             # a cadence; the responder just answers each ARRIVAL (no cadence of its own), so

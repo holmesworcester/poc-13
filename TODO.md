@@ -224,17 +224,3 @@ state, then settle differently: Gather passes zero or more matches, Require
 parks on zero, and SuppressIf purges on nonzero. The wire header and SQLite
 relation follow that same shape, so the identity domain is
 `tinyp2p.fact.v2`; old atom tables fail closed.
-
-# TODO — node-private wire ingress
-
-Projected `leaf@sync` Provides now gate both treap membership and `sync.need`'s
-by-id egress, but `cycle()` still admits every inbound wire byte with no
-provenance filter. A connected peer can therefore write into b"local" scope —
-including auth.local_signer_secret (identity selection: current() takes the
-first sk/pk rows independently) and auth.invite_accepted (the trust anchor
-gating workspace validity). Ingress permission is deliberately not inferred
-from whether a projector currently emits a marker: handshake and sync-control
-facts legitimately arrive from the wire without becoming reconciliation
-leaves. Land a separate family-level wire-ingress capability at the inbox seam
-(tinyd knows provenance; the kernel must not). Until then the threat model
-assumes connected peers are honest about locals.
