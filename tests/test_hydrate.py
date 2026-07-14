@@ -15,22 +15,21 @@ from kernel import (Atom, Exact, NEED, OFFER, Node, Out, REQUIRE, Range,
                     decode, encode, fact, fact_id, mat, needs_of, ts_atom)
 from facts import ROOT
 from facts.auth import admin, local_signer_secret, user, workspace
-from facts.content import message, message_deletion
+from facts.content import channel, message, message_deletion
 from facts.content.message import feed
 from facts.store import hydrate
-
-CH = b"general"
 
 def _build():                            # the corpus is a REAL signed workspace
     n = Node(ROOT)
     local_signer_secret.keygen(n, 0)
     wid = workspace.create(n, b"acme", 1); n.run()   # founder is auto member + bootstrap admin
     uid = next(k for k, f in n.facts.items() if f.type_tag == b"auth.user")
-    mids = [message.send(n, wid, CH, b"al", b"m%d" % i, 10 + i) for i in range(5)]
+    channel_id = channel.resolve(n, wid, "general")
+    mids = [message.send(n, wid, channel_id, b"al", b"m%d" % i, 10 + i) for i in range(5)]
     message_deletion.delete(n, wid, mids[2], 99)
-    return n.run(), wid, uid, mids
+    return n.run(), wid, uid, mids, channel_id
 
-FULL, WID, UID, MIDS = _build()
+FULL, WID, UID, MIDS, CH = _build()
 CORPUS = list(FULL.durable.values())     # exactly what a db would hold
 
 def store_of(bs, seed=0):

@@ -15,19 +15,22 @@ from runtime import next_wake
 from facts.auth.workspace import workspace
 from facts.auth.invite_accepted import invite_accepted
 from facts.auth.signature import signature
+from facts.content.channel import channel
 from facts.content.message import message
 
 RK, RPK = _c.ed25519_keygen(bytes(32)); T0 = 1_700_000_000
 WS = workspace(b"acme", RPK, T0); WID = fact_id(WS)
 WS_SIG = signature(b"auth", RPK, WID, _c.ed25519_sign(RK, WID), T0)
 ACCEPT = invite_accepted(WID, bytes(32), bytes(32), b"", RPK, T0)
+CHANNEL = channel(WID, b"g", T0 + 1); CH_ID = fact_id(CHANNEL)
 CID = b"\x22" * 32
 PERIOD = 500
 ONE = ((b"", PERIOD, cadence.ANCHOR),)   # a single unconditional tier: the old semantics
 
 def node():
     n = Node(ROOT); n.admit(encode(ACCEPT))
-    for f in (WS, WS_SIG, message(WID, b"g", b"al", b"hi", T0 + 3600)): n.admit(encode(f))
+    for f in (WS, WS_SIG, CHANNEL, message(WID, CH_ID, b"al", b"hi", T0 + 3600)):
+        n.admit(encode(f))
     n.run(); return n
 
 def _compares(n):                                       # send offers carrying a compare frame, at Exact(CID)

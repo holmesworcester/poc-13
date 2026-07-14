@@ -12,16 +12,19 @@ from harness import reboot
 from facts.auth.workspace import workspace
 from facts.auth.invite_accepted import invite_accepted
 from facts.auth.signature import signature
+from facts.content.channel import channel
 from facts.content.message import message
 from facts.content.message_deletion import deletion
 from facts.outbox.send import send
 
 RK, RPK = _c.ed25519_keygen(bytes(32))                  # a fixed workspace root key
 WS = workspace(b"acme", RPK, 1)
-WID, CH = fact_id(WS), b"general"
+WID = fact_id(WS)
 # The facts that make WS Valid: its root self-signature + a local acceptance.
 WS_CHAIN = [WS, signature(b"auth", RPK, WID, _c.ed25519_sign(RK, WID), 1),
             invite_accepted(WID, bytes(32), bytes(32), b"", RPK, 1)]
+CHANNEL = channel(WID, b"general", 1); CH = fact_id(CHANNEL)
+WS_CHAIN.append(CHANNEL)
 
 def test_identity_and_admission():
     a1 = Atom(OFFER, b"msg", WID, Exact(CH), b"hi")
@@ -46,8 +49,8 @@ def test_requires_suppression_and_wakes():
     n.admit(encode(d2)); n.run()                              # deletion arrives FIRST
     for f in (m1, m2): n.admit(encode(f))
     n.run()
-    assert n.memo[fact_id(m1)] == "Parked"                    # no workspace yet: Require gates
-    for f in WS_CHAIN: n.admit(encode(f))                     # authority root + acceptance land
+    assert n.memo[fact_id(m1)] == "Parked"                    # no channel/workspace yet: Require gates
+    for f in WS_CHAIN: n.admit(encode(f))                     # channel + authority root + acceptance land
     n.run()                                                   # wakes both messages
     assert n.memo[fact_id(m1)] == "Valid"
     assert fact_id(m2) not in n.facts                         # cross-time match held: purged whole

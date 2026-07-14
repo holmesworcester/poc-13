@@ -11,21 +11,33 @@ def test_solo_story():
     with tempfile.TemporaryDirectory() as d, fleet() as f:
         db = os.path.join(d, "w.facts")
         f.spawn(db)
-        # idempotent authorship, feed through the proxy
+        # workspace bootstrap authors a real replicated #general channel
         wid = con(db, "auth.workspace.create", "acme", "1")
+        general = con(db, "content.channel.id", wid, "general")
+        assert len(general) == 64
+        random = con(db, "content.channel.create", wid, "random", "2")
+        listing = con(db, "content.channel.list", wid).splitlines()
+        assert listing == [f"{general} general", f"{random} random"]
+        # idempotent authorship and channel-isolated feeds through the proxy
         m_hi = con(db, "content.message.send", wid, "general", "al", "hi", "2")
         assert con(db, "content.message.send", wid, "general", "al", "hi", "2") == m_hi, \
             "resending the same fact must return the same id"
         con(db, "content.message.send", wid, "general", "bo", "there", "3")
+        con(db, "content.message.send", wid, "random", "al", "elsewhere", "4")
         converge(db, "hi\nthere", "content.message.feed", wid, "general", secs=0, phase="feed")
+        converge(db, "elsewhere", "content.message.feed", wid, random, secs=0,
+                 phase="separate channel feed by id")
         # membership + authority: create ran the whole bootstrap DAG with an
         # ephemeral root key (then dropped), enrolling the founder as member+admin
         assert len(con(db, "auth.local_signer_secret.whoami")) == 64, "whoami must print the 32-byte pk hex"
         converge(db, "founder", "auth.user.roster", wid, secs=0, phase="founder enrolled by create")
         converge(db, 1, "auth.admin.admins", wid, secs=0, phase="founder is the bootstrap admin")
-        # a scope with no workspace parks its messages
-        con(db, "content.message.send", "00" * 32, "general", "al", "ghost", "6")
-        converge(db, "", "content.message.feed", "00" * 32, "general", secs=0, phase="ghost workspace parks")
+        # an explicit future channel id preserves order-independent parking;
+        # unlike a name, it need not already resolve through validated state
+        ghost = "00" * 32
+        con(db, "content.message.send", ghost, ghost, "al", "ghost", "6")
+        converge(db, "", "content.message.feed", ghost, ghost, secs=0,
+                 phase="ghost workspace/channel parks")
         # reactions live and die with their message
         con(db, "content.reaction.react", wid, m_hi, ":+1:", "7")
         converge(db, ":+1:", "content.reaction.on", wid, m_hi, secs=0, phase="reaction lands")

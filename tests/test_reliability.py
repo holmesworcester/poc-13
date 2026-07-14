@@ -37,12 +37,14 @@ from runtime import cycle, outbox, pump, TTLSet, SENT_TTL
 from facts.auth.workspace import workspace
 from facts.auth.invite_accepted import invite_accepted
 from facts.auth.signature import signature
+from facts.content.channel import channel
 from facts.content.message import message
 
 RK, RPK = _c.ed25519_keygen(bytes(32)); T0 = 1_700_000_000
 WS = workspace(b"acme", RPK, T0); WID = fact_id(WS)
 WS_SIG = signature(b"auth", RPK, WID, _c.ed25519_sign(RK, WID), T0)
 ACCEPT = invite_accepted(WID, bytes(32), bytes(32), b"", RPK, T0)
+CHANNEL = channel(WID, b"g", T0 + 1); CH_ID = fact_id(CHANNEL)
 CID = b"\x11" * 32
 W = 4000                                 # the default anchor period (cadence.TIERS)
 SYNC_TAGS = (cmp.TAG, _need.TAG)
@@ -50,10 +52,11 @@ SYNC_TAGS = (cmp.TAG, _need.TAG)
 def node(*fs):
     n = Node(ROOT); n.admit(encode(ACCEPT))
     for f in fs: n.admit(encode(f))
+    if WS in fs and CHANNEL not in fs: n.admit(encode(CHANNEL)) # a workspace fixture includes structural #g
     n.run(); return n
 
 def msgs(author, t0, k):
-    return [message(WID, b"g", author, b"m%d" % i, t0 + i) for i in range(k)]
+    return [message(WID, CH_ID, author, b"m%d" % i, t0 + i) for i in range(k)]
 
 def leaves(n): return set(_sidx.tree(n).keys)
 
@@ -160,8 +163,8 @@ def test_partition_heals_within_anchor_bound():
     assert w.run_until(w.converged, 30_000)
     down[0] = True                                   # total partition; both sides keep authoring
     for i in range(10):
-        w.nodes["a"].admit(encode(message(WID, b"g", b"al", b"p%d" % i, T0 + 1000 + i)))
-        w.nodes["b"].admit(encode(message(WID, b"g", b"bo", b"q%d" % i, T0 + 2000 + i)))
+        w.nodes["a"].admit(encode(message(WID, CH_ID, b"al", b"p%d" % i, T0 + 1000 + i)))
+        w.nodes["b"].admit(encode(message(WID, CH_ID, b"bo", b"q%d" % i, T0 + 2000 + i)))
         w.step(); w.step()
     w.run_until(lambda: False, w.t + 2 * W)          # dark for two more anchor periods
     assert not w.converged()
@@ -191,7 +194,7 @@ def _churn(w, until, every=500):
     while w.t < until:
         if w.t % every == 0:
             for s, base in (("a", T0 + 10), ("b", T0 + 10_000)):
-                m = message(WID, b"g", s.encode(), b"c%d" % k, base + k)
+                m = message(WID, CH_ID, s.encode(), b"c%d" % k, base + k)
                 w.nodes[s].admit(encode(m)); authored.append((w.t, fact_id(m), s))
             k += 1
         w.step()
@@ -242,7 +245,7 @@ def test_certificate_synced_flips_with_the_set():
     w = World(node(WS, WS_SIG, *ms), node(WS, WS_SIG, *ms))
     assert w.run_until(lambda: cadence.synced(w.nodes["a"], CID), 30_000)
     assert w.run_until(lambda: cadence.synced(w.nodes["b"], CID), 30_000)
-    w.nodes["a"].admit(encode(message(WID, b"g", b"al", b"new", T0 + 999)))
+    w.nodes["a"].admit(encode(message(WID, CH_ID, b"al", b"new", T0 + 999)))
     w.nodes["a"].run()
     assert not cadence.synced(w.nodes["a"], CID)     # my split moved: certificate retired
     assert w.run_until(lambda: w.converged() and cadence.synced(w.nodes["a"], CID), 30_000)

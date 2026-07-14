@@ -22,6 +22,7 @@ from kernel import Node, Store, encode, decode, fact_id, frame, unframe, _rd
 from facts import ROOT
 from facts.sync import index as _sidx
 from facts.auth.workspace import workspace
+from facts.content.channel import channel
 from facts.content.message import message, feed
 from facts.sync import compare as sync
 from facts.auth import signature
@@ -29,12 +30,16 @@ from facts.auth.invite_accepted import invite_accepted
 import crypto as ed
 
 N = 10_000                               # the standard load: facts admitted + run
-CHANS = [b"c%d" % i for i in range(5)]   # a few channels, messages fanned across them
+CHAN_NAMES = [b"c%d" % i for i in range(5)] # a few real channels, messages fanned across them
 RK, RPK = ed.ed25519_keygen(bytes(32))
 WS = workspace(b"acme", RPK, 1); WID = fact_id(WS)
+CHANNEL_FACTS = [channel(WID, name, 2) for name in CHAN_NAMES]
+CHANS = [fact_id(c) for c in CHANNEL_FACTS]
 # the facts that make WS Valid: root self-signature (shareable) + local acceptance
-WSPRE = [encode(WS), encode(signature.signature(b"auth", RPK, WID, ed.ed25519_sign(RK, WID), 1)),
-         encode(invite_accepted(WID, bytes(32), bytes(32), b"", RPK, 1))]
+WSPRE = ([encode(WS),
+          encode(signature.signature(b"auth", RPK, WID, ed.ed25519_sign(RK, WID), 1)),
+          encode(invite_accepted(WID, bytes(32), bytes(32), b"", RPK, 1))]
+         + [encode(c) for c in CHANNEL_FACTS])
 MSGS = [encode(message(WID, CHANS[i % 5], b"al", b"m%d" % i, i + 2)) for i in range(N)]
 BIN = os.path.join(ROOT_DIR, "bin")
 
@@ -150,9 +155,10 @@ def bench_query(n):
     section("3. query under load (%d messages)" % N)
     R = 50
     t = time.time()
-    for _ in range(R): rows = feed(n, WID, b"c0")
+    for _ in range(R): rows = feed(n, WID, CHANS[0])
     report("feed() / watched() scan", (time.time() - t) / R * 1e3, "ms", 5.0)  # MEASURED 1.0ms
-    need = message(WID, b"c0", b"al", b"x", 1).atoms[1]                          # the workspace REQUIRE
+    need = next(a for a in message(WID, CHANS[0], b"al", b"x", 1).atoms
+                if a.role == b"channel")                              # the channel REQUIRE
     t = time.time()
     for _ in range(R): n.valid_offers(need)
     report("valid_offers() bucket lookup", (time.time() - t) / R * 1e6, "us", None)
@@ -223,15 +229,15 @@ def bench_daemons():
             peer(sa, sb, wid, addr_a, addr_b)                       # B bootstrap-dials A
             cap, t0, qlat = 2000, time.time(), None
             for i in range(cap):
-                uverb(sa, "content.message.send", wid, "g", "al", "m%d" % i, str(i + 2))
+                uverb(sa, "content.message.send", wid, "general", "al", "m%d" % i, str(i + 2))
                 if i == cap // 2:                         # a query on B mid-stream
-                    q = time.time(); uverb(sb, "content.message.feed", wid, "g")
+                    q = time.time(); uverb(sb, "content.message.feed", wid, "general")
                     qlat = (time.time() - q) * 1e3
                 if time.time() - t0 > 30: cap = i + 1; break
             auth = time.time() - t0
             end = time.time() + 60
             while time.time() < end:
-                got = len(uverb(sb, "content.message.feed", wid, "g").splitlines())
+                got = len(uverb(sb, "content.message.feed", wid, "general").splitlines())
                 if got >= cap: break
                 time.sleep(0.05)
             conv = time.time() - t0
@@ -250,8 +256,9 @@ def bench_catchup():                      # a bulk backlog authored on A (the fo
         dba, dbb = os.path.join(d, "a.facts"), os.path.join(d, "b.facts")
         pa, addr_a = spawn(dba, "--listen", "127.0.0.1:0"); sa = dba + ".sock"
         wid = uverb(sa, "auth.workspace.create", "acme", "1")
+        for name in CHAN_NAMES: uverb(sa, "content.channel.create", wid, name.decode(), "2")
         for i in range(n):                                    # author the backlog on A (untimed setup)
-            uverb(sa, "content.message.send", wid, CHANS[i % 5].decode(), "al", "m%d" % i, str(i + 2))
+            uverb(sa, "content.message.send", wid, CHAN_NAMES[i % 5].decode(), "al", "m%d" % i, str(i + 3))
         pb, addr_b = spawn(dbb, "--listen", "127.0.0.1:0")
         peer(sa, dbb + ".sock", wid, addr_a, addr_b)          # B bootstrap-dials A
         t0 = time.time()
@@ -259,7 +266,7 @@ def bench_catchup():                      # a bulk backlog authored on A (the fo
             got, end = 0, time.time() + 120
             while got < n and time.time() < end:
                 got = sum(len(uverb(dbb + ".sock", "content.message.feed",
-                                    wid, c.decode()).splitlines()) for c in CHANS)
+                                    wid, c.decode()).splitlines()) for c in CHAN_NAMES)
                 time.sleep(0.05)
             dt = time.time() - t0
             assert got >= n, f"caught up only {got}/{n}"
@@ -275,8 +282,9 @@ def bench_newest():                       # live-tail: a freshly-authored leaf r
         dba, dbb = os.path.join(d, "a.facts"), os.path.join(d, "b.facts")
         pa, addr_a = spawn(dba, "--listen", "127.0.0.1:0"); sa = dba + ".sock"
         wid = uverb(sa, "auth.workspace.create", "acme", "1")
+        uverb(sa, "content.channel.create", wid, "c0", "2")
         for i in range(n):                                    # a backlog B first catches up on (untimed)
-            uverb(sa, "content.message.send", wid, "c0", "al", "m%d" % i, str(i + 2))
+            uverb(sa, "content.message.send", wid, "c0", "al", "m%d" % i, str(i + 3))
         pb, addr_b = spawn(dbb, "--listen", "127.0.0.1:0"); sb = dbb + ".sock"
         peer(sa, sb, wid, addr_a, addr_b)                     # B bootstrap-dials A
         try:

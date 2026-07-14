@@ -84,14 +84,15 @@ def test_flush_forgets_purged_fids():
     from facts.content.message import message
     from facts.content.message_deletion import deletion
     wid = b"\x07" * 32
+    channel_id = b"\x08" * 32
     store, flushed = Store(), set()
     n = Node(ROOT, store)
-    m = message(wid, b"g", b"al", b"doomed", 5); mid = fact_id(m)
+    m = message(wid, channel_id, b"al", b"doomed", 5); mid = fact_id(m)
     cycle(n, [encode(m)], 1000, ())
     flush(n, store, flushed)
     assert mid in flushed                                  # on disk, marked
     cycle(n, [encode(deletion(wid, mid, 6))], 1001, ())    # the death key bites: purged
-    x = message(wid, b"g", b"al", b"new", 7)
+    x = message(wid, channel_id, b"al", b"new", 7)
     cycle(n, [encode(x), encode(m)], 1002, (), bound=0)    # re-arrival lands BEHIND x, both unstepped
     flush(n, store, flushed)                               # the purge unmarked mid, so the tail scan
     assert store.db.execute("SELECT 1 FROM facts WHERE fid=?",

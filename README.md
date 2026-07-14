@@ -46,10 +46,20 @@ blake3 (`pip install pynacl blake3`).
 
 ```
 $ bin/con.py w.facts auth.workspace.create acme        # prints <wid>
+$ bin/con.py w.facts content.channel.list <wid>         # <channel-id> general
+$ bin/con.py w.facts content.channel.create <wid> random
 $ bin/con.py w.facts content.message.send <wid> general al "hello"
 $ bin/con.py w.facts content.message.feed <wid> general
 hello
 ```
+
+`auth.workspace.create` authors a replicated `general` channel. Additional
+channels are `content.channel` facts: their fact ids are the routing ids and
+their UTF-8 names are display data. Message commands accept either a validated name
+or a 64-hex channel id; message facts carry that id and cannot validate until
+the exact channel fact and its workspace dependency are valid. Consequently,
+channel lists and separate feeds converge across peers instead of depending on
+local aliases that happen to share a string.
 
 ## Performance
 
@@ -84,4 +94,3 @@ later wave). If a single db
 ever outgrows the daemon's resident set, the next step is teaching the sync
 family to ship from the Store rather than from residency — a family change,
 not a kernel one. Linear is accepted and measured, not hidden.
-

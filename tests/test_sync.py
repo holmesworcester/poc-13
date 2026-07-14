@@ -17,6 +17,7 @@ from facts.sync.compare import HI
 from facts.auth.workspace import workspace
 from facts.auth.invite_accepted import invite_accepted
 from facts.auth.signature import signature
+from facts.content.channel import channel
 from facts.content.message import message, feed
 from facts.content.message_deletion import deletion
 
@@ -26,6 +27,7 @@ T0 = 1_700_000_000                                      # 2023-11-14: the worksp
 WS = workspace(b"acme", RPK, T0); WID = fact_id(WS)
 WS_SIG = signature(b"auth", RPK, WID, _c.ed25519_sign(RK, WID), T0)
 _ACCEPT = invite_accepted(WID, bytes(32), bytes(32), b"", RPK, T0)
+CHANNEL = channel(WID, b"g", T0 + 1); CH_ID = fact_id(CHANNEL)
 CID = b"\x11" * 32                                      # a fixed connection id for the in-process pair
 SYNC = {cmp.TAG, _need.TAG}
 
@@ -85,30 +87,30 @@ def test_equal_sets_zero_ships():
     assert leaves(a) == leaves(b)
 
 def test_one_fact_diff_ships_exactly_that_fact():
-    msgs = [message(WID, b"g", b"al", b"m%d" % i, T0 + HOUR + i * MIN) for i in range(20)]
-    a, b = node(WS, WS_SIG, *msgs), node(WS, WS_SIG, *msgs[:-1])   # b lacks the last; its deps present
+    msgs = [message(WID, CH_ID, b"al", b"m%d" % i, T0 + HOUR + i * MIN) for i in range(20)]
+    a, b = node(WS, WS_SIG, CHANNEL, *msgs), node(WS, WS_SIG, CHANNEL, *msgs[:-1])
     before, missing = set(b.durable), fact_id(msgs[-1])
     reconcile(a, b)
     assert set(b.durable) - before == {missing}    # exactly the one missing leaf
     assert leaves(a) == leaves(b)
 
 def test_fresh_peer_gets_dependency_closure():
-    a, b = node(WS, WS_SIG, message(WID, b"g", b"al", b"hi", T0 + HOUR)), node()
+    a, b = node(WS, WS_SIG, CHANNEL, message(WID, CH_ID, b"al", b"hi", T0 + HOUR)), node()
     reconcile(a, b)                                # full range (floor 0): the spine are in-range leaves of their
     assert set(a.durable) == set(b.durable)        # own, enumerated and pulled directly — no closure ride needed
-    assert feed(b, WID, b"g") == [b"hi"]
+    assert feed(b, WID, CH_ID) == [b"hi"]
 
 def test_deletion_travels_and_the_content_dies():
-    m = message(WID, b"g", b"al", b"doomed", T0 + HOUR)
-    a, b = node(WS, WS_SIG, m, deletion(WID, fact_id(m), T0 + HOUR + MIN)), node()
+    m = message(WID, CH_ID, b"al", b"doomed", T0 + HOUR)
+    a, b = node(WS, WS_SIG, CHANNEL, m, deletion(WID, fact_id(m), T0 + HOUR + MIN)), node()
     reconcile(a, b)
     assert fact_id(m) not in a.durable             # purged at the source the moment the deletion landed
     assert fact_id(m) not in b.facts               # so the peer bootstraps the deletion, never the content
-    assert feed(b, WID, b"g") == []
+    assert feed(b, WID, CH_ID) == []
     assert leaves(a) == leaves(b)                  # both sets carry the deletion leaf, neither the dead one
 
 def test_sync_facts_volatile_and_excluded():
-    a, b = node(WS, WS_SIG, message(WID, b"g", b"al", b"hi", T0 + HOUR)), node()
+    a, b = node(WS, WS_SIG, CHANNEL, message(WID, CH_ID, b"al", b"hi", T0 + HOUR)), node()
     reconcile(a, b)
     for n in (a, b):
         syn = [fid for fid, f in n.facts.items() if f.type_tag in SYNC]
@@ -118,8 +120,8 @@ def test_sync_facts_volatile_and_excluded():
     assert not any(f.type_tag in SYNC for f in b.facts.values())           # no volatile residue after quiescence
 
 def test_shuffled_orders_converge():
-    msgs = [message(WID, b"g", b"al", b"m%d" % i, T0 + HOUR + i * MIN) for i in range(10)]
-    facts = [WS, WS_SIG] + msgs + [deletion(WID, fact_id(msgs[3]), T0 + DAY)]
+    msgs = [message(WID, CH_ID, b"al", b"m%d" % i, T0 + HOUR + i * MIN) for i in range(10)]
+    facts = [WS, WS_SIG, CHANNEL] + msgs + [deletion(WID, fact_id(msgs[3]), T0 + DAY)]
     outs = []
     for seed in range(3):
         order = facts[:]; random.Random(seed).shuffle(order)
@@ -129,8 +131,8 @@ def test_shuffled_orders_converge():
     assert outs[0] == outs[1] == outs[2]           # order-independent derived state
 
 def test_reconcile_is_idempotent():
-    msgs = [message(WID, b"g", b"al", b"m%d" % i, T0 + HOUR + i * MIN) for i in range(10)]
-    a, b = node(WS, WS_SIG, *msgs), node(WS, WS_SIG, *msgs)
+    msgs = [message(WID, CH_ID, b"al", b"m%d" % i, T0 + HOUR + i * MIN) for i in range(10)]
+    a, b = node(WS, WS_SIG, CHANNEL, *msgs), node(WS, WS_SIG, CHANNEL, *msgs)
     reconcile(a, b)
     before = set(b.durable)
     reconcile(a, b)                                # re-run on a converged pair
@@ -143,12 +145,12 @@ def test_full_range_advertises_leaves_only_windowed_carries_the_spine():
     windowed round (floor>0) additionally carries that leaf's below-floor SHAREABLE
     spine as closure ids (the window won't enumerate it) — but never a local-only fact
     like invite_accepted, which must not travel."""
-    recent = message(WID, b"g", b"al", b"recent", T0 + 30 * DAY)
-    a = node(WS, WS_SIG, recent)                                 # node() also holds a local invite_accepted (_ACCEPT)
+    recent = message(WID, CH_ID, b"al", b"recent", T0 + 30 * DAY)
+    a = node(WS, WS_SIG, CHANNEL, recent)                        # node() also holds local acceptance
     lo = (T0 + 29 * DAY).to_bytes(8, "big") + b"\x00" * 32       # a range starting after the T0-founded spine
     rid = fact_id(recent)
     assert cidsunframe(a, lo, HI, b"") == {rid}                     # full: just the in-range leaf, no deps repeated
-    assert cidsunframe(a, lo, HI, lo) == {rid, WID, fact_id(WS_SIG)}   # windowed: + shareable below-floor spine
+    assert cidsunframe(a, lo, HI, lo) == {rid, CH_ID, WID, fact_id(WS_SIG)} # + channel + auth spine
     assert fact_id(_ACCEPT) not in cidsunframe(a, lo, HI, lo)       # local-only invite_accepted never rides
 
 def test_windowed_in_range_facts_and_their_deps_reconcile():
@@ -157,51 +159,51 @@ def test_windowed_in_range_facts_and_their_deps_reconcile():
     founded a month before the floor, is advertised as `have`s at the recent leaf
     and pulled by id (poc-12 dep-aware sync), in one descent, not a dep-chain of
     round trips."""
-    recent = message(WID, b"g", b"al", b"recent", T0 + 30 * DAY)
-    a = node(WS, WS_SIG, recent)
+    recent = message(WID, CH_ID, b"al", b"recent", T0 + 30 * DAY)
+    a = node(WS, WS_SIG, CHANNEL, recent)
     b = node()
     reconcile(a, b, lo=T0 + 29 * DAY)                             # window ~ the last day
     assert fact_id(recent) in set(b.durable), "the in-range fact reconciled"
-    assert {WID, fact_id(WS_SIG)} <= set(b.durable), \
-        "its below-floor spine deps arrived as closure ids, though founded at T0"
-    assert feed(b, WID, b"g") == [b"recent"]
+    assert {CH_ID, WID, fact_id(WS_SIG)} <= set(b.durable), \
+        "its channel and auth spine arrived as closure ids, though founded at T0"
+    assert feed(b, WID, CH_ID) == [b"recent"]
 
 def test_windowed_out_of_range_content_is_not_reconciled():
     """Out of range: old content that nothing recent depends on sits below the
     floor and does not travel. A floor of 0 (no window) syncs the very same fact,
     proving the window is what withholds it."""
-    stale  = message(WID, b"g", b"al", b"stale",  T0 + HOUR)
-    recent = message(WID, b"g", b"al", b"recent", T0 + 30 * DAY)
-    a = node(WS, WS_SIG, stale, recent)
+    stale  = message(WID, CH_ID, b"al", b"stale",  T0 + HOUR)
+    recent = message(WID, CH_ID, b"al", b"recent", T0 + 30 * DAY)
+    a = node(WS, WS_SIG, CHANNEL, stale, recent)
     b = node()
     reconcile(a, b, lo=T0 + 29 * DAY)
     assert fact_id(stale) not in b.durable, "the window never shipped the stale message"
-    assert feed(b, WID, b"g") == [b"recent"]
+    assert feed(b, WID, CH_ID) == [b"recent"]
     c = node()                                                   # no window: the stale fact reconciles
     reconcile(a, c, lo=0)
-    assert fact_id(stale) in c.durable and feed(c, WID, b"g") == [b"stale", b"recent"]
+    assert fact_id(stale) in c.durable and feed(c, WID, CH_ID) == [b"stale", b"recent"]
 
 def test_windowed_bulk_converges_and_withholds():
     """A window carrying many facts over a shared below-floor spine: every in-range
     fact reconciles and its spine arrives via closure ids, while old content nothing
     recent depends on stays put — order-independently."""
-    stale  = [message(WID, b"g", b"al", b"s%d" % i, T0 + HOUR + i * MIN) for i in range(60)]
-    recent = [message(WID, b"g", b"al", b"r%d" % i, T0 + 30 * DAY + i * MIN) for i in range(40)]
+    stale  = [message(WID, CH_ID, b"al", b"s%d" % i, T0 + HOUR + i * MIN) for i in range(60)]
+    recent = [message(WID, CH_ID, b"al", b"r%d" % i, T0 + 30 * DAY + i * MIN) for i in range(40)]
     for seed in range(3):
-        order = [WS, WS_SIG] + stale + recent; random.Random(seed).shuffle(order)
+        order = [WS, WS_SIG, CHANNEL] + stale + recent; random.Random(seed).shuffle(order)
         a, b = node(*order), node()
         reconcile(a, b, lo=T0 + 29 * DAY)
         assert all(fact_id(m) in b.durable for m in recent), "every in-range fact reconciled"
         assert not any(fact_id(m) in b.durable for m in stale), "below-floor content withheld"
-        assert {WID, fact_id(WS_SIG)} <= set(b.durable), "the shared spine rode in via closure ids"
-        assert feed(b, WID, b"g") == [b"r%d" % i for i in range(40)]
+        assert {CH_ID, WID, fact_id(WS_SIG)} <= set(b.durable), "the shared spine rode in via closure ids"
+        assert feed(b, WID, CH_ID) == [b"r%d" % i for i in range(40)]
 
 def test_frame_count_is_sublinear():
     """A one-fact diff over a 100-fact set costs O(depth) wire frames, not O(n): the
     descent prunes matching prefixes by fingerprint and only the differing path (plus
     the one leaf's have/need/ship) crosses the wire — nowhere near a push-all scan."""
-    msgs = [message(WID, b"g", b"al", b"m%d" % i, T0 + HOUR + i * MIN) for i in range(100)]
-    a, b = node(WS, WS_SIG, *msgs), node(WS, WS_SIG, *msgs[:-1])
+    msgs = [message(WID, CH_ID, b"al", b"m%d" % i, T0 + HOUR + i * MIN) for i in range(100)]
+    a, b = node(WS, WS_SIG, CHANNEL, *msgs), node(WS, WS_SIG, CHANNEL, *msgs[:-1])
     before = set(b.durable)
     frames = reconcile(a, b)
     assert leaves(a) == leaves(b)

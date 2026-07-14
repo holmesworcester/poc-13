@@ -648,9 +648,12 @@ facts/s and MB/s.
 
 ## Content
 
-`facts/content/` is the messaging surface: `message` (a text message in a
-channel), `reaction` and `message_deletion` (each carrying its target's
-death keys per the suppression-closure discipline), and `retention_policy`
+`facts/content/` is the messaging surface: `channel` (replicated structural
+state whose fact id is the channel id and whose name is only display data),
+`message` (a text message that Requires that exact channel id, so the channel's
+workspace dependency is in its closure), `reaction` and `message_deletion`
+(each carrying its target's death keys per the suppression-closure discipline),
+and `retention_policy`
 (records the retention window as an ordinary offer — last-write-wins is a
 read-side fold; the purge
 machinery that enforces it is a later family). The poc-12 blob content
