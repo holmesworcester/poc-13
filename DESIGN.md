@@ -346,6 +346,12 @@ relationships the collapse removed. The four-relationship model keeps that
 policy generic even though the two-relationship model is expressively
 sufficient.
 
+The alternative was subsequently implemented end to end. The performance
+hypothesis held, but safe non-monotone deletion required quiescent confirmation,
+semantic counterfactuals, confluence checks, and symmetric cold-state discovery.
+The result and its CALM implications are recorded in
+[`docs/gather-only-calm-retrospective.md`](docs/gather-only-calm-retrospective.md).
+
 ## Matching
 
 ```text
