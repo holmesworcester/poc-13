@@ -311,6 +311,20 @@ its own relationships park, suppress, or reap it. Connection teardown copies the
 keys into every secret/session fact that must be physically removed; content
 families copy a message death key into dependents that must die with it.
 
+That copy must be **flat**: a death key names the id of a fact a deletion
+targets directly, never the id of an intermediate fact it merely `Require`s. A
+file slice carries `SuppressIf(dead@workspace/Exact(message_id))`, not a key on
+the descriptor root it authenticates — so one deletion fans out to the message
+and every reaction, file, and slice under it in a single indexed match. The
+forward suppression leg (`Node._fault_suppressors`) depends on this: when a
+`dead` Provide validates, it faults in exactly the durable-but-cold facts whose
+`SuppressIf` covers that address, so a deletion reaches a target that never
+demanded itself (the eviction/windowing case). Flatness is what bounds that
+leg — a suppressor names its target, so its covered set is per-object; a forward
+leg over `Require` would be unbounded, since a dependency does not name its
+dependents. This is why the forward leg is restricted to `SuppressIf`.
+`test_deletion_closure_is_flat` enforces the obligation per family.
+
 ### Collapsible alternative: Provide and Gather only
 
 `Require` and `SuppressIf` are not additional matching power. A smaller atom

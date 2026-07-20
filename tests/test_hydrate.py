@@ -15,7 +15,7 @@ from kernel import (Atom, Exact, PROVIDE, Node, Out, REQUIRE, Range,
                     decode, encode, fact, fact_id, mat, consumers_of, ts_atom)
 from facts import ROOT
 from facts.auth import admin, local_signer_secret, user, workspace
-from facts.content import channel, message, message_deletion
+from facts.content import channel, file, file_slice, message, message_deletion, reaction
 from facts.content.message import feed
 from facts.store import hydrate
 
@@ -204,6 +204,80 @@ def test_a_cold_suppressor_bites_without_a_demand():
     bid = n.admit(encode(chain[1])); n.run()           # B authored live
     assert fact_id(D) in n.facts and bid not in n.facts   # the cold tombstone bit: B purged on arrival
 
+# --- the forward suppression leg: a deletion reaches a durable-but-cold target --
+def _live_and_dead(mid_index=2):
+    """A peer's disk holding a message AND its deletion. The target's bytes come
+    from the pre-delete durable set (the fully-resident builder purges the target,
+    so its post-delete set can never exhibit the cold-target case); the deletion
+    AND its signature closure come from the post-delete set. Their union is the
+    disk a peer would hold: every message, plus a deletion that can validate."""
+    n = Node(ROOT)
+    local_signer_secret.keygen(n, 0)
+    wid = workspace.create(n, b"acme", 1); n.run()
+    cid = channel.resolve(n, wid, "general")
+    mids = [message.send(n, wid, cid, b"m%d" % i, 10 + i) for i in range(5)]; n.run()
+    pre = dict(n.durable)                              # all five messages durable, none deleted yet
+    message_deletion.delete(n, wid, mids[mid_index], 99); n.run()
+    corpus = {**pre, **n.durable}                      # pre keeps the target; post adds deletion+signature
+    return list(corpus.values()), wid, mids[mid_index]
+
+def test_a_cold_target_is_purged_when_only_the_deletion_hydrates():
+    """The forward dual of test_a_cold_suppressor_bites_without_a_demand: there
+    the live target pulls its own death; here only the DELETION hydrates and it
+    must still reach a durable-but-cold target it never demanded. A peer holds a
+    message and its deletion on disk and demands only the suppressor address
+    b"dead" — never b"msg". Without the forward leg the deletion validates but
+    the message sits untouched on disk: a false 'I have it' the sync layer would
+    advertise. With it, the target is faulted in, bites, and is purged."""
+    corpus, wid, mid = _live_and_dead()
+    s = store_of(corpus)
+    assert s.fact_bytes(mid) is not None               # the target is on the peer's disk
+    n = Node(ROOT, s)
+    hydrate.demand(n, b"dead", wid)                     # the suppressor address only, never b"msg"
+    assert mid not in n.facts                           # faulted in, bit, and evicted whole...
+    assert s.fact_bytes(mid) is None                    # ...its bytes gone from disk, not merely cold
+
+def test_the_forward_leg_is_inert_under_total_demand():
+    """The safety property that lets it land before eviction exists: under the
+    total boot demand _ALL_KEY guards the leg off entirely, so residency and
+    every verdict are bit-identical to a node without it — the leg changes
+    nothing until a demand is selective enough to leave a target cold."""
+    corpus, wid, mid = _live_and_dead()
+    n = Node(ROOT, store_of(corpus))
+    hydrate.demand(n)                                   # the whole boot: _ALL_KEY ∈ checked
+    assert not any(k[0] == SUPPRESS_IF and len(k) == 4 for k in n.checked)   # leg never fired
+    assert mid not in n.facts and mid not in n.durable  # yet deleted the ordinary (backward) way,
+    assert mid not in n.memo                            # evicted whole — no residue, exactly as before
+
+def test_deletion_closure_is_flat():
+    """F4, the flatness the forward leg depends on: every family that must die
+    with a message names the MESSAGE directly in its `dead` SuppressIf — never a
+    derived fid it merely Requires (a slice names the message, not the
+    descriptor root it authenticates). Static: each SHAPE's death key is SELF
+    (the message itself) or Exact(message_id). Dynamic: a deletion purges the
+    message and a reaction on it from memory AND disk in one flat closure."""
+    wid, mid, fid, root = (bytes([i]) * 32 for i in range(4))
+    shapes = {                                         # every dead-key-bearing family
+        b"message":    message.message(wid, bytes([9]) * 32, bytes([8]) * 32, b"b", 1),
+        b"reaction":   reaction.reaction(wid, mid, bytes([8]) * 32, b":x:", 2),
+        b"file":       file.file(wid, mid, fid, root, 0, 0, b"n", b"m", 3),
+        b"file_slice": file_slice.file_slice(wid, mid, fid, root, 0, b"\x00" * 8, 4)}
+    for name, shape in shapes.items():
+        dead = [a for a in shape.atoms if a.relationship == SUPPRESS_IF and a.name == b"dead"]
+        assert len(dead) == 1, name
+        assert dead[0].target in (SELF, Exact(mid)), (name, dead[0].target)   # never a derived fid
+
+    n = Node(ROOT)                                      # dynamic: author message + reaction, delete
+    local_signer_secret.keygen(n, 0)
+    w = workspace.create(n, b"acme", 1); n.run()
+    ch = channel.resolve(n, w, "general")
+    m = message.send(n, w, ch, b"hi", 10)
+    r = reaction.react(n, w, m, b":+1:", 11); n.run()
+    assert n.memo[m] == "Valid" and n.memo[r] == "Valid"
+    message_deletion.delete(n, w, m, 99); n.run()
+    assert m not in n.facts and r not in n.facts        # the reaction died with the message...
+    assert m not in n.durable and r not in n.durable    # ...from memory and disk, one flat closure
+
 # --- existence is the certificate: reconstruction, damage, repair ---------------
 class _Flaky:
     """A connection proxy whose next executemany raises — a transient write
@@ -350,6 +424,27 @@ def test_sql_providers_mirrors_covers():
     got = s.providers(Atom(REQUIRE, b"r", b"s", Exact(ks[0])))
     assert got.count(fact_id(dup)) == 1                # ...but an owner faults once
 
+def test_sql_suppressors_mirrors_covers():
+    """Exhaustive mirror, dual of test_sql_providers_mirrors_covers: for every
+    target-shape pair, Store.suppressors(P) == the durable SuppressIf rows whose
+    target covers-matches P. It is the reversed argument order of the same
+    coverage relation — covers(provide, suppressif) here vs. covers(provide,
+    consumer) there — which is exactly why the one _COV clause serves both."""
+    ks = [bytes([b]) for b in range(4)]
+    shapes = [Exact(k) for k in ks] + [Range(a, b) for a in ks for b in ks if a <= b]
+    s, fids = Store(), {}
+    for i, st in enumerate(shapes):
+        f = fact(b"no.such", ts_atom(300 + 7 * i), Atom(SUPPRESS_IF, b"r", b"s", st))
+        s.add(encode(f)); fids[fact_id(f)] = st
+    for pt in shapes:
+        provide = Atom(PROVIDE, b"r", b"s", pt)
+        assert set(s.suppressors(provide)) == {fid for fid, st in fids.items() if covers(pt, st)}, pt
+    dup = fact(b"no.such", ts_atom(998), Atom(SUPPRESS_IF, b"r", b"s", Exact(ks[0])),
+               Atom(SUPPRESS_IF, b"r", b"s", Range(ks[0], ks[1])))
+    s.add(encode(dup))                                 # two SuppressIf rows cover the same point...
+    got = s.suppressors(Atom(PROVIDE, b"r", b"s", Exact(ks[0])))
+    assert got.count(fact_id(dup)) == 1                # ...but an owner faults once
+
 if __name__ == "__main__":
     for t in (test_demand_agrees_with_the_fully_resident_node,
               test_require_relationships_pull_their_closure,
@@ -360,9 +455,12 @@ if __name__ == "__main__":
               test_a_keyed_demand_pulls_related_facts_transitively,
               test_a_tombstone_rides_the_closure_across_eras,
               test_consumers_fault_their_own_dependencies, test_a_cold_suppressor_bites_without_a_demand,
+              test_a_cold_target_is_purged_when_only_the_deletion_hydrates,
+              test_the_forward_leg_is_inert_under_total_demand, test_deletion_closure_is_flat,
               test_rows_rebuild_the_exact_bytes, test_a_damaged_row_is_a_miss_never_a_wrong_fact,
               test_repair_after_damage_redelivers, test_a_failed_write_propagates_and_tears_nothing,
               test_adds_are_durable_only_at_commit, test_a_zero_atom_fact_survives_the_reboot,
-              test_fault_fixpoint_mirrors_kernel_covers, test_sql_providers_mirrors_covers):
+              test_fault_fixpoint_mirrors_kernel_covers, test_sql_providers_mirrors_covers,
+              test_sql_suppressors_mirrors_covers):
         t(); print(f"ok  {t.__name__}")
     print("\nall tests passed")

@@ -368,6 +368,12 @@ class Store:
             (PROVIDE, consumer.name, consumer.scope, *consumer.target,
              consumer.target[0] == consumer.target[1], consumer.target[0]))]
 
+    def suppressors(self, provide):      # existence: who SuppressIfs over this validated address
+        return [r[0] for r in self.db.execute(   # the reversed direction of `providers`, same _COV
+            "SELECT DISTINCT fid FROM atoms WHERE relationship=? AND name=? AND scope=?" + self._COV,
+            (SUPPRESS_IF, provide.name, provide.scope, *provide.target,
+             provide.target[0] == provide.target[1], provide.target[0]))]
+
     def delete(self, fid):               # cold-path purge: forget a fact's rows. The caller
         self.db.execute("DELETE FROM facts WHERE fid=?", (fid,))     # owns the node-side
         self.db.execute("DELETE FROM atoms WHERE fid=?", (fid,))     # discipline: refault().
@@ -583,6 +589,27 @@ class Node:
                 if o not in self.facts and (b := self.store.fact_bytes(o)):
                     self.admit(b, checked=True)
 
+    def _fault_suppressors(self, provide):
+        """The forward dual of _fault: a newly-valid Provide faults in the cold
+        facts whose SuppressIf covers it, so a suppressor (a deletion) reaches a
+        durable-but-cold target that never demanded itself. Restricted to
+        SuppressIf: a suppressor names its target, so the covered set is flat and
+        per-object — the same reason a forward leg over Require would be
+        unbounded (a dependency does not name its dependents). The memo is sound
+        forward for the reason it is backward: a consumer that becomes durable
+        LATER is caught by its own step (it backward-faults its death address
+        and finds this Provide resident); one already resident, by _wake. So the
+        store pull is one-time per Provide address. A strict no-op under total
+        demand (_ALL_KEY guards it) and whenever every covered fact is already
+        resident — the empty set in every non-eviction session."""
+        if not self.store or _ALL_KEY in self.checked: return
+        k = (SUPPRESS_IF, provide.name, provide.scope, provide.target)   # 4-tuple never
+        if k in self.checked: return                                     # collides a backward key
+        self.checked.add(k)
+        for o in self.store.suppressors(provide):
+            if o not in self.facts and (b := self.store.fact_bytes(o)):
+                self.admit(b, checked=True)          # its own step re-derives Suppressed (_step)
+
     # A host signal is one transient clean-twin slot, replaced each turn
     # (nothing accumulates), waking every consumer its Provides now cover.
     def _present(self, name, scope, rows):
@@ -632,6 +659,8 @@ class Node:
             if set(before) != set(after):
                 for hook in OBSERVERS.get(address, ()):
                     hook(self, before, after)
+        for r in set(new) - set(old):    # forward suppression leg: a newly-valid Provide
+            self._fault_suppressors(r.atom)   # reaches its durable-but-cold SuppressIf consumers
         for r in set(old) ^ set(new):    # wake fanout on every changed Provide (never re-wake self)
             self._wake(r.atom, fid)
         if out.verdict in (REAP, SUPPRESSED): self._evict(fid, f, out.verdict, old)
