@@ -28,6 +28,7 @@ class MemBlobStore:
     def get(self, cid): return self.d.get(cid)
     def put(self, data): cid = H(data); self.d[cid] = data; return cid
     def delete(self, cid): self.d.pop(cid, None)
+    def cids(self): return list(self.d)
 
 
 class FSBlobStore:
@@ -62,6 +63,16 @@ class FSBlobStore:
     def delete(self, cid):
         try: os.unlink(self._path(cid))
         except FileNotFoundError: pass
+    def cids(self):                          # every stored cid, for reference-counted GC
+        out = []
+        for sub in os.listdir(self.root):
+            d = os.path.join(self.root, sub)
+            if not os.path.isdir(d): continue
+            for name in os.listdir(d):
+                try: c = bytes.fromhex(name)
+                except ValueError: continue
+                if len(c) == 32: out.append(c)
+        return out
 
 
 class S3BlobStore:
@@ -91,6 +102,18 @@ class S3BlobStore:
     def delete(self, cid):
         try: self.s3.delete_object(Bucket=self.bucket, Key=self._key(cid))
         except Exception: pass
+    def cids(self):                          # paginate the bucket; for reference-counted GC
+        out, token = [], None
+        while True:
+            kw = {"Bucket": self.bucket, "Prefix": self.prefix}
+            if token: kw["ContinuationToken"] = token
+            resp = self.s3.list_objects_v2(**kw)
+            for o in resp.get("Contents", ()):
+                try: c = bytes.fromhex(o["Key"][len(self.prefix):])
+                except ValueError: continue
+                if len(c) == 32: out.append(c)
+            if not resp.get("IsTruncated"): return out
+            token = resp.get("NextContinuationToken")
 
 
 def open_blobs(spec, **cfg):

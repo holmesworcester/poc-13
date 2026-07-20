@@ -24,19 +24,27 @@ class _FakeS3:
         return {"Body": io.BytesIO(self.store[(Bucket, Key)])}
     def put_object(self, Bucket, Key, Body): self.store[(Bucket, Key)] = Body
     def delete_object(self, Bucket, Key): self.store.pop((Bucket, Key), None)
+    def list_objects_v2(self, Bucket, Prefix="", ContinuationToken=None):
+        keys = [k for (b, k) in self.store if b == Bucket and k.startswith(Prefix)]
+        return {"Contents": [{"Key": k} for k in keys], "IsTruncated": False}
 
 
 def _roundtrip(store):
     data = bytes(range(256)) * 40                     # ~10 KiB
+    other = data + b"!"
     cid = store.put(data)
     assert cid == H(data)                             # the id IS the content hash
     assert store.has(cid) and store.get(cid) == data
     assert store.put(data) == cid                     # idempotent: same bytes -> same object
     absent = H(b"never stored")
     assert not store.has(absent) and store.get(absent) is None
+    cid2 = store.put(other)                           # cids() enumerates the stored set (for GC)
+    assert set(store.cids()) == {cid, cid2}
     store.delete(cid)
     assert not store.has(cid) and store.get(cid) is None
-    store.delete(cid)                                 # deleting a missing blob is a no-op
+    assert set(store.cids()) == {cid2}
+    store.delete(cid); store.delete(cid2)             # deleting a missing blob is a no-op
+    assert store.cids() == []
 
 
 def test_mem_backend_roundtrip():

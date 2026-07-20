@@ -24,7 +24,7 @@ def test_tampered_frame_opens_to_nothing():
 def test_corrupt_inner_fact_misses_siblings_land():
     ws = workspace(b"acme", os.urandom(32), 1); wid = fact_id(ws)   # any workspace bytes: we test admission
     channel_id = b"\x07" * 32
-    msgs = [message(wid, channel_id, b"al", b"m%d" % i, i + 2) for i in range(4)]
+    msgs = [message(wid, channel_id, b"al", b"m%d" % i, i + 2, bytes(32)) for i in range(4)]
     items = [encode(m) for m in msgs]
     items[2] += b"\x00"                                        # a trailing byte: msgs[2] no longer decodes
     [(blob, _)] = frames.pack_counts(items)

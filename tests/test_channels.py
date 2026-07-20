@@ -87,7 +87,7 @@ def test_channel_projector_rejects_noncanonical_or_useless_channels():
     extra = fact(channel.TAG, *GENERAL.atoms,
                  Atom(PROVIDE, b"alias", WID, Exact(b"general"), b"smuggled"))
     extra = signed(extra, T0 + 4)
-    canonical_message = message(WID, GENERAL_ID, MEMBER.uid, b"hello", T0 + 5)
+    canonical_message = message(WID, GENERAL_ID, MEMBER.uid, b"hello", T0 + 5, bytes(32))
     forged_message = fact(b"content.message", *canonical_message.atoms,
                           Atom(PROVIDE, b"alias", WID, Exact(GENERAL_ID), b"smuggled"))
     forged_message = signed(forged_message, T0 + 5)

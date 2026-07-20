@@ -867,8 +867,25 @@ only. In the cloud the same seam is a direct S3/R2 GET, so bytes never proxy
 through compute; a shared bucket makes the peer leg a harmless no-op because
 `has(cid)` is already true. The content id is integrity and addressing, never
 authorization: the store re-hashes on read, so a wrong or substituted blob is a
-miss, and confidentiality — when wanted — comes from storing ciphertext with the
-key in the deletable fact, which the public descriptor/slice graph never sees.
+miss, and confidentiality comes from encryption (below), so the store holds only
+opaque ciphertext and can be a dumb public bucket.
+
+**Payloads are encrypted; the key rides the message.** The file is encrypted
+before Bao, so the descriptor root, the proofs, and the cids all commit to
+*ciphertext* — the blob store never sees plaintext. The cipher is a per-slice
+BLAKE3-XOF keystream (`crypto.stream_xor`): equal length, so the ciphertext keeps
+the exact Bao geometry, and keyed per slice index so no nonce and no seeking are
+needed. Integrity is not in the cipher (there is no per-slice tag) but in the
+signed Bao root the ciphertext authenticates against — a flipped ciphertext bit
+fails verification rather than silently flipping plaintext. The key is the parent
+message's `file_secret`: it lives *in the message fact*, not beside it, so
+(a) deleting the message shreds it — a cryptographic erase of the attachment
+bytes wherever they still sit — and (b) whatever confidentiality a later layer
+gives the message body covers the file key for free. `save` reads the key from
+the message, Bao-verifies each ciphertext slice against the root, then XORs it
+back to plaintext streaming to disk. The key is derived from the author's signer
+secret over the message content, so resending the same message is idempotent yet
+the key is not computable from the plaintext by anyone lacking that secret.
 
 The descriptor is member-signed. It Requires the parent message's `posted`
 Provide, its own signature key, and the workspace member keys; PROJECT rebuilds
@@ -890,29 +907,30 @@ descriptor and every slice-naming fact from residency, durable bytes, SQLite, an
 the sync register. The deletion fact is the durable replicated relationship;
 deleted facts are not tombstone leaves, and a laggard re-shipping an old
 attachment fact buys one admission that re-derives Suppressed and dies. The proof
-blobs themselves are reclaimed by lazy, reference-counted GC (a blob whose cid no
-longer appears in any resident slice Provide), which is best-effort and not
-security-critical: with ciphertext blobs the key lives only in the deleted fact,
-so the deletion shreds it and the bytes are inaccessible wherever they still sit,
-GC or no GC. (The current build purges the naming facts; blob GC is not yet
-wired — see `docs/cloud-deployment.md`.)
+blobs themselves are reclaimed by lazy, reference-counted GC — `content.file.gc`
+total-hydrates and deletes every stored cid no live slice names, the blob analog
+of SQLite `VACUUM`. It is best-effort and not security-critical: the deletion
+already shredded the message's `file_secret`, so a lingering ciphertext blob is
+already unreadable, GC or no GC. GC frees bytes; deletion is what makes them
+inaccessible.
 
-Attachment payloads sit on the same confidentiality boundary as message bodies:
-bytes are visible in the local fact store and sealed by the established-connection
-transport on the wire. The descriptor carries no encoding tag and needs none. A
-content-key family can replace the payload with ciphertext without changing the
-public descriptor/slice validation graph, because the Bao root and proofs commit
-to whatever bytes are carried; ciphertext authenticates against a ciphertext root
-exactly as cleartext does, and decryption is a save-time concern above the
-validation layer. A mode field inside the descriptor would only restate, in a
-place a peer could lie about, what the bytes already prove.
+This realizes what the descriptor graph was always shaped for: the payload is
+ciphertext and the public descriptor/slice validation graph is unchanged, because
+the Bao root and proofs commit to whatever bytes are carried — ciphertext
+authenticates against a ciphertext root exactly as cleartext would. The descriptor
+carries no encoding tag and needs none; a mode field would only restate, in a
+place a peer could lie about, what the bytes already prove. Decryption is a
+save-time concern strictly above validation. The key placement — in the message
+fact — is the whole design: it makes the file's confidentiality track the
+message's, so encrypting messages encrypts their files with no new machinery.
 
 - `channel` is replicated structural state whose fact id is the routing id and
   whose bounded UTF-8 name is only display data. It Requires its workspace,
   its detached signature, and the workspace member keys; any enrolled member
   may create one. A workspace bootstrap creates `general` through this same
   command path.
-- `message` carries workspace, channel, body, author member id, and its own
+- `message` carries workspace, channel, body, author member id, a per-message
+  `file_secret` (the key its attachments are encrypted under), and its own
   death key. It Requires the exact channel fact id, its signature key, and the
   workspace's member-key Provides. PROJECT rebuilds the canonical SHAPE and
   accepts only when the key blessed for the claimed author is one of the actual

@@ -78,7 +78,7 @@ def test_resident_present_and_absent():
 
 def test_every_match_path_returns_the_named_row_shape():
     """Asserted, validated, host, and reserved answers share one safe API."""
-    m = message(WID, b"g", b"al", b"hi", T0 + HOUR); mid = fact_id(m)
+    m = message(WID, b"g", b"al", b"hi", T0 + HOUR, bytes(32)); mid = fact_id(m)
     n = node(WS, WS_SIG, m)
     probe_provide = Atom(PROVIDE, b"row", b"contract", Exact(b"k"))
     probe_gather = Atom(GATHER, b"row", b"contract", Exact(b"k"))

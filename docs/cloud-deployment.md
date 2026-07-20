@@ -28,15 +28,26 @@ The content-addressed blob store landed as the seam this doc sketched:
   `--blobs <dir|s3://…>`, default `<db>.blobs/`). Receiver-side window is the only
   flow control; a shared R2 bucket makes the leg a no-op (everything already
   present). Bytes never ride the sync frames.
-- Tests: `tests/test_blobstore.py` (Mem/FS/S3 incl. a real-boto3+moto path and an
-  offline fake), plus the reshaped `test_files.py` / `test_file_pair.py`.
+- **Encryption (done).** The payload is encrypted before Bao under the parent
+  message's `file_secret`, so the root/proofs/cids all commit to ciphertext and
+  the blob store holds only opaque bytes. The cipher is a per-slice BLAKE3-XOF
+  keystream (`crypto.stream_xor`) — equal length (Bao geometry preserved), keyed
+  per index (no nonce/seek); integrity rides the signed Bao root, not a per-slice
+  tag. The key lives in the message fact (`content.message.file_secret`), derived
+  from the author's signer secret so resend is idempotent, so message deletion
+  shreds it and a future message-encryption layer covers the file key for free.
+  `save` reads the key, Bao-verifies each ciphertext slice, XORs back to plaintext.
+- **Blob GC (done).** `content.file.gc` total-hydrates and deletes every stored
+  cid no live slice names (the blob analog of `VACUUM`); `blobstore` backends grow
+  a `cids()` enumerator. Lazy and non-security-critical — deletion already shredded
+  the key, so a lingering ciphertext blob is already unreadable.
+- Tests: `tests/test_blobstore.py` (Mem/FS/S3 incl. a real-boto3+moto path, `cids()`,
+  and an offline fake), plus the reshaped `test_files.py` (ciphertext + shred + GC
+  cases) / `test_file_pair.py`.
 
-**Not yet wired:** blob GC. Deletion purges the naming facts; the proof blobs are
-left for a future reference-counted sweep (lazy, non-security-critical — with
-ciphertext blobs the deleted fact holds the only key). Encryption itself
-(ciphertext blobs + content-key family) is also still future; today blobs are
-cleartext Bao proofs and the sealed connection / disk are the confidentiality
-boundary, exactly as before.
+**Still future:** encrypting the *message body* itself (the file key already rides
+it, so that step encrypts attachments for free); wiring GC into the daemon on a
+schedule rather than an operator verb.
 
 Goal: one engine, two deployment contexts — local client and serverless cloud —
 with the smallest possible surface difference between them. The lever is the

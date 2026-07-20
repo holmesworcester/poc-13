@@ -32,12 +32,12 @@ def test_identity_and_admission():
     a2 = ts_atom(1, WID)
     # Canonical form is a function of the atom multiset: order- and dup-free.
     assert fact_id(fact(b"content.message", a1, a2)) == fact_id(fact(b"content.message", a2, a1, a2))
-    n, b = Node(ROOT), encode(message(WID, CH, MEMBER.uid, b"hi", 1))
+    n, b = Node(ROOT), encode(message(WID, CH, MEMBER.uid, b"hi", 1, bytes(32)))
     fid = n.admit(b)
-    assert fid and decode(b) == message(WID, CH, MEMBER.uid, b"hi", 1)
+    assert fid and decode(b) == message(WID, CH, MEMBER.uid, b"hi", 1, bytes(32))
     assert n.admit(b) == fid and len(n.facts) == 1            # idempotent admission
     assert n.admit(b[:-1]) is None and n.admit(b + b"\x00") is None   # strict decode
-    assert n.admit(encode(message(WID, CH, MEMBER.uid, b"other", 1)), expect=fid) is None  # checked load: miss
+    assert n.admit(encode(message(WID, CH, MEMBER.uid, b"other", 1, bytes(32))), expect=fid) is None  # checked load: miss
     n.run()
     assert n.admit(encode(fact(b"no.such", ts_atom(1)))) is not None
     n.run()

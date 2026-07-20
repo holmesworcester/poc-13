@@ -258,7 +258,7 @@ def test_deletion_closure_is_flat():
     message and a reaction on it from memory AND disk in one flat closure."""
     wid, mid, fid, root = (bytes([i]) * 32 for i in range(4))
     shapes = {                                         # every dead-key-bearing family
-        b"message":    message.message(wid, bytes([9]) * 32, bytes([8]) * 32, b"b", 1),
+        b"message":    message.message(wid, bytes([9]) * 32, bytes([8]) * 32, b"b", 1, bytes(32)),
         b"reaction":   reaction.reaction(wid, mid, bytes([8]) * 32, b":x:", 2),
         b"file":       file.file(wid, mid, fid, root, 0, 0, b"n", b"m", 3),
         b"file_slice": file_slice.file_slice(wid, mid, fid, root, 0, b"\x00" * 32, 4)}

@@ -162,7 +162,7 @@ def bench_query(n):
     t = time.time()
     for _ in range(R): rows = feed(n, WID, CHANS[0])
     report("feed() / provided() scan", (time.time() - t) / R * 1e3, "ms", 5.0)  # MEASURED 1.0ms
-    consumer = next(a for a in message(WID, CHANS[0], MEMBER.uid, b"x", 1).atoms
+    consumer = next(a for a in message(WID, CHANS[0], MEMBER.uid, b"x", 1, bytes(32)).atoms
                 if a.name == b"channel")                              # the channel REQUIRE
     t = time.time()
     for _ in range(R): n.matches(consumer)

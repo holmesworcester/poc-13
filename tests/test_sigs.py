@@ -136,9 +136,9 @@ def test_content_projectors_reject_forged_authorship():
     good = message.send(n, wid, cid, b"hi", 5); n.run()
     assert n.memo[good] == "Valid"                      # baseline: a real member message admits
 
-    forged = signed(message.message(wid, cid, uid, b"forged", 6), zsk, zpk, 6)
+    forged = signed(message.message(wid, cid, uid, b"forged", 6, bytes(32)), zsk, zpk, 6)
     assert n.memo[forged] == "Invalid"                  # author=founder but signed by a stranger key
-    stranger = signed(message.message(wid, cid, b"x" * 32, b"nope", 7), zsk, zpk, 7)
+    stranger = signed(message.message(wid, cid, b"x" * 32, b"nope", 7, bytes(32)), zsk, zpk, 7)
     assert n.memo[stranger] == "Invalid"                # stranger posting as their own non-member id
 
     react = signed(reaction.reaction(wid, good, uid, b":x:", 8), zsk, zpk, 8)

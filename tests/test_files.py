@@ -181,9 +181,65 @@ def test_message_deletion_physically_purges_descriptor_and_bao_slices():
     assert deletion_id in fresh.durable and all(fid not in fresh.facts for fid in killed)
 
 
+def test_attachment_blobs_are_ciphertext_and_deletion_shreds_the_key():
+    """The payload is encrypted under the parent message's file_secret: every
+    stored blob is ciphertext, save decrypts them back byte-for-byte, and deleting
+    the message shreds the key (a cryptographic erase of the attachment bytes)."""
+    import crypto
+    n, wid, channel_id = _node(); blobs = blobs_of(n)
+    with tempfile.TemporaryDirectory() as directory:
+        source = os.path.join(directory, "secret.bin")
+        payload = _write(source, file.SLICE_BYTES + 1000)
+        receipt = file.send(n, wid, channel_id, b"al", b"top secret", source, None, 2); n.run()
+
+        keys = [(o, a.value) for o, t, a in n.provided(b"file_secret", wid)]   # key in the message fact
+        assert len(keys) == 1 and keys[0][0] == receipt["message_id"] and len(keys[0][1]) == 32
+        secret = keys[0][1]
+
+        [rec] = file.files(n, wid)
+        cids = file._cids(n, rec["file_id"])
+        assert len(cids) == receipt["total_slices"] >= 2
+        for index, cid in cids.items():
+            cipher = file_slice.verified_bytes(blobs.get(cid), rec["root"], index, rec["blob_bytes"])
+            plain = payload[index * file.SLICE_BYTES:][:len(cipher)]
+            assert cipher != plain                                            # stored bytes are ciphertext
+            assert crypto.stream_xor(secret, index.to_bytes(8, "big"), cipher) == plain   # and decrypt back
+
+        target = os.path.join(directory, "out.bin")
+        file.save(n, wid, "1", target)
+        assert open(target, "rb").read() == payload                          # end-to-end decrypt on save
+
+        message_deletion.delete(n, wid, receipt["message_id"], 3); n.run()
+        assert n.provided(b"file_secret", wid) == []                         # deletion shreds the key
+
+
+def test_gc_reclaims_orphaned_blobs_but_keeps_live_ones():
+    """Blob GC is reference-counted and lazy: a deleted message's ciphertext blobs
+    linger (already unreadable — the key is shredded) until gc() sweeps the cids no
+    live slice names, and every referenced blob stays put and saveable."""
+    store, flushed = Store(), set(); n = Node(ROOT, store)
+    wid = workspace.create(n, b"acme", 1); n.run()
+    channel_id = channel.resolve(n, wid, "general"); flush(n, store, flushed)
+    blobs = blobs_of(n)
+    with tempfile.TemporaryDirectory() as directory:
+        keep = os.path.join(directory, "keep.bin"); keep_bytes = _write(keep, file.SLICE_BYTES + 5)
+        doomed = os.path.join(directory, "doomed.bin"); _write(doomed, file.SLICE_BYTES + 7)
+        rk = file.send(n, wid, channel_id, b"al", b"keep", keep, None, 2); n.run(); flush(n, store, flushed)
+        rd = file.send(n, wid, channel_id, b"al", b"doomed", doomed, None, 3); n.run(); flush(n, store, flushed)
+        assert len(blobs.cids()) == rk["total_slices"] + rd["total_slices"]
+
+        message_deletion.delete(n, wid, rd["message_id"], 4); n.run(); flush(n, store, flushed)
+        assert len(blobs.cids()) == rk["total_slices"] + rd["total_slices"]   # lazy: doomed blobs linger
+
+        result = file.gc(n)
+        assert result["removed"] == rd["total_slices"] and result["kept"] == rk["total_slices"]
+        assert len(blobs.cids()) == rk["total_slices"]                        # orphans gone, referenced kept
+
+        target = os.path.join(directory, "out.bin")                          # the kept file still saves
+        file.save(n, wid, rk["file_fact_id"].hex(), target)
+        assert open(target, "rb").read() == keep_bytes
+
+
 if __name__ == "__main__":
-    for test in (test_send_view_save_roundtrip_atomized_descriptor_and_cold_hydration,
-                 test_only_valid_bao_slices_count_and_incomplete_save_is_atomic,
-                 test_zero_byte_file_and_sparse_oversize_rejection,
-                 test_message_deletion_physically_purges_descriptor_and_bao_slices):
-        test(); print("ok ", test.__name__)
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn): fn(); print("ok ", name)

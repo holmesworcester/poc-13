@@ -67,6 +67,23 @@ def hkdf_sha256(ikm, salt, info):
     return hmac.new(prk, info + b"\x01", hashlib.sha256).digest()
 
 
+# --- BLAKE3-XOF keystream: equal-length, index-seekable stream encryption ---------
+# A keyed BLAKE3 extendable output is a pseudo-random stream; XORing it encrypts
+# and decrypts (its own inverse) without changing length, so ciphertext keeps the
+# exact byte geometry a Bao tree commits to. `info` names the position, so each
+# unit (a file slice index) draws an independent keystream from a fresh key — no
+# nonce and no seeking. Integrity is NOT here: it comes from the signed Bao root
+# the ciphertext authenticates against, so a flipped ciphertext bit fails
+# verification rather than silently flipping a plaintext bit.
+def stream_key(key32, info, length):
+    return _b3(info, key=key32).digest(length=length)
+
+
+def stream_xor(key32, info, data):
+    ks = stream_key(key32, info, len(data))
+    return (int.from_bytes(data, "big") ^ int.from_bytes(ks, "big")).to_bytes(len(data), "big")
+
+
 # --- XChaCha20-Poly1305 AEAD ------------------------------------------------------
 def aead_seal(key, nonce24, aad, pt):
     return _na.crypto_aead_xchacha20poly1305_ietf_encrypt(pt, aad, nonce24, key)

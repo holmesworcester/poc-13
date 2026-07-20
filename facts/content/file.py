@@ -1,11 +1,15 @@
 """facts/content/file.py — a message attachment descriptor and its user
 surface. Metadata is ordinary atom vocabulary rather than a nested record. The
-member-signed descriptor commits a BLAKE3 root; each content.file_slice carries
-a canonical Bao proof against it. Descriptor and slices directly carry the
-message death key, so semantic deletion physically purges the attachment."""
+member-signed descriptor commits a BLAKE3 root over the ENCRYPTED payload; each
+content.file_slice names a ciphertext Bao proof by cid. The file is encrypted
+under the parent message's `file_secret` (a per-slice BLAKE3 keystream), so the
+descriptor/slice graph commits to ciphertext and decryption is a save-time step
+above validation. Descriptor and slices carry the message death key, so semantic
+deletion purges the metadata and shreds the key that made the bytes readable."""
 import mimetypes, os, tempfile
 from blake3 import blake3
 import tinyp2p_bao
+import crypto
 from kernel import (Atom, Exact, H, PROVIDE, Out, REQUIRE, SELF, SUPPRESS_IF,
                     by, encode, fact, fact_id, frame, now, ts_atom, ts_of)
 from facts.auth import signature
@@ -127,22 +131,28 @@ def send(node, workspace_id, channel_id, author, body, path, mime_type=None, t=N
     author_id = next((owner for owner, _, atom in node.provided(b"key", workspace_id)
                       if atom.target == Exact(workspace_id) and atom.value == local[1]), None)
     if author_id is None: raise RuntimeError("local signer is not a workspace member")
-    message_fact = message.message(workspace_id, channel_id, author_id, body, t)
+    file_secret = message.file_secret(node, workspace_id, channel_id, body, t)  # rides the message fact
+    message_fact = message.message(workspace_id, channel_id, author_id, body, t, file_secret)
     message_id = fact_id(message_fact)
 
     blobs = blobs_of(node)
     with tempfile.TemporaryDirectory(prefix="tinyp2p-bao-") as directory:
+        cipher_path = os.path.join(directory, "cipher.bin")     # encrypt slice-by-slice, then Bao the
+        with open(source_path, "rb") as src, open(cipher_path, "wb") as dst:   # CIPHERTEXT — root,
+            for index in range(total_slices):                                  # proofs and cids all
+                dst.write(crypto.stream_xor(file_secret, index.to_bytes(8, "big"),  # commit to ciphertext
+                                            src.read(SLICE_BYTES)))
         outboard = os.path.join(directory, "source.obao")
-        root = bytes(tinyp2p_bao.prepare_file(source_path, outboard))
+        root = bytes(tinyp2p_bao.prepare_file(cipher_path, outboard))
         file_id = file_id_for(workspace_id, message_id, root, filename, mime_bytes)
         cids = []
         for index in range(total_slices):
             start = index * SLICE_BYTES
             count = min(SLICE_BYTES, read_bytes - start)
-            proof = bytes(tinyp2p_bao.extract_slice(source_path, outboard, start, count))
+            proof = bytes(tinyp2p_bao.extract_slice(cipher_path, outboard, start, count))
             verified = file_slice.verified_bytes(proof, root, index, read_bytes, SLICE_BYTES)
             if len(verified) != count: raise RuntimeError("Bao returned a short slice")
-            cids.append(blobs.put(proof))          # the proof leaves the fact graph: a content blob now
+            cids.append(blobs.put(proof))          # the ciphertext proof leaves the fact graph: a blob
         if os.path.getsize(source_path) != declared_size:
             raise ValueError("file size changed while proving")
 
@@ -150,7 +160,7 @@ def send(node, workspace_id, channel_id, author, body, path, mime_type=None, t=N
                                total_slices, filename, mime_bytes, t)
         admitted_message = signature.signed_admit(
             node, workspace_id,
-            lambda member_id: message.message(workspace_id, channel_id, member_id, body, t), t)
+            lambda member_id: message.message(workspace_id, channel_id, member_id, body, t, file_secret), t)
         if admitted_message != message_id:
             raise RuntimeError("local signer changed while authoring attachment")
         descriptor_id = signature.signed_admit(
@@ -178,15 +188,19 @@ def save(node, workspace_id, selector, output_path):
         raise ValueError("file incomplete: have %d/%d slices" %
                          (record["slices_received"], record["total_slices"]))
     proofs = _received(node, blobs_of(node), record)
+    file_secret = _secret_for(node, record)
+    if file_secret is None: raise ValueError("file key unavailable (message not resident?)")
     target = os.path.abspath(os.fspath(output_path)); directory = os.path.dirname(target) or "."
     fd, temporary = tempfile.mkstemp(prefix=".tinyp2p-file-", dir=directory)
     try:
-        written, hasher = 0, blake3()
+        written, hasher = 0, blake3()          # hash the CIPHERTEXT against the signed Bao root...
         with os.fdopen(fd, "wb") as output:
             for index in range(record["total_slices"]):
-                data = file_slice.verified_bytes(proofs[index], record["root"], index,
-                                                 record["blob_bytes"], record["slice_bytes"])
-                output.write(data); hasher.update(data); written += len(data)
+                cipher = file_slice.verified_bytes(proofs[index], record["root"], index,
+                                                   record["blob_bytes"], record["slice_bytes"])
+                hasher.update(cipher)
+                plain = crypto.stream_xor(file_secret, index.to_bytes(8, "big"), cipher)   # ...then decrypt
+                output.write(plain); written += len(plain)
             output.flush(); os.fsync(output.fileno())
         if written != record["blob_bytes"] or hasher.digest() != record["root"]:
             raise ValueError("file root or length mismatch")
@@ -219,6 +233,11 @@ def _received(node, blobs, record):      # index -> proof, for slices whose blob
         except Exception: continue
         proofs[index] = proof
     return proofs
+
+def _secret_for(node, record):           # the message's file key, published by content.message; save
+    hydrate.demand(node, b"file_secret", record["workspace_id"])   # decrypts each verified ciphertext
+    return next((a.value for o, t, a in node.provided(b"file_secret", record["workspace_id"])
+                 if o == record["message_id"]), None)
 
 def wanted(node, blobs, limit=0):        # advertised ∧ ¬present: the derived fetch want, no managed
     out, seen = [], set()                # list — a blob's arrival flips has(cid) and it drops out
@@ -277,6 +296,22 @@ def for_message(node, workspace_id, message_id):
     return [item for item in files(node, workspace_id) if item["message_id"] == message_id]
 
 
+def gc(node):
+    """Reclaim orphaned attachment blobs: total-hydrate so every live slice is
+    resident, then delete each stored blob whose cid no longer names a validated
+    slice. Best-effort and NOT security-critical — a deleted message already
+    shredded its file key (content.message.file_secret), so a lingering ciphertext
+    blob is already unreadable; this only frees bytes, the blob analog of VACUUM."""
+    hydrate.demand(node)                     # total demand: every durable slice becomes resident
+    blobs = blobs_of(node)
+    live = {a.value for (name, _scope), rows in node.clean.items() if name == b"slice"
+            for _owner, _t, a in rows}
+    removed = 0
+    for cid in blobs.cids():
+        if cid not in live: blobs.delete(cid); removed += 1
+    return {"removed": removed, "kept": len(live)}
+
+
 # CLI — dotted string surface for send, progress, and atomic verified export.
 def _send_cli(n, wid, channel, author, body, path, mime_type=None, t=None):
     from facts.content import channel as channels
@@ -313,4 +348,8 @@ def _save_cli(n, wid, selector, output_path):
                       "output_path: " + receipt["output_path"]))
 
 
-CLI = {"send": _send_cli, "list": _list_cli, "save": _save_cli}
+def _gc_cli(n):
+    r = gc(n); return "reclaimed %d blob(s); %d still referenced" % (r["removed"], r["kept"])
+
+
+CLI = {"send": _send_cli, "list": _list_cli, "save": _save_cli, "gc": _gc_cli}

@@ -23,8 +23,11 @@ def member_context(wid, root_sk, root_pk, name=b"al", t=100):
     return SimpleNamespace(uid=uid, sk=msk, pk=mpk, facts=facts)
 
 
-def signed_message(member, wid, channel, body, t):
-    m = message(wid, channel, member.uid, body, t)
+def signed_message(member, wid, channel, body, t, file_secret=None):
+    if file_secret is None:                        # deterministic per message: fixtures stay reproducible
+        file_secret = _c.H(_c.frame(b"tinyp2p.fixture.file_secret", wid, channel, body,
+                                    t.to_bytes(8, "big")))
+    m = message(wid, channel, member.uid, body, t, file_secret)
     mid = fact_id(m)
     return m, signature(wid, member.pk, mid, _c.ed25519_sign(member.sk, mid), t)
 
