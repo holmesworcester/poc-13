@@ -261,7 +261,7 @@ def test_deletion_closure_is_flat():
         b"message":    message.message(wid, bytes([9]) * 32, bytes([8]) * 32, b"b", 1),
         b"reaction":   reaction.reaction(wid, mid, bytes([8]) * 32, b":x:", 2),
         b"file":       file.file(wid, mid, fid, root, 0, 0, b"n", b"m", 3),
-        b"file_slice": file_slice.file_slice(wid, mid, fid, root, 0, b"\x00" * 8, 4)}
+        b"file_slice": file_slice.file_slice(wid, mid, fid, root, 0, b"\x00" * 32, 4)}
     for name, shape in shapes.items():
         dead = [a for a in shape.atoms if a.relationship == SUPPRESS_IF and a.name == b"dead"]
         assert len(dead) == 1, name

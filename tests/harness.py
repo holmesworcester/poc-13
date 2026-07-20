@@ -23,6 +23,8 @@ def reboot(node, seed=0):
     bs = list(node.durable.values()); random.Random(seed).shuffle(bs)
     for b in bs: s.add(b)
     m = Node(node.root, s)
+    if getattr(node, "blobs", None) is not None:
+        m.blobs = node.blobs               # blobs are durable infra (disk/R2): they outlive a reboot
     hydrate.demand(m)
     return m
 

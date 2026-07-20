@@ -7,12 +7,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(HERE)
 sys.path[:0] = [ROOT_DIR, HERE, os.path.join(ROOT_DIR, "bin")]
 
-from kernel import Atom, Exact, PROVIDE, SUPPRESS_IF, Node, Store, encode, fact
+from kernel import Atom, Exact, H, PROVIDE, SUPPRESS_IF, Node, Store, encode, fact
 from facts import ROOT
 from facts.auth import signature, workspace
 from facts.content import channel, file, file_slice, message, message_deletion
 from facts.store import hydrate
 from facts.sync import index as sync_index
+from blobstore import blobs_of
 from harness import reboot
 from runtime import flush
 
@@ -83,8 +84,12 @@ def test_send_view_save_roundtrip_atomized_descriptor_and_cold_hydration():
         assert open(target, "rb").read() == payload
 
 
-def test_only_valid_bao_slices_count_and_incomplete_save_is_atomic():
-    n, wid, channel_id = _node()
+def test_only_present_verified_blobs_count_and_incomplete_save_is_atomic():
+    """The new split: a slice fact NAMES a proof (by cid) and validates on shape
+    alone; a slice counts as received only once its blob is present AND Bao-
+    verifies against the root. So a corrupt blob and an out-of-range index both
+    fail to complete the file, and an incomplete save writes nothing."""
+    n, wid, channel_id = _node(); blobs = blobs_of(n)
     with tempfile.TemporaryDirectory() as directory:
         source = os.path.join(directory, "partial.bin")
         _write(source, file.SLICE_BYTES + 17); root, proofs = _proofs(source)
@@ -93,23 +98,28 @@ def test_only_valid_bao_slices_count_and_incomplete_save_is_atomic():
                                    b"application/octet-stream")
         descriptor = file.file(wid, message_id, file_id, root, os.path.getsize(source), 2,
                                b"partial.bin", b"application/octet-stream", 2)
-        first = file_slice.file_slice(wid, message_id, file_id, root, 0, proofs[0], 2)
+        blobs.put(proofs[0])                            # slice 0's blob is present and valid
+        first = file_slice.file_slice(wid, message_id, file_id, root, 0, H(proofs[0]), 2)
         descriptor_id = signature.signed_admit(n, wid, lambda _member_id: descriptor, 2)
-        assert descriptor_id is not None and n.admit(encode(first)) is not None
+        first_id = n.admit(encode(first))
+        assert descriptor_id is not None and first_id is not None
         n.run()
+        assert n.memo[first_id] == "Valid"              # the naming fact validates on shape
 
         malformed = fact(file_slice.TAG, *first.atoms,
                          Atom(PROVIDE, b"extra", file_id, Exact(b"extra")))
         malformed_id = n.admit(encode(malformed), checked=True); n.run()
-        assert n.memo[malformed_id] == "Invalid"       # PROJECT rechecks canonical SHAPE
+        assert n.memo[malformed_id] == "Invalid"        # PROJECT rechecks canonical SHAPE
 
         corrupted = bytearray(proofs[1]); corrupted[-1] ^= 1
-        wrong = file_slice.file_slice(wid, message_id, file_id, root, 1, bytes(corrupted), 3)
-        extra = file_slice.file_slice(wid, message_id, file_id, root, 2, proofs[1], 3)
+        blobs.put(bytes(corrupted))                      # slice 1's blob is present but corrupt
+        wrong = file_slice.file_slice(wid, message_id, file_id, root, 1, H(bytes(corrupted)), 3)
+        extra = file_slice.file_slice(wid, message_id, file_id, root, 2, H(proofs[1]), 3)
         wrong_id = n.admit(encode(wrong)); extra_id = n.admit(encode(extra)); n.run()
-        assert n.memo[wrong_id] == "Invalid" and n.memo[extra_id] == "Invalid"
+        assert n.memo[wrong_id] == "Valid"               # names a blob: valid, but the blob won't verify
+        assert n.memo[extra_id] == "Invalid"             # index 2 past a 2-slice descriptor: inert
         [row] = file.files(n, wid)
-        assert row["slices_received"] == 1 and row["total_slices"] == 2
+        assert row["slices_received"] == 1 and row["total_slices"] == 2   # corrupt blob does not count
 
         target = os.path.join(directory, "must-not-exist.bin")
         try:

@@ -10,6 +10,7 @@ from kernel import (Atom, Exact, H, PROVIDE, Out, REQUIRE, SELF, SUPPRESS_IF,
                     by, encode, fact, fact_id, frame, now, ts_atom, ts_of)
 from facts.auth import signature
 from facts.store import hydrate
+from blobstore import blobs_of
 
 TAG = b"content.file"
 FILE_ID_DOMAIN = b"tinyp2p.file.id"
@@ -129,18 +130,19 @@ def send(node, workspace_id, channel_id, author, body, path, mime_type=None, t=N
     message_fact = message.message(workspace_id, channel_id, author_id, body, t)
     message_id = fact_id(message_fact)
 
-    with tempfile.TemporaryDirectory(prefix="tinyp2p-bao-") as directory, \
-            tempfile.TemporaryFile() as spool:
+    blobs = blobs_of(node)
+    with tempfile.TemporaryDirectory(prefix="tinyp2p-bao-") as directory:
         outboard = os.path.join(directory, "source.obao")
         root = bytes(tinyp2p_bao.prepare_file(source_path, outboard))
         file_id = file_id_for(workspace_id, message_id, root, filename, mime_bytes)
+        cids = []
         for index in range(total_slices):
             start = index * SLICE_BYTES
             count = min(SLICE_BYTES, read_bytes - start)
             proof = bytes(tinyp2p_bao.extract_slice(source_path, outboard, start, count))
             verified = file_slice.verified_bytes(proof, root, index, read_bytes, SLICE_BYTES)
             if len(verified) != count: raise RuntimeError("Bao returned a short slice")
-            spool.write(len(proof).to_bytes(4, "big")); spool.write(proof)
+            cids.append(blobs.put(proof))          # the proof leaves the fact graph: a content blob now
         if os.path.getsize(source_path) != declared_size:
             raise ValueError("file size changed while proving")
 
@@ -154,13 +156,9 @@ def send(node, workspace_id, channel_id, author, body, path, mime_type=None, t=N
         descriptor_id = signature.signed_admit(
             node, workspace_id, lambda _member_id: descriptor_fact, t)
 
-        slice_ids = []; spool.seek(0)
-        for index in range(total_slices):
-            raw_len = spool.read(4)
-            if len(raw_len) != 4: raise RuntimeError("temporary Bao spool is truncated")
-            size = int.from_bytes(raw_len, "big"); proof = spool.read(size)
-            if len(proof) != size: raise RuntimeError("temporary Bao spool is truncated")
-            item = file_slice.file_slice(workspace_id, message_id, file_id, root, index, proof, t)
+        slice_ids = []
+        for index, cid in enumerate(cids):
+            item = file_slice.file_slice(workspace_id, message_id, file_id, root, index, cid, t)
             fid = node.admit(encode(item))
             if fid is None: raise RuntimeError("locally authored file slice failed admission")
             slice_ids.append(fid)
@@ -179,7 +177,7 @@ def save(node, workspace_id, selector, output_path):
     if record["slices_received"] != record["total_slices"]:
         raise ValueError("file incomplete: have %d/%d slices" %
                          (record["slices_received"], record["total_slices"]))
-    proofs = _slices(node, record["file_id"])
+    proofs = _received(node, blobs_of(node), record)
     target = os.path.abspath(os.fspath(output_path)); directory = os.path.dirname(target) or "."
     fd, temporary = tempfile.mkstemp(prefix=".tinyp2p-file-", dir=directory)
     try:
@@ -201,12 +199,36 @@ def save(node, workspace_id, selector, output_path):
             "bytes_written": record["blob_bytes"], "output_path": target}
 
 
-# QUERIES — join only promoted descriptor atoms; count unique validated slices.
-def _slices(node, file_id):
+# QUERIES — join promoted descriptor atoms; count slices whose blob is present.
+def _cids(node, file_id):                # index -> the blob cid each validated slice fact names
     hydrate.demand(node, b"slice", file_id)
     out = {}
     for owner, t, atom in sorted(node.provided(b"slice", file_id), key=lambda row: (row[1], row[0])):
         out.setdefault(int.from_bytes(atom.target[1], "big"), atom.value)
+    return out
+
+def _received(node, blobs, record):      # index -> proof, for slices whose blob is present AND
+    from facts.content import file_slice  # Bao-verifies against the root: only valid slices count,
+    proofs = {}                           # the check that used to live in the slice projector
+    for index, cid in _cids(node, record["file_id"]).items():
+        proof = blobs.get(cid)
+        if proof is None: continue
+        try:
+            file_slice.verified_bytes(proof, record["root"], index,
+                                      record["blob_bytes"], record["slice_bytes"])
+        except Exception: continue
+        proofs[index] = proof
+    return proofs
+
+def wanted(node, blobs, limit=0):        # advertised ∧ ¬present: the derived fetch want, no managed
+    out, seen = [], set()                # list — a blob's arrival flips has(cid) and it drops out
+    for (name, scope), rows in node.clean.items():
+        if name != b"slice": continue
+        for owner, t, atom in rows:
+            cid = atom.value
+            if cid in seen or blobs.has(cid): continue
+            seen.add(cid); out.append(cid)
+            if limit and len(out) >= limit: return out
     return out
 
 
@@ -228,13 +250,14 @@ def _descriptor(node, owner, workspace_id, message_id, file_id):
 
 def files(node, workspace_id, limit=0):
     hydrate.demand(node, b"file", workspace_id)
+    blobs = blobs_of(node)
     records = []
     for owner, t, atom in sorted(node.provided(b"file", workspace_id), key=lambda row: (row[1], row[0])):
         item = _descriptor(node, owner, workspace_id, atom.target[1], atom.value)
         if item is None: continue
-        proofs = _slices(node, item["file_id"])
-        item.update(file_fact_id=owner, created_at=t, slices_received=len(proofs),
-                    complete=len(proofs) == item["total_slices"])
+        received = _received(node, blobs, item)
+        item.update(file_fact_id=owner, created_at=t, slices_received=len(received),
+                    complete=len(received) == item["total_slices"])
         records.append(item)
     return records[:limit] if limit else records
 

@@ -34,12 +34,14 @@ so a reconnect re-ships (the connection id outlives the socket)."""
 import errno, os, select, signal, socket, sys, time
 BIN = os.path.dirname(os.path.abspath(__file__))
 sys.path[:0] = [BIN, os.path.dirname(BIN)]
-from kernel import Node, Store, WireOrigin, _rd, frame, unframe
+from kernel import Node, Store, WireOrigin, H, _rd, frame, unframe
 from facts import ROOT
 from facts.sync import cadence
 from facts.auth import local_signer_secret, endpoint
 from facts.connection import request, connection as conn, frame as frames
-from runtime import cycle, outbox, pump, next_wake, flush, BOUND
+from facts.content import file as filemod
+from blobstore import open_blobs
+from runtime import cycle, outbox, pump, next_wake, flush, TTLSet, BOUND
 
 OUTCAP = 32 << 20                        # per-address outbox byte cap: overflow parks (healed by re-descend).
                                          # Larger = fewer catch-up round-trips (each re-descend re-fingerprints),
@@ -47,7 +49,9 @@ OUTCAP = 32 << 20                        # per-address outbox byte cap: overflow
                                          # bytearray drained by offset, so a big cap stays O(1)-amortized.
 CADENCE = 0.5                            # s between redials of an unanswered request / next_wake floor
 KNOWN_PEER_CADENCE = 2.0                 # s between redials of an answered anchor whose session is down
-BARE, SEALED = 0, 1                      # wire discriminators
+BARE, SEALED, BLOBREQ, BLOBRESP = 0, 1, 2, 3   # wire discriminators
+BLOB_WINDOW = 32                         # cids asked per peer per round — the ONLY blob flow control
+BLOB_SERVE = 8                           # blobs answered per request: bounds one response burst
 now_ms = lambda: int(time.time() * 1000)
 now_s = lambda: int(time.time())         # fact-ts unit (kernel now())
 
@@ -106,11 +110,13 @@ def messages(src):                       # yield (kind, body) for each complete 
         if w: yield w[0], w[1:]
 
 def main(db, *argv):
-    listen, it = None, iter(argv)
+    listen, blobs_spec, it = None, None, iter(argv)
     for a in it:
         if a == "--listen": listen = next(it)
+        elif a == "--blobs": blobs_spec = next(it)   # dir path, or s3://bucket/prefix (R2/S3)
         else: sys.exit(f"unknown arg: {a}")
     store = Store(db); node = Node(ROOT, store)      # cold: residency is demanded, never loaded
+    node.blobs = open_blobs(blobs_spec if blobs_spec is not None else db + ".blobs")
     flushed = set(node.durable)
     if not local_signer_secret.current(node): local_signer_secret.keygen(node, int(time.time()))
     if not endpoint.current(node): endpoint.keygen(node, int(time.time()))
@@ -124,6 +130,9 @@ def main(db, *argv):
         tsock = socket.create_server((h, int(pt))); tsock.setblocking(False)
     links, inbound = {}, []              # links: addr -> outbound socket; inbound: read sources
     redial = {}                                       # redial: (addr, request id) -> last dial
+    requested = TTLSet()                              # cid -> expiry: paces blob re-asks (heal loss after the TTL,
+                                                      # never flood every loop). Derived want re-fills it; a stored
+                                                      # blob drops out of `wanted` so it is never re-asked
     to_ship = set()                                   # flushed senders awaiting their reap
     sent = {}                                         # cid -> TTLSet (runtime.SENT_TTL < the anchor period): a shipped fact by id
                                                       # AND a sync compare by content hash (both 32-byte digests). The
@@ -177,6 +186,10 @@ def main(db, *argv):
                     if kind == BARE:                  # a handshake fact: admit now (idempotent), react after
                         rid = node.admit(body, origin=WireOrigin())
                         if rid and node.facts[rid].type_tag == request.TAG: arrived.append(rid)
+                    elif kind == BLOBREQ:             # peer wants blobs: answer the ones we hold, from the store
+                        _serve_blobs(node, body, links)
+                    elif kind == BLOBRESP:            # peer sent blobs: verify + store; arrival suppresses the want
+                        _recv_blobs(node, body)
                     else:
                         opened = _open_frame(node, body)   # a sealed frame -> (authenticated cid, inner facts)
                         if opened:
@@ -227,6 +240,15 @@ def main(db, *argv):
                 for _ep, _addr, cid, _who in conn.peers(node):     # a live connection: arm its periodic sync cadence
                     cadence.arm(node, cid)                         # idempotent — the sole round-opener (rounds are
                                                                    # facts, not a daemon reaction)
+            requested.now = now_ms()                               # BLOB LEG: derived want (advertised ∧ ¬present),
+            fresh = [c for c in filemod.wanted(node, node.blobs, BLOB_WINDOW) if c not in requested]
+            for c in fresh: requested.add(c)                       # request each fresh cid from every live peer
+            for _ep, _addr, cid, _who in (conn.peers(node) if fresh else ()):   # (multisource — first answer wins,
+                r = conn.route(node, cid)                                       # the rest drop out of `wanted` next
+                if not r: continue                                             # round). Bytes never ride the sync
+                addr2, secret = r                                              # frames: their own sealed messages.
+                enqueue(link(links, addr2.decode()), BLOBREQ,
+                        frames.seal(frame(*fresh), cid, secret, os.urandom(24))); work = True
             for addr, p in links.items():
                 if p["s"] and pending(p) and p["s"] in w:
                     try: work |= drain(p) > 0
@@ -239,6 +261,35 @@ def main(db, *argv):
         for p in links.values():
             if p["s"]: p["s"].close()
         for i in inbound: i["s"].close()
+
+def _serve_blobs(node, body, links):     # a BLOBREQ (sealed list of cids) -> a BLOBRESP with the ones we hold.
+    cid = frames.frame_cid(body)         # sealed under the same session secret as the sync frames; the store is
+    r = conn.route(node, cid) if cid else None   # dumb — it just answers content-addressed reads.
+    if not r: return
+    addr, secret = r
+    blob = frames.open_frame(body, secret)
+    if blob is None: return
+    try: cids = unframe(blob)
+    except Exception: return
+    items = []
+    for c in cids[:BLOB_SERVE]:
+        data = node.blobs.get(c)
+        if data is not None: items += [c, data]
+    if items:
+        enqueue(link(links, addr.decode()), BLOBRESP,
+                frames.seal(frame(*items), cid, secret, os.urandom(24)))
+
+def _recv_blobs(node, body):             # a BLOBRESP (sealed cid,bytes pairs) -> verify each and store it.
+    cid = frames.frame_cid(body)
+    r = conn.route(node, cid) if cid else None
+    if not r: return
+    blob = frames.open_frame(body, r[1])
+    if blob is None: return
+    try: items = unframe(blob)
+    except Exception: return
+    for i in range(0, len(items) - 1, 2):
+        c, data = items[i], items[i + 1]
+        if H(data) == c: node.blobs.put(data)    # content-addressed: a wrong blob is a miss, never wrong bytes
 
 def _open_frame(node, body):             # a sealed data frame -> its inner fact bytes (opened by connection id)
     cid = frames.frame_cid(body)         # the daemon opens via a family query; it holds no sync policy

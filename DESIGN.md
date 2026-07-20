@@ -825,27 +825,50 @@ overhead during bulk catch-up while preserving per-inner admission checks.
 `retention_policy` (the retention window is an ordinary Provide;
 last-write-wins is a read-side fold).
 
-**Attachments are facts, not a second blob store.** `content.file` is the
-message-attached descriptor. Content instance id, BLAKE3 root, byte and slice
+**Attachment metadata is facts; attachment bytes are blobs.** `content.file` is
+the message-attached descriptor. Content instance id, BLAKE3 root, byte and slice
 geometry, filename, and MIME are separate named atoms; there is no
-family-specific metadata record inside an atom value. `content.file_slice`
-carries one indexed canonical Bao slice encoding: the requested bytes plus the
-authentication path that proves them against the descriptor root. The
-dependency arrows point only toward metadata:
+family-specific metadata record inside an atom value. `content.file_slice` names
+one slice by the **content id of its Bao proof** — `cid = H(proof)` — rather than
+carrying the ~205 KiB proof itself; the proof bytes are a **blob** in a
+content-addressed store (`blobstore.py`: filesystem locally, S3/R2 in the cloud),
+pulled out-of-line and Bao-verified against the descriptor root at fetch/save
+time. So the slice fact is tiny and rides ordinary sync (a peer learns which cid
+to fetch), while the bytes ride a separate content-addressed fetch that never
+enters the reconciliation treap, the SQLite atom relation, or the decoded-fact
+cache. The dependency arrows still point only toward metadata:
 
 ```
-Bao slice -> descriptor -> message
+file_slice (names cid) -> descriptor -> message        proof(cid) lives in the blob store
 ```
 
 The message never Requires its descriptor or slices, so its dependency closure
-does not drag attachment bytes. Each requested range is at most 256 KiB and a
-descriptor may name at most 10 GiB. A slice's intrinsic gate bounds its index
-and proof bytes. Its projector obtains root, length, slice count, width, and
-message binding from one validated descriptor owner, then uses the official
-Bao format to authenticate the range. Only projected proof Provides count toward
-download progress. Save authenticates every proof again, streams the extracted
-bytes through BLAKE3, checks root and total length, fsyncs a sibling temporary,
-and atomically replaces its output path.
+does not drag attachment bytes. Each proof covers at most 256 KiB of payload and
+a descriptor may name at most 10 GiB. A slice's intrinsic gate fixes its index
+and cid widths; its projector binds the cid to one consistent, member-signed
+descriptor (root, length, slice count, width) but does not verify the absent
+proof — validity of the naming fact is shape only. A slice counts as **received**
+only once its blob is present *and* its proof Bao-verifies against the root, the
+check that used to live in the projector, now applied where the bytes are
+(`file._received`). Save re-verifies every proof, streams the extracted bytes
+through BLAKE3, checks root and total length, fsyncs a sibling temporary, and
+atomically replaces its output path.
+
+**The blob fetch is a separate plane.** A node's derived want is
+`advertised(cid) ∧ ¬present(cid)` — advertised by a validated slice Provide,
+present by `blobstore.has(cid)` — with no managed want-list: a blob's arrival
+flips `has` and it drops out of the want. In the daemon this is a small leg over
+the sealed connection (`BLOBREQ`/`BLOBRESP` discriminators, sealed with the same
+session secret as sync frames): a receiver asks each live peer for a bounded
+window of wanted cids, any peer answers from its dumb store, and an arriving blob
+suppresses the outstanding asks for that cid (poc-7's received-suppresses-want,
+the bytes being the suppressor). Flow control is receiver-side fetch concurrency
+only. In the cloud the same seam is a direct S3/R2 GET, so bytes never proxy
+through compute; a shared bucket makes the peer leg a harmless no-op because
+`has(cid)` is already true. The content id is integrity and addressing, never
+authorization: the store re-hashes on read, so a wrong or substituted blob is a
+miss, and confidentiality — when wanted — comes from storing ciphertext with the
+key in the deletable fact, which the public descriptor/slice graph never sees.
 
 The descriptor is member-signed. It Requires the parent message's `posted`
 Provide, its own signature key, and the workspace member keys; PROJECT rebuilds
@@ -862,11 +885,17 @@ or depends on host files. The dependency is pinned because upstream describes
 Bao as beta cryptographic software that has not been formally audited.
 
 Every descriptor and slice directly carries `SuppressIf` for the parent
-message's `dead` key. A valid message deletion therefore terminally purges the whole attachment
-from residency, durable bytes, SQLite, and the sync register. The deletion fact
-is the durable replicated relationship; deleted bytes are not tombstone leaves,
-and a laggard re-shipping an old attachment fact buys one admission that
-re-derives Suppressed and dies.
+message's `dead` key. A valid message deletion therefore terminally purges the
+descriptor and every slice-naming fact from residency, durable bytes, SQLite, and
+the sync register. The deletion fact is the durable replicated relationship;
+deleted facts are not tombstone leaves, and a laggard re-shipping an old
+attachment fact buys one admission that re-derives Suppressed and dies. The proof
+blobs themselves are reclaimed by lazy, reference-counted GC (a blob whose cid no
+longer appears in any resident slice Provide), which is best-effort and not
+security-critical: with ciphertext blobs the key lives only in the deleted fact,
+so the deletion shreds it and the bytes are inaccessible wherever they still sit,
+GC or no GC. (The current build purges the naming facts; blob GC is not yet
+wired — see `docs/cloud-deployment.md`.)
 
 Attachment payloads sit on the same confidentiality boundary as message bodies:
 bytes are visible in the local fact store and sealed by the established-connection
